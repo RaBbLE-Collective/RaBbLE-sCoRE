@@ -56,6 +56,25 @@ Events:
 - [x] CONTEXT.md handoff layer added to all work areas
 - [x] Episode 1 Echo tagged `echo-1.0`
 
+### Episode 2 — sCoRE Live Session `[COMPLETE]`
+
+**Branch:** `episode-2` | **Tag:** `echo-2.0`
+**Goal:** sCoRE has identity. RaBbLE shell is the user-facing interface. Dispatch isolation fixed.
+
+Events:
+- [x] `CLAUDE.md` — sCoRE identity injected via `@agents/score.md`
+- [x] `.claude/settings.json` — `Agent(*)` added to deny list; sCoRE cannot spawn subagents
+- [x] Dispatch fixed — agent sessions run from `mktemp -d`, bypassing project settings.json
+- [x] Dispatch — startup queue drain added; pre-existing pending tasks processed on restart
+- [x] `scripts/rabble-shell.sh` — RaBbLE interactive shell; loading phase, spinners, dispatch notifications
+- [x] `scripts/status.sh` — system health check
+- [x] Learned: project settings.json applies to ALL sessions from REPO_ROOT, not just sCoRE
+- [x] Learned: Agent tool spawns subagents that inherit CLAUDE.md — must be blocked for sCoRE
+- [x] Learned: shell entity is RaBbLE (not sCoRE); sCoRE is the internal engine
+- [x] Learned: pre-warming during load phase absorbs cold start, first user turn is fast
+- [x] `memory/patterns/agent-isolation.md` — isolation lesson documented
+- [x] Episode 2 Echo tagged `echo-2.0`
+
 ---
 
 ## Revision History
