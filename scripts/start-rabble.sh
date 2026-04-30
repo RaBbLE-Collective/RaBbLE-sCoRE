@@ -20,7 +20,7 @@ tmux new-session -d -s rabble-dispatch -c "$REPO_ROOT" \
 
 echo "[sCoRE] Starting sCoRE orchestrator..."
 tmux new-session -d -s rabble-score -c "$REPO_ROOT" \
-  "bash scripts/hooks/session-start.sh && claude --dangerously-skip-permissions" 2>/dev/null || \
+  "bash scripts/rabble-shell.sh" 2>/dev/null || \
   echo "[sCoRE] rabble-score already running"
 
 echo ""
