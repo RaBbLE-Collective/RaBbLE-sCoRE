@@ -4,7 +4,8 @@
     "deny": [
       "Bash(*)",
       "WebSearch(*)",
-      "WebFetch(*)"
+      "WebFetch(*)",
+      "Agent(*)"
     ]
   },
   "env": {},
@@ -15,7 +16,16 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo '[sCoRE] Bash blocked — delegate to rabble-execution' >&2 && exit 1"
+            "command": "echo '[sCoRE] Bash blocked — write a task file to tasks/pending/ instead' >&2 && exit 1"
+          }
+        ]
+      },
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '[sCoRE] Agent tool blocked — write a task file to tasks/pending/ instead' >&2 && exit 1"
           }
         ]
       }
