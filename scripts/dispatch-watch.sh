@@ -22,20 +22,36 @@ inotifywait -m -e close_write --format '%f' "$PENDING" | while read -r filename;
     continue
   fi
 
-  session="rabble-$agent"
-  echo "[dispatch] Routing $filename → $session"
+  agent_identity="$REPO_ROOT/agents/$agent.md"
+  task_id=$(basename "$filename" .md)
+  result_file="$REPO_ROOT/tasks/done/${task_id}-result.md"
+  archive_dest="$REPO_ROOT/tasks/archive/$filename"
+  session="rabble-${agent}-${task_id}"
+
+  echo "[dispatch] Routing $filename → $agent"
 
   mv "$task_file" "$ACTIVE/$filename"
 
-  if ! tmux has-session -t "$session" 2>/dev/null; then
-    tmux new-session -d -s "$session" -c "$REPO_ROOT" \
-      "claude --dangerously-skip-permissions"
-    sleep 0.5
-  fi
+  # Write prompt to temp file to avoid shell escaping issues
+  prompt_file=$(mktemp /tmp/rabble-prompt-XXXXXX.txt)
+  cat > "$prompt_file" <<PROMPT
+$(cat "$agent_identity")
 
-  tmux send-keys -t "$session" \
-    "Process task file: $ACTIVE/$filename — read it, execute the objective, write result to tasks/done/$(basename "$filename" .md)-result.md, then move the task to tasks/archive/" \
-    Enter
+---
 
-  echo "[dispatch] Dispatched $filename to $session"
+You have been dispatched to handle a task. Your instructions:
+
+1. Read the task file: $ACTIVE/$filename
+2. Execute the objective described in ## Objective
+3. Write your result to: $result_file
+4. Move the task file to: $archive_dest
+
+Do not ask for confirmation. Execute and write results.
+PROMPT
+
+  # Run claude in print mode — reads prompt from stdin, no TUI, no interactive prompts
+  tmux new-session -d -s "$session" -c "$REPO_ROOT" \
+    "claude --dangerously-skip-permissions -p < '$prompt_file' ; rm -f '$prompt_file' ; echo '[dispatch] $session complete'"
+
+  echo "[dispatch] Dispatched $filename → session: $session"
 done
