@@ -42,17 +42,19 @@ a task and return a result. The loop is manually verified.
 
 ## Episode Tracker
 
-### Episode 1 — First Breath `[ACTIVE]`
+### Episode 1 — First Breath `[COMPLETE]`
 
-**Branch:** `episode-1`
+**Branch:** `episode-1` | **Tag:** `echo-1.0`
 **Goal:** Scaffold committed. Dispatch script wired. sCoRE session launchable.
 
-Events planned:
+Events:
 - [x] Repo initialized with scaffold
-- [ ] `.claude/settings.json` constraint test (Bash blocked)
-- [ ] `dispatch-watch.sh` synthetic task round-trip
-- [ ] `start-rabble.sh` verified on live machine
-- [ ] Episode 1 Echo tagged
+- [x] `.claude/settings.json` constraints in place (Bash/Web blocked at tool level)
+- [x] `dispatch-watch.sh` round-trip verified — TASK-0001-search full lifecycle
+- [x] Learned: dispatch must use `claude -p < prompt_file`, not interactive + send-keys
+- [x] `start-rabble.sh` verified — dispatch + sCoRE session both launch correctly
+- [x] CONTEXT.md handoff layer added to all work areas
+- [x] Episode 1 Echo tagged `echo-1.0`
 
 ---
 
