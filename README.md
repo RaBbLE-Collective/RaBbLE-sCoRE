@@ -32,6 +32,7 @@ RaBbLE-sCoRE          — constrained orchestrator (no bash, no search, no code)
   └── rabble-execution — bash + system commands
 
 rabble-dispatch       — inotify watcher, routes task files to agent sessions
+rabble-server         — FastAPI web API (optional, --with-server flag)
 ```
 
 Task delegation is **file-based** (full audit trail) with **inotify triggers**
@@ -39,7 +40,11 @@ Task delegation is **file-based** (full audit trail) with **inotify triggers**
 
 ```
 sCoRE writes → dispatch routes → agent processes → result written → sCoRE reads
+
+HTTP clients → server/ (FastAPI) → LLM providers (Groq / OpenRouter)
 ```
+
+sCoRE runs as either an interactive shell **or** a web API — both modes are supported.
 
 ---
 
@@ -62,12 +67,23 @@ memory/
   patterns/           — what works, what fails (committed to git)
   context-snapshots/  — session state (gitignored, local only)
 scripts/
-  start-rabble.sh     — bootstrap all sessions
+  start-rabble.sh     — bootstrap all sessions (--with-server to include web API)
   stop-rabble.sh      — graceful shutdown
+  status.sh           — system health check
   dispatch-watch.sh   — inotify router (runs as rabble-dispatch session)
   hooks/
     session-start.sh  — orients sCoRE on startup
     post-write.sh     — validates task files before dispatch
+server/               — FastAPI web API (absorbed from RaBbLE-Server)
+  main.py             — routes: /health, /api/v1/chat, /api/v1/workflows, /api/v1/auth/*
+  llm.py              — multi-provider LLM routing (Groq + OpenRouter)
+  agents.py           — RaBbLE persona + workflow classifier
+  requirements.txt    — Python dependencies
+  secrets.example     — template for .secrets (API keys)
+harness/              — deployment tooling for Railway
+  local.sh            — start server locally with auto-venv
+  deploy.sh           — interactive Railway deploy TUI
+  railway_ctl.sh      — Railway CLI wrapper
 projects/             — git submodule mount points
 grimoire/             — sCoRE lore, architecture, roadmap
 ```
@@ -102,6 +118,43 @@ tmux attach -t rabble-score
 
 ```bash
 ./scripts/stop-rabble.sh
+```
+
+---
+
+## Web API Mode
+
+sCoRE includes a FastAPI server (`server/`) for HTTP access — local development or Railway deployment.
+
+### Start with web API
+
+```bash
+./scripts/start-rabble.sh --with-server   # starts rabble-server tmux session on :8000
+```
+
+### Or run the server standalone
+
+```bash
+cp server/secrets.example server/.secrets  # fill in GROQ_API_KEY, OPENROUTER_API_KEY, JWT_SECRET
+./harness/local.sh                         # creates .venv, generates .env, starts uvicorn --reload
+```
+
+### API surface
+
+| Route | Purpose |
+|---|---|
+| `GET /health` | Health check |
+| `POST /api/v1/chat` | Streaming chat with RaBbLE |
+| `POST /api/v1/workflows` | Start agentic workflow |
+| `GET /api/v1/status` | Provider + quota info |
+| `POST /api/v1/auth/register` | Create account → API key |
+
+Workflow types: `brainstorm` · `reflect` · `create` · `solve` · `learn` · `thrive`
+
+### Deploy to Railway
+
+```bash
+./harness/deploy.sh   # interactive TUI
 ```
 
 ---

@@ -9,14 +9,18 @@ memory/context-snapshots/
 .idea/
 .vscode/
 
-# Python (if FastAPI server added later)
+# Python / FastAPI server
 __pycache__/
+server/__pycache__/
 *.pyc
 *.pyo
 .venv/
 venv/
 dist/
 *.egg-info/
+server/.env
+server/.secrets
+server/audit.jsonl
 
 # Node (if any tooling added)
 node_modules/

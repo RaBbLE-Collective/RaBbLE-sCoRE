@@ -30,6 +30,7 @@ printf "${D}$(date '+%Y-%m-%d %H:%M:%S')${R}\n\n"
 printf "${D}── Sessions ──────────────────────────────────${R}\n"
 session_status "rabble-dispatch"
 session_status "rabble-score"
+session_status "rabble-server"
 printf "\n"
 
 printf "${D}── Task Pipeline ─────────────────────────────${R}\n"
@@ -61,6 +62,15 @@ if [[ "$active" -gt 0 ]]; then
   done
   printf "\n"
 fi
+
+printf "${D}── Web Server ────────────────────────────────${R}\n"
+if tmux has-session -t "rabble-server" 2>/dev/null; then
+  health=$(curl -sf http://localhost:8000/health 2>/dev/null || echo "unreachable")
+  printf "  ${G}●${R} rabble-server ${D}→ $health${R}\n"
+else
+  printf "  ${D}○ rabble-server (not running — use --with-server to start)${R}\n"
+fi
+printf "\n"
 
 printf "${D}── Dispatch Log (last 10 lines) ──────────────${R}\n"
 if tmux has-session -t "rabble-dispatch" 2>/dev/null; then

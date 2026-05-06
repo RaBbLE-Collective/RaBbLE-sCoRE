@@ -3,7 +3,7 @@
 
 set -euo pipefail
 
-SESSIONS=(rabble-score rabble-dispatch rabble-memory rabble-search rabble-execution)
+SESSIONS=(rabble-score rabble-dispatch rabble-memory rabble-search rabble-execution rabble-server)
 
 for session in "${SESSIONS[@]}"; do
   if tmux has-session -t "$session" 2>/dev/null; then

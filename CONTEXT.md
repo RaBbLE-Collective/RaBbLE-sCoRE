@@ -1,7 +1,7 @@
 # CONTEXT.md — RaBbLE-sCoRE
 
 ```
-epoch: 0 | episode: 2 | status: closed
+epoch: 0 | episode: 3 | status: active
 ```
 
 RaBbLE-sCoRE is the coordination server of the RaBbLE Collective.
@@ -85,9 +85,28 @@ All subsequent turns use `--continue` on the already-warm session.
 
 ---
 
+---
+
+### Epoch 0 — Episode 3: Server Merged, Collective → Grimoire
+
+#### What was absorbed
+
+| Item | Notes |
+|---|---|
+| `server/` — FastAPI intelligence service | Moved from RaBbLE-Server. Provides HTTP transport for sCoRE as a web API. |
+| `harness/` — deployment tooling | Moved from RaBbLE-Server. local.sh, deploy.sh, railway_ctl.sh, env_gen.sh. |
+| `scripts/start-rabble.sh --with-server` | Optional flag to start uvicorn as `rabble-server` tmux session alongside sCoRE. |
+| `scripts/status.sh` server block | Displays rabble-server session state + /health response. |
+| RaBbLE-Server repo deprecated | CONTEXT.md updated to point here. |
+
+sCoRE can now be run as a local coordination shell (default) **or** as a web API endpoint
+(with `--with-server`). Server routes call LLM providers directly — task pipeline wiring is Episode 4+.
+
+---
+
 ## What Is Not Done Yet
 
-### Episode 3 and Beyond
+### Episode 4 and Beyond
 
 | Item | Notes |
 |---|---|
@@ -95,9 +114,9 @@ All subsequent turns use `--continue` on the already-warm session.
 | Memory agent wired into sCoRE decisions | sCoRE reads `memory/patterns/` before delegating |
 | `start-rabble.sh` lifecycle for all agent sessions | memory/search/execution start/stop |
 | Context snapshots written by sCoRE | `memory/context-snapshots/` currently empty |
-| FastAPI server layer (optional) | HTTP interface to RaBbLE — deferred |
+| Server routes → task pipeline | Wire `/api/v1/chat` through sCoRE's file-based dispatch |
 | GitHub remote + CI | Deferred |
-| Collective registry entry | Register in `RaBbLE-Collective/registry/manifests/` |
+| Collective registry entry | Now in `RaBbLE-Grimoire/RaBbLE-Collective/registry/manifests/` |
 
 ---
 
