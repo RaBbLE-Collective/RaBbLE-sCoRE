@@ -3,7 +3,7 @@
 # harness/env_gen.sh — generate a service .env from .secrets + env.defaults
 #
 # Usage:
-#   ./harness/env_gen.sh [service]            write services/<svc>/.env
+#   ./harness/env_gen.sh [service]            write <svc>/.env (default: server)
 #   ./harness/env_gen.sh [service] --print    print to stdout only
 #   ./harness/env_gen.sh [service] --railway  print railway variables set commands
 #
@@ -16,11 +16,11 @@ set -euo pipefail
 HARNESS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HARNESS_DIR/.." && pwd)"
 
-SERVICE="${1:-intelligence}"
+SERVICE="${1:-server}"
 MODE="${2:-}"   # --print | --railway | ""
 
 SECRETS_FILE="$ROOT/.secrets"
-SERVICE_DIR="$ROOT/services/$SERVICE"
+SERVICE_DIR="$ROOT/$SERVICE"
 DEFAULTS_FILE="$SERVICE_DIR/env.defaults"
 OUTPUT_FILE="$SERVICE_DIR/.env"
 
@@ -28,8 +28,8 @@ OUTPUT_FILE="$SERVICE_DIR/.env"
 
 if [ ! -d "$SERVICE_DIR" ]; then
   echo "✗ Service '$SERVICE' not found at $SERVICE_DIR" >&2
-  echo "  Available services:" >&2
-  ls "$ROOT/services/" 2>/dev/null | sed 's/^/    /' >&2
+  echo "  Available services (top-level dirs):" >&2
+  ls -d "$ROOT"/*/ 2>/dev/null | xargs -n1 basename | sed 's/^/    /' >&2
   exit 1
 fi
 

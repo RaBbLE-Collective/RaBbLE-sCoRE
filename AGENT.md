@@ -41,8 +41,8 @@ Run `free -h` and return the output.
 None.
 
 ## Output format
-Write result to: /home/rabble/RaBbLE/RaBbLE-sCoRE/tasks/done/TASK-0003-execution-result.md
-Move task file to: /home/rabble/RaBbLE/RaBbLE-sCoRE/tasks/archive/TASK-0003-execution.md
+Write result to: tasks/done/TASK-0003-execution-result.md
+Move task file to: tasks/archive/TASK-0003-execution.md
 
 ## Success criteria
 Command ran, exit code 0, output returned.

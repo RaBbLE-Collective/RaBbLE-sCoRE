@@ -22,11 +22,11 @@
 #   github       Instructions for GitHub-based continuous deployment
 #
 # Deployment modes:
-#   Direct upload   railway up from services/<svc>/ — no GitHub required.
+#   Direct upload   railway up from <svc>/ — no GitHub required.
 #                   Change detection skips unchanged services.
 #
 #   GitHub-based    Connect repo in Railway dashboard.
-#                   Set Root Directory = services/<svc>
+#                   Set Root Directory = <svc>
 #                   Railway auto-deploys on every push to the configured branch.
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
@@ -35,9 +35,9 @@ HARNESS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HARNESS_DIR/.." && pwd)"
 
 COMMAND="${1:-help}"
-SERVICE="${2:-intelligence}"
-SERVICE_DIR="$ROOT/services/$SERVICE"
-SERVICE_RELPATH="services/$SERVICE"
+SERVICE="${2:-server}"
+SERVICE_DIR="$ROOT/$SERVICE"
+SERVICE_RELPATH="$SERVICE"
 
 HEALTH_PATH="/health"
 DEPLOY_STAMP="$ROOT/.railway_last_deploy_${SERVICE}"
@@ -53,8 +53,8 @@ header() { echo; echo "── $* ──"; }
 _validate_service() {
   if [ ! -d "$SERVICE_DIR" ]; then
     err "Service '$SERVICE' not found at $SERVICE_DIR"
-    echo "  Available services:" >&2
-    ls "$ROOT/services/" 2>/dev/null | sed 's/^/    /' >&2
+    echo "  Available services (top-level dirs):" >&2
+    ls -d "$ROOT"/*/ 2>/dev/null | xargs -n1 basename | sed 's/^/    /' >&2
     exit 1
   fi
 }

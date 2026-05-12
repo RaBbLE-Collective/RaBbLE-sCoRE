@@ -13,7 +13,7 @@ HARNESS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HARNESS_DIR/.." && pwd)"
 CTL="$HARNESS_DIR/railway_ctl.sh"
 
-SERVICE="${1:-intelligence}"
+SERVICE="${1:-server}"
 
 # ── Colours + drawing ──────────────────────────────────────────────────────
 
@@ -44,7 +44,7 @@ _preflight_summary() {
 
   command -v railway &>/dev/null && rail_ok=1
   [ -f "$ROOT/.secrets" ] && secrets_ok=1
-  (cd "$ROOT/services/$SERVICE" && railway status &>/dev/null 2>&1) && linked_ok=1
+  (cd "$ROOT/$SERVICE" && railway status &>/dev/null 2>&1) && linked_ok=1
 
   local rail_icon secrets_icon linked_icon
   rail_icon="$(    [ $rail_ok     -eq 1 ] && echo "${GREEN}✓${RESET}" || echo "${RED}✗${RESET}")"
@@ -102,7 +102,7 @@ action_push_secrets() {
   _check_secrets || return
 
   info "Reading .secrets and env.defaults ..."
-  local svc_dir="$ROOT/services/$SERVICE"
+  local svc_dir="$ROOT/$SERVICE"
   local defaults_file="$svc_dir/env.defaults"
 
   declare -A VARS
@@ -203,10 +203,10 @@ action_github() {
   echo    "  Steps:"
   echo    "  1. Railway dashboard → your project → your service"
   echo    "  2. Settings → Source → Connect Repo → choose this repo"
-  echo    "  3. Root Directory: services/$SERVICE"
+  echo    "  3. Root Directory: $SERVICE"
   echo    "  4. Branch: development  (or main for production)"
   echo
-  echo    "  That's it — Railway watches services/$SERVICE/** and"
+  echo    "  That's it — Railway watches $SERVICE/** and"
   echo    "  triggers a redeploy on every matching push."
   echo
   echo    "  You can still use ./harness/deploy.sh for manual deploys"

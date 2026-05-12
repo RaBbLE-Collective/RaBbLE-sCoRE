@@ -10,8 +10,8 @@
 #   ./harness/local.sh intelligence 8001
 #
 # What it does:
-#   1. Generates services/<svc>/.env from .secrets + env.defaults (if missing)
-#   2. Creates services/<svc>/.venv (if missing)
+#   1. Generates <svc>/.env from .secrets + env.defaults (if missing)
+#   2. Creates <svc>/.venv (if missing)
 #   3. Installs requirements.txt
 #   4. Starts uvicorn with --reload
 # ─────────────────────────────────────────────────────────────────────────────
@@ -20,10 +20,10 @@ set -euo pipefail
 HARNESS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HARNESS_DIR/.." && pwd)"
 
-SERVICE="${1:-intelligence}"
+SERVICE="${1:-server}"
 PORT="${2:-8000}"
 
-SERVICE_DIR="$ROOT/services/$SERVICE"
+SERVICE_DIR="$ROOT/$SERVICE"
 VENV_DIR="$SERVICE_DIR/.venv"
 ENV_FILE="$SERVICE_DIR/.env"
 REQ_FILE="$SERVICE_DIR/requirements.txt"
@@ -42,7 +42,7 @@ err()  { echo -e "${RED}✗${RESET}  $*" >&2; }
 if [ ! -d "$SERVICE_DIR" ]; then
   err "Service '$SERVICE' not found at $SERVICE_DIR"
   echo "  Available services:"
-  ls "$ROOT/services/" 2>/dev/null | sed 's/^/    /'
+  ls "$ROOT" 2>/dev/null | grep -v '^\.' | sed 's/^/    /'
   exit 1
 fi
 

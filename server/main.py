@@ -22,7 +22,7 @@ logging.basicConfig(level=logging.INFO)
 app = FastAPI(
     title="RaBbLE",
     description="Benevolent Behavioral Learning Engine — Agentic Intelligence API",
-    version="1.0.0",
+    version="v0.0.0.0",
 )
 
 
@@ -96,7 +96,7 @@ class WorkflowStepRequest(BaseModel):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "entity": "RaBbLE", "version": "1.0.0"}
+    return {"status": "ok", "entity": "RaBbLE", "version": "v0.0.0.0"}
 
 
 # ── Status ─────────────────────────────────────────────────────────────────────

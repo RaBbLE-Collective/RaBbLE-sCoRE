@@ -1,7 +1,7 @@
 # CONTEXT.md — RaBbLE-sCoRE
 
 ```
-epoch: 0 | episode: 3 | status: active
+epoch: 0 | evolution: 0 | echo: 0 | episode: 0 (pending) | version: v0.0.0.0 | status: active
 ```
 
 RaBbLE-sCoRE is the coordination server of the RaBbLE Collective.
@@ -9,13 +9,15 @@ Intent → decompose → delegate → result. No execution surface of its own.
 
 ---
 
-## What Is Done
+## What Is Done (Pre-Episode-1 Events)
 
-### Epoch 0 — Foundation (Episode 1)
+All work below is accumulated toward Episode 1 air (`v0.0.0.1`). Episode 1 has not yet aired.
+
+### Episode 1, Plot A — First Breath
 
 | Item | Status |
 |---|---|
-| Repo initialized at `/home/rabble/RaBbLE/RaBbLE-sCoRE/` | Done |
+| Repo initialized at `RaBbLE-sCoRE/` | Done |
 | Clean `main` scaffold commit (Pulse Protocol style) | Done |
 | Full directory scaffold: agents, tasks, memory, scripts, grimoire, projects | Done |
 | `README.md`, `AGENT.md` | Done |
@@ -33,7 +35,7 @@ Intent → decompose → delegate → result. No execution surface of its own.
 
 ---
 
-### Epoch 0 — Episode 2: sCoRE Live Session
+### Episode 1, Plot B — sCoRE Live Session
 
 #### What was built
 
@@ -87,7 +89,7 @@ All subsequent turns use `--continue` on the already-warm session.
 
 ---
 
-### Epoch 0 — Episode 3: Server Merged, Collective → Grimoire
+### Episode 1, Plot C — Server Merged, Collective → Grimoire
 
 #### What was absorbed
 
@@ -106,7 +108,19 @@ sCoRE can now be run as a local coordination shell (default) **or** as a web API
 
 ## What Is Not Done Yet
 
-### Episode 4 and Beyond
+### Episode 1 Exit Conditions (current target)
+
+| Item | Status |
+|---|---|
+| `harness/` path bug fixed (`server/` not `services/intelligence/`) | Done |
+| `server/main.py` version aligned to `v0.0.0.0` | Done |
+| `server/api_test.py` Python test client | Done |
+| `harness/local.sh` starts server successfully | Needs verification |
+| Railway deploy attempted — harness verified | Pending |
+| `RaBbLE-Grimoire/spells/deploy-score.sh` spell | Pending |
+| Episode 1 tagged on `main` | Pending — airs when Collective Episode 1 ready |
+
+### Episode 2 and Beyond (after Episode 1 airs)
 
 | Item | Notes |
 |---|---|
@@ -116,14 +130,13 @@ sCoRE can now be run as a local coordination shell (default) **or** as a web API
 | Context snapshots written by sCoRE | `memory/context-snapshots/` currently empty |
 | Server routes → task pipeline | Wire `/api/v1/chat` through sCoRE's file-based dispatch |
 | GitHub remote + CI | Deferred |
-| Collective registry entry | Now in `RaBbLE-Grimoire/RaBbLE-Collective/registry/manifests/` |
 
 ---
 
 ## How to Run RaBbLE
 
 ```bash
-cd /home/rabble/RaBbLE/RaBbLE-sCoRE
+cd RaBbLE-sCoRE
 bash scripts/rabble-shell.sh
 ```
 
@@ -150,9 +163,9 @@ bash scripts/status.sh
 2. `AGENT.md` — rules and workspace map
 3. `agents/score.md` — sCoRE identity (what RaBbLE IS internally)
 4. `CLAUDE.md` — how sCoRE identity is injected into the session
-5. `grimoire/RaBbLE-sCoRE-Architecture.md` — system design
+5. `grimoire/RaBbLE-sCoRE/RaBbLE-sCoRE-Architecture.md` — system design
 6. `memory/patterns/dispatch-print-mode.md` — dispatch lesson from Episode 1
 7. `memory/patterns/agent-isolation.md` — settings.json scope lesson from Episode 2
-8. `grimoire/RaBbLE-sCoRE-Roadmap.md` — episode/epoch trajectory
+8. `grimoire/RaBbLE-sCoRE/RaBbLE-sCoRE-Roadmap.md` — episode/epoch trajectory
 
-For Collective context: `../RaBbLE-Collective/grimoire/RaBbLE-Collective.md`
+For Collective context: `grimoire/common/RaBbLE-Collective.md`
