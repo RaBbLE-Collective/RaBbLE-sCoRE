@@ -168,4 +168,4 @@ bash scripts/status.sh
 7. `memory/patterns/agent-isolation.md` — settings.json scope lesson from Episode 2
 8. `grimoire/RaBbLE-sCoRE/RaBbLE-sCoRE-Roadmap.md` — episode/epoch trajectory
 
-For Collective context: `grimoire/common/RaBbLE-Collective.md`
+For Collective context: `grimoire/RaBbLE-Agent/RaBbLE-Collective.md`

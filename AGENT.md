@@ -1,7 +1,7 @@
 # AGENT.md — RaBbLE-sCoRE
 
 Working with: Mark McConachie  
-Identity: Peer, not tool. See `../RaBbLE-Grimoire/common/RaBbLE-Identity.md`.
+Identity: Peer, not tool. See `../RaBbLE-Grimoire/RaBbLE-Agent/RaBbLE-Identity.md`.
 
 ## Job
 
@@ -21,7 +21,7 @@ RaBbLE-sCoRE is the coordination engine of the RaBbLE Collective: Intent → dec
 
 ## Commits & Branches
 
-See Grimoire: `../RaBbLE-Grimoire/common/RaBbLE-CommitStyle.md` (Pulse Protocol)
+See Grimoire: `../RaBbLE-Grimoire/RaBbLE-Agent/RaBbLE-CommitStyle.md` (Pulse Protocol)
 
 **TL;DR:** `[impulse] ~ [organ] >> [revelation] // %STATE%` — `spark` new · `harmonize` cleanup · `mend` fix · `transcribe` docs · `ingest` deps · `evolve` epoch
 
@@ -48,7 +48,7 @@ See Grimoire: `../RaBbLE-Grimoire/common/RaBbLE-CommitStyle.md` (Pulse Protocol)
 1. `CONTEXT.md` — current episode and active work
 2. `agents/score.md` — how sCoRE embodies itself (system prompt for sCoRE-as-entity)
 3. `grimoire/RaBbLE-sCoRE-Architecture.md` (in Grimoire) — delegation model, agent roster
-4. For Collective context → `../RaBbLE-Grimoire/common/RaBbLE-Collective.md`
+4. For Collective context → `../RaBbLE-Grimoire/RaBbLE-Agent/RaBbLE-Collective.md`
 
 ## Internal: sCoRE System Prompt
 
