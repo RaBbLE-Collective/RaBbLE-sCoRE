@@ -28,3 +28,8 @@ node_modules/
 # Env
 .env
 .env.local
+
+# AI tooling — local only, created by sync-symlinks spell
+CLAUDE.md
+CODEX.md
+GEMINI.md
