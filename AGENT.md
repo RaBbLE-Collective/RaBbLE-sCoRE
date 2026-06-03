@@ -25,10 +25,9 @@ See Grimoire: `../RaBbLE-Grimoire/RaBbLE-Agent/RaBbLE-CommitStyle.md` (Pulse Pro
 
 **TL;DR:** `[impulse] ~ [organ] >> [revelation] // %STATE%` — `spark` new · `harmonize` cleanup · `mend` fix · `transcribe` docs · `ingest` deps · `evolve` epoch
 
-**End-of-session breadcrumb** — tag this session's token spend by feature (feeds `session-tokens.sh --by-feature`, see `../RaBbLE-Grimoire/SPELLS.md`):
+**End-of-session breadcrumb** — tag this session's token spend by feature (agent-agnostic; feeds `session-tokens.sh --by-feature`):
 ```bash
-SID=$(basename "$(ls -t ~/.claude/projects/"$(pwd|tr / -)"/*.jsonl | head -1)" .jsonl)
-printf '%s\t%s\t%s\n' "$SID" "<feature-slug>" "<note>" >> ../RaBbLE-Grimoire/log/token-ledger.tsv
+bash ../RaBbLE-Grimoire/spells/end-session.sh <feature-slug> "<note>"
 ```
 
 ## Role in Collective (ON/FOR/WITH/AS)
