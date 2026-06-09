@@ -14,6 +14,12 @@ services:
         value: "true"
       - key: JWT_SECRET
         generateValue: true
+      - key: GROQ_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: RABBLE_ADMIN_KEY
+        sync: false
       - key: FRONTEND_URL
         value: "https://joinrabble.world"
     plan: free
