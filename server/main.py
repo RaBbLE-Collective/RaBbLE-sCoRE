@@ -1,4 +1,4 @@
-import os
+import os, json
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -144,14 +144,16 @@ async def chat(
     async def _stream():
         try:
             async for chunk in llm.stream_chat(req.messages, system_prompt, model_tier=routed_tier):
-                yield chunk
+                yield f"data: {json.dumps(chunk)}\n\n"
+            yield "data: [DONE]\n\n"
             audit.log(user_id=user_id, action="chat", tier=routed_tier, workflow_type=wf_type, status=200)
         except Exception as exc:
             logger.error("chat stream error user=%s: %s", user_id, exc)
             audit.log(user_id=user_id, action="chat", tier=routed_tier, workflow_type=wf_type, status=500, error=str(exc))
-            yield f"\n[RaBbLE encountered turbulence: {exc}]"
+            yield f"data: {json.dumps('[RaBbLE: all providers unreachable — ' + str(exc) + ']')}\n\n"
+            yield "data: [DONE]\n\n"
 
-    return StreamingResponse(_stream(), media_type="text/plain")
+    return StreamingResponse(_stream(), media_type="text/event-stream")
 
 
 # ── Chat — non-streaming ───────────────────────────────────────────────────────
