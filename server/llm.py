@@ -19,19 +19,21 @@ BUILTIN_PROVIDERS = {
             "X-Title": "RaBbLE",
         },
     },
-    # Claude Code local HTTP API — uses CC's existing auth, no separate key needed
+    # Claude Code subprocess — calls `claude --print` using CC's existing auth
     "claude_code": {
-        "url": os.getenv("CC_LOCAL_URL", "http://localhost:3001") + "/v1/chat/completions",
-        "api_key_env": "CC_API_KEY",
-        "extra_headers": {},
+        "type": "subprocess",
+        "command": os.getenv("CC_COMMAND", "claude"),
+        "api_key_env": "",
         "api_key_required": False,
+        "extra_headers": {},
     },
-    # Codex CLI local HTTP API
+    # Codex CLI subprocess — same pattern as CC
     "codex": {
-        "url": os.getenv("CODEX_LOCAL_URL", "http://localhost:3002") + "/v1/chat/completions",
-        "api_key_env": "CODEX_API_KEY",
-        "extra_headers": {},
+        "type": "subprocess",
+        "command": os.getenv("CODEX_COMMAND", "codex"),
+        "api_key_env": "",
         "api_key_required": False,
+        "extra_headers": {},
     },
     # Local inference: Ollama (11434), llama.cpp server, vllm — OpenAI-compatible
     "local_llm": {
@@ -224,6 +226,60 @@ def _ensure_tier(tier: str) -> str:
         raise RuntimeError(f"Unknown model tier '{tier}'")
     return tier
 
+# ── Subprocess provider (CC / Codex) ─────────────────────────────────────────
+
+def _format_messages_for_cli(messages: list[dict]) -> str:
+    """Format multi-turn history into a single prompt for --print mode."""
+    if len(messages) == 1:
+        return messages[0].get("content", "")
+    prior = []
+    for m in messages[:-1]:
+        label = "Human" if m.get("role") == "user" else "Assistant"
+        prior.append(f"{label}: {m.get('content', '')}")
+    history = "\n\n".join(prior)
+    last = messages[-1].get("content", "")
+    return f"[Prior conversation:]\n{history}\n\n[Current message:]\n{last}"
+
+async def _stream_subprocess(
+    candidate: dict,
+    messages: list[dict],
+    system_prompt: str,
+) -> AsyncGenerator[str, None]:
+    """Run CC/Codex via subprocess --print, yield the full response as one chunk."""
+    p = _provider(candidate["provider"])
+    command = p.get("command", "claude")
+    model = candidate["model"]
+    prompt = _format_messages_for_cli(messages)
+
+    logger.warning(
+        "subprocess request provider=%s model=%s command=%s",
+        candidate["provider"], model, command,
+    )
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            command, "--print",
+            "--model", model,
+            "--system-prompt", system_prompt,
+            "-p", prompt,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+    except FileNotFoundError:
+        raise RuntimeError(f"{command} not found — is Claude Code installed?")
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise RuntimeError(f"{command} subprocess timed out after 120s")
+
+    if proc.returncode != 0:
+        err = stderr.decode()[:300]
+        raise RuntimeError(f"{command} exited {proc.returncode}: {err}")
+
+    text = stdout.decode().strip()
+    if text:
+        yield text
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 async def stream_chat(
@@ -237,6 +293,19 @@ async def stream_chat(
     last_error = None
     async with httpx.AsyncClient() as client:
         for index, candidate in enumerate(candidates, start=1):
+            # Subprocess providers (CC, Codex) bypass HTTP
+            if _provider(candidate["provider"]).get("type") == "subprocess":
+                try:
+                    async for chunk in _stream_subprocess(candidate, messages, system_prompt):
+                        yield chunk
+                    return
+                except Exception as exc:
+                    last_error = exc
+                    if index < len(candidates):
+                        logger.warning("subprocess fallback provider=%s reason=%s", candidate["provider"], exc)
+                        continue
+                    raise last_error
+
             meta = _log_request_start("stream_chat", model_tier, candidate, messages, stream=True, attempt=index, total=len(candidates))
             try:
                 async with client.stream(
@@ -296,6 +365,17 @@ async def complete_chat(
     last_error = None
     async with httpx.AsyncClient() as client:
         for index, candidate in enumerate(candidates, start=1):
+            if _provider(candidate["provider"]).get("type") == "subprocess":
+                try:
+                    chunks = [c async for c in _stream_subprocess(candidate, messages, system_prompt)]
+                    return "".join(chunks)
+                except Exception as exc:
+                    last_error = exc
+                    if index < len(candidates):
+                        logger.warning("subprocess fallback provider=%s reason=%s", candidate["provider"], exc)
+                        continue
+                    raise last_error
+
             meta = _log_request_start("complete_chat", model_tier, candidate, messages, stream=False, attempt=index, total=len(candidates))
             try:
                 response = await client.post(
