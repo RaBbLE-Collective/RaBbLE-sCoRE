@@ -19,12 +19,35 @@ BUILTIN_PROVIDERS = {
             "X-Title": "RaBbLE",
         },
     },
+    # Claude Code local HTTP API — uses CC's existing auth, no separate key needed
+    "claude_code": {
+        "url": os.getenv("CC_LOCAL_URL", "http://localhost:3001") + "/v1/chat/completions",
+        "api_key_env": "CC_API_KEY",
+        "extra_headers": {},
+        "api_key_required": False,
+    },
+    # Codex CLI local HTTP API
+    "codex": {
+        "url": os.getenv("CODEX_LOCAL_URL", "http://localhost:3002") + "/v1/chat/completions",
+        "api_key_env": "CODEX_API_KEY",
+        "extra_headers": {},
+        "api_key_required": False,
+    },
+    # Local inference: Ollama (11434), llama.cpp server, vllm — OpenAI-compatible
+    "local_llm": {
+        "url": os.getenv("LOCAL_LLM_URL", "http://localhost:11434") + "/v1/chat/completions",
+        "api_key_env": "LOCAL_LLM_API_KEY",
+        "extra_headers": {},
+        "api_key_required": False,
+    },
 }
 
 DEFAULT_MODEL_CHAINS = {
     "fast": [
-        {"provider": "groq", "model": "llama-3.1-8b-instant"},
-        {"provider": "openrouter", "model": "google/gemma-4-26b-a4b-it:free"},
+        {"provider": "claude_code", "model": "claude-haiku-4-5-20251001"},
+        {"provider": "local_llm",   "model": os.getenv("LOCAL_LLM_MODEL", "llama3.2")},
+        {"provider": "groq",        "model": "llama-3.1-8b-instant"},
+        {"provider": "openrouter",  "model": "google/gemma-4-26b-a4b-it:free"},
     ],
     "medium": [
         {"provider": "openrouter", "model": "google/gemma-4-26b-a4b-it:free"},
@@ -69,11 +92,17 @@ def _provider_registry() -> dict:
             "url": url,
             "api_key_env": api_key_env,
             "extra_headers": {str(k): str(v) for k, v in extra_headers.items()},
+            "api_key_required": bool(config.get("api_key_required", True)),
         }
     return providers
 
 def _provider_api_key(provider_name: str) -> str | None:
-    return os.getenv(_provider(provider_name)["api_key_env"])
+    p = _provider(provider_name)
+    if not p.get("api_key_required", True):
+        # Key-optional providers (CC, local inference): return the key if set,
+        # or empty string so _available_candidates doesn't skip this entry.
+        return os.getenv(p["api_key_env"]) or ""
+    return os.getenv(p["api_key_env"])
 
 def _env_chain_name(tier: str) -> str:
     return f"LLM_{tier.upper()}_CHAIN"
@@ -106,13 +135,20 @@ def _model_chain(tier: str) -> list[dict]:
 
 def _headers(provider_name: str) -> dict:
     p = _provider(provider_name)
-    return {"Authorization": f"Bearer {_provider_api_key(provider_name)}", **p["extra_headers"]}
+    key = _provider_api_key(provider_name)
+    headers = {**p["extra_headers"]}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    return headers
 
 def _available_candidates(tier: str) -> list[dict]:
     candidates = []
     for candidate in _model_chain(tier):
         provider_name = candidate["provider"]
-        if _provider_api_key(provider_name):
+        p = _provider(provider_name)
+        key_required = p.get("api_key_required", True)
+        has_key = bool(os.getenv(p["api_key_env"]))
+        if has_key or not key_required:
             candidates.append(candidate)
         else:
             logger.warning(
