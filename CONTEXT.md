@@ -116,7 +116,7 @@ sCoRE can now be run as a local coordination shell (default) **or** as a web API
 | `server/main.py` version aligned to `v0.0.0.0` | Done |
 | `server/api_test.py` Python test client | Done |
 | `harness/local.sh` starts server successfully | Needs verification |
-| Railway deploy attempted — harness verified | Pending |
+| Render deploy live | Done — https://score-origin.invalid/health ✓ |
 | `RaBbLE-Grimoire/spells/deploy-score.sh` spell | Pending |
 | Episode 1 tagged on `main` | Pending — airs when Collective Episode 1 ready |
 
