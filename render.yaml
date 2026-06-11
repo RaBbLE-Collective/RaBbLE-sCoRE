@@ -22,5 +22,11 @@ services:
         sync: false
       - key: FRONTEND_URL
         value: "https://joinrabble.world"
+      - key: DATA_DIR
+        value: "/opt/render/project/data"
+    disk:
+      name: rabble-data
+      mountPath: /opt/render/project/data
+      sizeGB: 1
     plan: free
     healthCheckPath: /health

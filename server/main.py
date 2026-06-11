@@ -14,7 +14,9 @@ import agents
 import audit
 import rate_limit
 import workflows as wf_store
-from auth_routes import router as auth_router
+import users as user_store
+import sessions as session_store
+from auth_routes import router as auth_router, member_router
 
 logger = logging.getLogger("rabble")
 logging.basicConfig(level=logging.INFO)
@@ -42,6 +44,7 @@ app.add_middleware(
 )
 
 app.include_router(auth_router)
+app.include_router(member_router)
 
 
 # ── Request models ─────────────────────────────────────────────────────────────
@@ -92,6 +95,47 @@ class WorkflowStepRequest(BaseModel):
     message: str
 
 
+class SessionCreateRequest(BaseModel):
+    resume: bool = True
+
+
+class SessionMessageRequest(BaseModel):
+    content: str
+    model_tier: str = "auto"
+
+
+def build_session_prompt(user: dict, workflow_type: str = "default") -> str:
+    base = agents.rabble_system_prompt(workflow_type)
+    intention = user.get("intention", "")
+    handle = user.get("handle", "")
+    if intention:
+        base += f"\n\n---\nYou are speaking with {handle}. Their intention: {intention}"
+    return base
+
+
+def _load_user_profile(user_token: dict) -> dict:
+    """
+    Merge file-backed profile data into the token claims dict.
+    Decrypts BYO key if present so resolve_user_chain can use it.
+    Falls back to token-only data if profile not found.
+    """
+    profile = user_store.get_user(user_token["sub"])
+    if not profile:
+        return user_token
+    merged = {**user_token, **{
+        "handle":      profile.handle,
+        "intention":   profile.intention,
+        "llm_backend": profile.llm_backend,
+        "tier":        profile.tier,
+    }}
+    if profile.byo_key_enc:
+        try:
+            merged["byo_key_plain"] = user_store.decrypt_key(profile.byo_key_enc)
+        except Exception:
+            pass
+    return merged
+
+
 # ── Health ─────────────────────────────────────────────────────────────────────
 
 @app.get("/health")
@@ -137,13 +181,14 @@ async def chat(
 
     rate_limit.apply_user_limit(user_id, routed_tier, user_tier)
 
+    user_profile = _load_user_profile(user)
     system_prompt = agents.rabble_system_prompt(wf_type)
     logger.info("chat user=%s tier=%s wf=%s", user_id, routed_tier, wf_type)
     audit.log(user_id=user_id, action="chat", tier=routed_tier, workflow_type=wf_type, status=0)
 
     async def _stream():
         try:
-            async for chunk in llm.stream_chat(req.messages, system_prompt, model_tier=routed_tier):
+            async for chunk in llm.stream_chat(req.messages, system_prompt, model_tier=routed_tier, user=user_profile):
                 yield f"data: {json.dumps(chunk)}\n\n"
             yield "data: [DONE]\n\n"
             audit.log(user_id=user_id, action="chat", tier=routed_tier, workflow_type=wf_type, status=200)
@@ -176,9 +221,10 @@ async def chat_complete(
 
     rate_limit.apply_user_limit(user_id, routed_tier, user_tier)
 
+    user_profile = _load_user_profile(user)
     system_prompt = agents.rabble_system_prompt(wf_type)
     try:
-        content = await llm.complete_chat(req.messages, system_prompt, model_tier=routed_tier)
+        content = await llm.complete_chat(req.messages, system_prompt, model_tier=routed_tier, user=user_profile)
         audit.log(user_id=user_id, action="chat_complete", tier=routed_tier, workflow_type=wf_type, status=200)
         return {"content": content, "workflow_type": wf_type, "tier": routed_tier}
     except Exception as exc:
@@ -301,3 +347,97 @@ async def workflow_step(
 async def cancel_workflow(wf_id: str, user: dict = Depends(auth.require_user)):
     wf_store.cancel(wf_id, user["sub"])
     return {"status": "cancelled", "id": wf_id}
+
+
+# ── Sessions ───────────────────────────────────────────────────────────────────
+
+def _session_summary(rec: "session_store.SessionRecord") -> dict:
+    return {
+        "session_id":    rec.session_id,
+        "title":         rec.title,
+        "created_at":    rec.created_at,
+        "last_active":   rec.last_active,
+        "message_count": len(rec.messages),
+    }
+
+
+@app.post("/api/v1/sessions")
+async def create_or_resume_session(
+    req:  SessionCreateRequest,
+    user: dict = Depends(auth.require_user),
+):
+    user_id = user["sub"]
+    if req.resume:
+        rec = session_store.get_or_create_default(user_id)
+        status_code = 200 if rec.messages else 201
+    else:
+        rec = session_store.create_session(user_id)
+        status_code = 201
+
+    from fastapi.responses import JSONResponse
+    return JSONResponse(content=_session_summary(rec), status_code=status_code)
+
+
+@app.get("/api/v1/sessions")
+async def list_sessions(user: dict = Depends(auth.require_user)):
+    records = session_store.list_user_sessions(user["sub"])
+    return [_session_summary(r) for r in records]
+
+
+@app.get("/api/v1/sessions/{session_id}")
+async def get_session(session_id: str, user: dict = Depends(auth.require_user)):
+    rec = session_store.get_session(session_id, user["sub"])
+    if not rec:
+        raise HTTPException(404, "Session not found")
+    return rec.model_dump()
+
+
+@app.post("/api/v1/sessions/{session_id}/message")
+async def session_message(
+    session_id: str,
+    req:        SessionMessageRequest,
+    request:    Request,
+    user:       dict = Depends(auth.require_user),
+):
+    user_id = user["sub"]
+    rec = session_store.get_session(session_id, user_id)
+    if not rec:
+        raise HTTPException(404, "Session not found")
+
+    if req.model_tier not in {"auto", "fast", "medium", "strong"}:
+        raise HTTPException(422, "model_tier must be one of: auto, fast, medium, strong")
+
+    user_profile = _load_user_profile(user)
+
+    if req.model_tier == "auto":
+        routed_tier, _ = agents.classify_request([{"role": "user", "content": req.content}])
+    else:
+        routed_tier = req.model_tier
+
+    rate_limit.apply_user_limit(user_id, routed_tier, user.get("tier", "free"))
+
+    session_store.append_message(session_id, user_id, "user", req.content)
+
+    history = [{"role": m.role, "content": m.content} for m in rec.messages]
+    history.append({"role": "user", "content": req.content})
+
+    system_prompt = build_session_prompt(user_profile)
+    audit.log(user_id=user_id, action="session_message", tier=routed_tier, status=0)
+
+    async def _stream():
+        assistant_chunks = []
+        try:
+            async for chunk in llm.stream_chat(history, system_prompt, model_tier=routed_tier, user=user_profile):
+                assistant_chunks.append(chunk)
+                yield f"data: {json.dumps(chunk)}\n\n"
+            full_response = "".join(assistant_chunks)
+            session_store.append_message(session_id, user_id, "assistant", full_response)
+            yield "data: [DONE]\n\n"
+            audit.log(user_id=user_id, action="session_message", tier=routed_tier, status=200)
+        except Exception as exc:
+            logger.error("session stream error user=%s session=%s: %s", user_id, session_id, exc)
+            audit.log(user_id=user_id, action="session_message", tier=routed_tier, status=500, error=str(exc))
+            yield f"data: {json.dumps('[RaBbLE: all providers unreachable — ' + str(exc) + ']')}\n\n"
+            yield "data: [DONE]\n\n"
+
+    return StreamingResponse(_stream(), media_type="text/event-stream")

@@ -20,9 +20,9 @@ DEMO_MODE = os.getenv("DEMO_MODE", "").lower() in ("1", "true", "yes")
 _GUEST = {"sub": "guest", "name": "Guest", "tier": "free"}
 
 
-def make_token(user_id: str, name: str, tier: str = "free") -> str:
+def make_token(user_id: str, name: str, tier: str = "free", handle: str = "") -> str:
     return jwt.encode(
-        {"sub": user_id, "name": name, "tier": tier, "exp": time.time() + TTL},
+        {"sub": user_id, "name": name, "handle": handle, "tier": tier, "exp": time.time() + TTL},
         SECRET,
         algorithm=ALGORITHM,
     )
@@ -48,7 +48,12 @@ async def require_user(
         from auth_routes import verify_api_key  # avoid circular at module load
         user = verify_api_key(x_api_key)
         if user:
-            return {"sub": user["id"], "name": user["name"], "tier": user.get("tier", "free")}
+            return {
+                "sub":    user["id"],
+                "name":   user["name"],
+                "handle": user.get("handle", ""),
+                "tier":   user.get("tier", "free"),
+            }
         raise HTTPException(401, "Invalid API key")
 
     # Demo mode — unauthenticated access as guest

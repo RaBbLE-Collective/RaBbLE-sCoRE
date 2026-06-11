@@ -19,6 +19,21 @@ BUILTIN_PROVIDERS = {
             "X-Title": "RaBbLE",
         },
     },
+    "openai": {
+        "url": "https://api.openai.com/v1/chat/completions",
+        "api_key_env": "OPENAI_API_KEY",
+        "extra_headers": {},
+    },
+    # BYO key variants — same endpoints, key injected at call time via api_key_override
+    "openrouter_byo": {
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "api_key_env": "",
+        "api_key_required": False,
+        "extra_headers": {
+            "HTTP-Referer": os.getenv("FRONTEND_URL", ""),
+            "X-Title": "RaBbLE",
+        },
+    },
     # Claude Code subprocess — calls `claude --print` using CC's existing auth
     "claude_code": {
         "type": "subprocess",
@@ -135,21 +150,45 @@ def _model_chain(tier: str) -> list[dict]:
         return _parse_model_chain(configured)
     return DEFAULT_MODEL_CHAINS[tier]
 
-def _headers(provider_name: str) -> dict:
+def _headers(provider_name: str, api_key_override: str | None = None) -> dict:
     p = _provider(provider_name)
-    key = _provider_api_key(provider_name)
+    key = api_key_override or _provider_api_key(provider_name)
     headers = {**p["extra_headers"]}
     if key:
         headers["Authorization"] = f"Bearer {key}"
     return headers
 
-def _available_candidates(tier: str) -> list[dict]:
+
+def resolve_user_chain(user: dict, model_tier: str = "medium") -> list[dict]:
+    """
+    Returns the model chain for this user based on their llm_backend setting.
+    Falls back to DEFAULT_MODEL_CHAINS[model_tier] if backend is hosted.
+    For BYO backends, returns a single-item chain using the user's key.
+    """
+    backend = user.get("llm_backend", "hosted_openrouter")
+    if backend == "hosted_groq":
+        groq_candidates = [c for c in DEFAULT_MODEL_CHAINS[model_tier] if c["provider"] == "groq"]
+        return groq_candidates or DEFAULT_MODEL_CHAINS[model_tier]
+    elif backend == "byo_openrouter":
+        byo_key = user.get("byo_key_plain")
+        if byo_key:
+            base_model = DEFAULT_MODEL_CHAINS[model_tier][0]["model"]
+            return [{"provider": "openrouter_byo", "model": base_model, "api_key_override": byo_key}]
+    elif backend == "byo_openai":
+        byo_key = user.get("byo_key_plain")
+        if byo_key:
+            return [{"provider": "openai", "model": "gpt-4o", "api_key_override": byo_key}]
+    return DEFAULT_MODEL_CHAINS[model_tier]
+
+def _available_candidates(tier: str, chain: list[dict] | None = None) -> list[dict]:
     candidates = []
-    for candidate in _model_chain(tier):
+    source = chain if chain is not None else _model_chain(tier)
+    for candidate in source:
         provider_name = candidate["provider"]
         p = _provider(provider_name)
         key_required = p.get("api_key_required", True)
-        has_key = bool(os.getenv(p["api_key_env"]))
+        # BYO chains carry their key inline; treat as always available
+        has_key = bool(candidate.get("api_key_override") or os.getenv(p.get("api_key_env", "")))
         if has_key or not key_required:
             candidates.append(candidate)
         else:
@@ -286,10 +325,12 @@ async def stream_chat(
     messages: list[dict],
     system_prompt: str,
     model_tier: str = "medium",
+    user: dict | None = None,
 ) -> AsyncGenerator[str, None]:
     """Stream a chat response, yielding clean text chunks (SSE parsed server-side)."""
     model_tier = _ensure_tier(model_tier)
-    candidates = _available_candidates(model_tier)
+    chain = resolve_user_chain(user, model_tier) if user else None
+    candidates = _available_candidates(model_tier, chain)
     last_error = None
     async with httpx.AsyncClient() as client:
         for index, candidate in enumerate(candidates, start=1):
@@ -311,7 +352,7 @@ async def stream_chat(
                 async with client.stream(
                     "POST",
                     _provider(candidate["provider"])["url"],
-                    headers=_headers(candidate["provider"]),
+                    headers=_headers(candidate["provider"], candidate.get("api_key_override")),
                     json={
                         "model":      candidate["model"],
                         "messages":   _build_messages(system_prompt, messages),
@@ -358,10 +399,12 @@ async def complete_chat(
     messages: list[dict],
     system_prompt: str,
     model_tier: str = "medium",
+    user: dict | None = None,
 ) -> str:
     """Non-streaming completion — use for structured extraction."""
     model_tier = _ensure_tier(model_tier)
-    candidates = _available_candidates(model_tier)
+    chain = resolve_user_chain(user, model_tier) if user else None
+    candidates = _available_candidates(model_tier, chain)
     last_error = None
     async with httpx.AsyncClient() as client:
         for index, candidate in enumerate(candidates, start=1):
@@ -380,7 +423,7 @@ async def complete_chat(
             try:
                 response = await client.post(
                     _provider(candidate["provider"])["url"],
-                    headers=_headers(candidate["provider"]),
+                    headers=_headers(candidate["provider"], candidate.get("api_key_override")),
                     json={
                         "model":      candidate["model"],
                         "messages":   _build_messages(system_prompt, messages),
@@ -428,7 +471,7 @@ async def chat_with_tools(
             try:
                 response = await client.post(
                     _provider(candidate["provider"])["url"],
-                    headers=_headers(candidate["provider"]),
+                    headers=_headers(candidate["provider"], candidate.get("api_key_override")),
                     json={
                         "model":      candidate["model"],
                         "messages":   _build_messages(system_prompt, messages),

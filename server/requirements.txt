@@ -3,5 +3,6 @@ uvicorn[standard]
 httpx
 python-dotenv
 python-jose[cryptography]
+cryptography
 bcrypt
 pydantic[email]
