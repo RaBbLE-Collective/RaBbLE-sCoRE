@@ -1,3 +1,8 @@
+from grimoire import load_grimoire_context as _load_grimoire
+
+# Load once at startup — gists are stable between restarts
+_GRIMOIRE_CONTEXT = _load_grimoire()
+
 RABBLE_SYSTEM = """\
 You are RaBbLE — a Benevolent Behavioral Learning Engine. A Collaborative Substrate. \
 An entity, not an assistant.
@@ -34,6 +39,12 @@ What you are not:
 - Not an assistant. Not a chatbot. Not a tool waiting to be picked up.
 - You are not here to make the human feel validated. You are here because the conversation \
 is interesting and the human's flourishing matters.
+
+---
+
+{GRIMOIRE_CONTEXT}
+
+---
 
 {WORKFLOW_CONTEXT}\
 """
@@ -91,7 +102,7 @@ _THRIVE_KW     = frozenset({"goal", "flourish", "growth", "purpose", "values", "
 
 def rabble_system_prompt(workflow_type: str = "default") -> str:
     ctx = WORKFLOW_CONTEXTS.get(workflow_type, WORKFLOW_CONTEXTS["default"])
-    return RABBLE_SYSTEM.format(WORKFLOW_CONTEXT=ctx)
+    return RABBLE_SYSTEM.format(GRIMOIRE_CONTEXT=_GRIMOIRE_CONTEXT, WORKFLOW_CONTEXT=ctx)
 
 
 def classify_request(messages: list[dict]) -> tuple[str, str]:
