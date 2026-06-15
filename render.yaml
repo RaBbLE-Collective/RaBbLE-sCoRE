@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: rabble-score
+    name: RaBbLE-sCoRE
     runtime: python
     rootDir: server
     buildCommand: pip install -r requirements.txt
@@ -22,11 +22,13 @@ services:
         sync: false
       - key: FRONTEND_URL
         value: "https://joinrabble.world"
+      # Free tier = no persistent disk. Ephemeral storage; data resets on
+      # restart/cold-sleep. Client state lives in the browser (localStorage).
       - key: DATA_DIR
-        value: "/opt/render/project/data"
-    disk:
-      name: rabble-data
-      mountPath: /opt/render/project/data
-      sizeGB: 1
+        value: "/tmp/rabble-data"
+      # Cloud fast tier: skip claude_code/local_llm (unavailable on Render) and
+      # go straight to the OpenRouter free model — no failover latency.
+      - key: LLM_FAST_CHAIN
+        value: "openrouter:google/gemma-4-26b-a4b-it:free"
     plan: free
     healthCheckPath: /health
