@@ -13,6 +13,7 @@ import llm
 import agents
 import audit
 import rate_limit
+import tools
 import workflows as wf_store
 import users as user_store
 import sessions as session_store
@@ -104,8 +105,8 @@ class SessionMessageRequest(BaseModel):
     model_tier: str = "auto"
 
 
-def build_session_prompt(user: dict, workflow_type: str = "default") -> str:
-    base = agents.rabble_system_prompt(workflow_type)
+def build_session_prompt(user: dict, workflow_type: str = "default", model_tier: str = "medium") -> str:
+    base = agents.rabble_system_prompt(workflow_type, model_tier)
     intention = user.get("intention", "")
     handle = user.get("handle", "")
     if intention:
@@ -134,6 +135,40 @@ def _load_user_profile(user_token: dict) -> dict:
         except Exception:
             pass
     return merged
+
+
+async def _resolve_tools(
+    messages: list[dict],
+    system_prompt: str,
+    tier: str,
+) -> list[dict]:
+    """Run a tool-calling pre-pass for medium/strong tiers.
+
+    If the LLM decides to call a tool, execute it and return messages augmented
+    with the tool result so the streaming pass has full context. On fast tier or
+    any error, returns the original messages unchanged.
+    """
+    if tier == "fast":
+        return messages
+    try:
+        result = await llm.chat_with_tools(
+            messages, system_prompt, tools.ALL_TOOLS, model_tier=tier
+        )
+        if result["type"] != "tool_call":
+            return messages
+        doc = result["arguments"].get("doc", "?")
+        logger.info("tool call name=%s doc=%s", result["name"], doc)
+        content = await tools.execute_tool(result["name"], result["arguments"])
+        return messages + [{
+            "role": "user",
+            "content": (
+                f"[Grimoire · {doc}]\n\n{content}\n\n[/Grimoire]\n\n"
+                "Please answer using this context."
+            ),
+        }]
+    except Exception as exc:
+        logger.warning("tool pre-pass failed: %s — continuing without tools", exc)
+        return messages
 
 
 # ── Health ─────────────────────────────────────────────────────────────────────
@@ -182,13 +217,15 @@ async def chat(
     rate_limit.apply_user_limit(user_id, routed_tier, user_tier)
 
     user_profile = _load_user_profile(user)
-    system_prompt = agents.rabble_system_prompt(wf_type)
+    system_prompt = agents.rabble_system_prompt(wf_type, routed_tier)
     logger.info("chat user=%s tier=%s wf=%s", user_id, routed_tier, wf_type)
     audit.log(user_id=user_id, action="chat", tier=routed_tier, workflow_type=wf_type, status=0)
 
+    chat_messages = await _resolve_tools(req.messages, system_prompt, routed_tier)
+
     async def _stream():
         try:
-            async for chunk in llm.stream_chat(req.messages, system_prompt, model_tier=routed_tier, user=user_profile):
+            async for chunk in llm.stream_chat(chat_messages, system_prompt, model_tier=routed_tier, user=user_profile):
                 yield f"data: {json.dumps(chunk)}\n\n"
             yield "data: [DONE]\n\n"
             audit.log(user_id=user_id, action="chat", tier=routed_tier, workflow_type=wf_type, status=200)
@@ -222,7 +259,7 @@ async def chat_complete(
     rate_limit.apply_user_limit(user_id, routed_tier, user_tier)
 
     user_profile = _load_user_profile(user)
-    system_prompt = agents.rabble_system_prompt(wf_type)
+    system_prompt = agents.rabble_system_prompt(wf_type, routed_tier)
     try:
         content = await llm.complete_chat(req.messages, system_prompt, model_tier=routed_tier, user=user_profile)
         audit.log(user_id=user_id, action="chat_complete", tier=routed_tier, workflow_type=wf_type, status=200)
@@ -252,7 +289,7 @@ async def create_workflow(
     wf_store.add_message(wf_id, "user", init_content)
     wf_store.set_state(wf_id, "running")
 
-    system_prompt = agents.rabble_system_prompt(req.workflow_type)
+    system_prompt = agents.rabble_system_prompt(req.workflow_type, req.model_tier)
     try:
         response = await llm.complete_chat(
             [{"role": "user", "content": init_content}],
@@ -318,7 +355,7 @@ async def workflow_step(
     wf_store.add_message(wf_id, "user", req.message)
     wf_store.set_state(wf_id, "running")
 
-    system_prompt = agents.rabble_system_prompt(record["type"])
+    system_prompt = agents.rabble_system_prompt(record["type"], record["model_tier"])
     messages = wf_store.get(wf_id, user_id)["messages"]
 
     try:
@@ -421,13 +458,15 @@ async def session_message(
     history = [{"role": m.role, "content": m.content} for m in rec.messages]
     history.append({"role": "user", "content": req.content})
 
-    system_prompt = build_session_prompt(user_profile)
+    system_prompt = build_session_prompt(user_profile, model_tier=routed_tier)
     audit.log(user_id=user_id, action="session_message", tier=routed_tier, status=0)
+
+    chat_history = await _resolve_tools(history, system_prompt, routed_tier)
 
     async def _stream():
         assistant_chunks = []
         try:
-            async for chunk in llm.stream_chat(history, system_prompt, model_tier=routed_tier, user=user_profile):
+            async for chunk in llm.stream_chat(chat_history, system_prompt, model_tier=routed_tier, user=user_profile):
                 assistant_chunks.append(chunk)
                 yield f"data: {json.dumps(chunk)}\n\n"
             full_response = "".join(assistant_chunks)

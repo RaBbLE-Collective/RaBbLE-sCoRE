@@ -1,6 +1,9 @@
 # Session state — local only, never committed
 memory/context-snapshots/
 
+# Chat bridge transcripts — local session logs, never committed
+chats/
+
 # OS / editor
 .DS_Store
 *.swp

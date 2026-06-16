@@ -8,6 +8,7 @@ logger = logging.getLogger("rabble")
 _CHAT_GISTS = [
     "RaBbLE-Identity-gist.md",
     "RaBbLE-Collective-gist.md",
+    "RaBbLE-Episode1-gist.md",
     "RaBbLE-Roadmap-gist.md",
 ]
 

@@ -60,20 +60,27 @@ BUILTIN_PROVIDERS = {
 }
 
 DEFAULT_MODEL_CHAINS = {
+    # fast — speed first; local dev prefers CC/local; cloud falls to GPT-OSS-20B (1000 t/s)
+    # and Llama-4-Scout (750 t/s) — both ~3× more capable than the old 8B for identity holding.
     "fast": [
         {"provider": "claude_code", "model": "claude-haiku-4-5-20251001"},
         {"provider": "local_llm",   "model": os.getenv("LOCAL_LLM_MODEL", "llama3.2")},
+        {"provider": "groq",        "model": "openai/gpt-oss-20b"},
+        {"provider": "groq",        "model": "meta-llama/llama-4-scout-17b-16e-instruct"},
         {"provider": "groq",        "model": "llama-3.1-8b-instant"},
         {"provider": "openrouter",  "model": "google/gemma-4-26b-a4b-it:free"},
     ],
+    # medium — Qwen3-32B leads (best tool-calling in free tier), 70B as proven fallback.
     "medium": [
+        {"provider": "groq",       "model": "qwen/qwen3-32b"},
+        {"provider": "groq",       "model": "llama-3.3-70b-versatile"},
         {"provider": "openrouter", "model": "google/gemma-4-26b-a4b-it:free"},
-        {"provider": "groq", "model": "llama-3.3-70b-versatile"},
-        {"provider": "groq", "model": "llama-3.1-8b-instant"},
     ],
+    # strong — Claude Sonnet for agentic quality; GPT-OSS-120B as fast capable fallback.
     "strong": [
         {"provider": "openrouter", "model": "anthropic/claude-sonnet-4-6"},
-        {"provider": "groq", "model": "llama-3.3-70b-versatile"},
+        {"provider": "groq",       "model": "openai/gpt-oss-120b"},
+        {"provider": "groq",       "model": "llama-3.3-70b-versatile"},
     ],
 }
 
