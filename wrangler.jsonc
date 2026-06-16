@@ -1,0 +1,8 @@
+{
+  "name": "rabble-score",
+  "main": "cf-proxy.js",
+  "compatibility_date": "2026-06-16",
+  "observability": {
+    "enabled": true
+  }
+}
