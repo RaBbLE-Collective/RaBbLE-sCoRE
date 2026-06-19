@@ -6,6 +6,7 @@ logger = logging.getLogger("rabble.llm")
 # ── Provider config ───────────────────────────────────────────────────────────
 
 BUILTIN_PROVIDERS = {
+    # ── Established cloud providers ───────────────────────────────────────────
     "groq": {
         "url": "https://api.groq.com/openai/v1/chat/completions",
         "api_key_env": "GROQ_API_KEY",
@@ -24,7 +25,50 @@ BUILTIN_PROVIDERS = {
         "api_key_env": "OPENAI_API_KEY",
         "extra_headers": {},
     },
-    # BYO key variants — same endpoints, key injected at call time via api_key_override
+    # ── Frontier/cheap cloud providers ────────────────────────────────────────
+    "cerebras": {
+        # 700+ t/s. Free tier. llama-3.3-70b, llama-4-scout.
+        "url": "https://api.cerebras.ai/v1/chat/completions",
+        "api_key_env": "CEREBRAS_API_KEY",
+        "extra_headers": {},
+    },
+    "deepseek": {
+        # Frontier coding/reasoning at near-zero cost. deepseek-chat (V3), deepseek-reasoner (R1).
+        "url": "https://api.deepseek.com/v1/chat/completions",
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "extra_headers": {},
+    },
+    "nvidia_nim": {
+        # NVIDIA Inference Microservices — free tier, 100+ models, Nemotron/Llama/Mistral.
+        "url": "https://integrate.api.nvidia.com/v1/chat/completions",
+        "api_key_env": "NVIDIA_API_KEY",
+        "extra_headers": {},
+    },
+    "mistral": {
+        # Mistral cloud — GDPR-friendly, Mistral Large/Small/Codestral.
+        "url": "https://api.mistral.ai/v1/chat/completions",
+        "api_key_env": "MISTRAL_API_KEY",
+        "extra_headers": {},
+    },
+    "together": {
+        # Together AI — cheap open model hosting, Llama/Qwen/DBRX variants.
+        "url": "https://api.together.xyz/v1/chat/completions",
+        "api_key_env": "TOGETHER_API_KEY",
+        "extra_headers": {},
+    },
+    "xai": {
+        # xAI Grok — Grok-2/3 family, OpenAI-compat.
+        "url": "https://api.x.ai/v1/chat/completions",
+        "api_key_env": "XAI_API_KEY",
+        "extra_headers": {},
+    },
+    "zhipu": {
+        # Zhipu AI (Z.ai / BigModel) — GLM-4 family, free tier, strong multilingual.
+        "url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+        "api_key_env": "ZHIPU_API_KEY",
+        "extra_headers": {},
+    },
+    # ── BYO key variants — same endpoints, key injected at call time ──────────
     "openrouter_byo": {
         "url": "https://openrouter.ai/api/v1/chat/completions",
         "api_key_env": "",
@@ -34,53 +78,132 @@ BUILTIN_PROVIDERS = {
             "X-Title": "RaBbLE",
         },
     },
-    # Claude Code subprocess — calls `claude --print` using CC's existing auth
+    "deepseek_byo": {
+        "url": "https://api.deepseek.com/v1/chat/completions",
+        "api_key_env": "",
+        "api_key_required": False,
+        "extra_headers": {},
+    },
+    "mistral_byo": {
+        "url": "https://api.mistral.ai/v1/chat/completions",
+        "api_key_env": "",
+        "api_key_required": False,
+        "extra_headers": {},
+    },
+    # ── Subprocess harnesses — code agent CLIs ────────────────────────────────
+    # These call CLI tools that carry their own auth (CC session, Codex API key, etc.)
+    # _stream_subprocess adapts flags per cli_style field.
     "claude_code": {
         "type": "subprocess",
+        "cli_style": "claude_code",
         "command": os.getenv("CC_COMMAND", "claude"),
         "api_key_env": "",
         "api_key_required": False,
         "extra_headers": {},
     },
-    # Codex CLI subprocess — same pattern as CC
     "codex": {
         "type": "subprocess",
+        "cli_style": "codex",
         "command": os.getenv("CODEX_COMMAND", "codex"),
         "api_key_env": "",
         "api_key_required": False,
         "extra_headers": {},
     },
-    # Local inference: Ollama (11434), llama.cpp server, vllm — OpenAI-compatible
+    "opencode": {
+        # opencode TUI — `opencode run --print` (non-interactive mode)
+        "type": "subprocess",
+        "cli_style": "opencode",
+        "command": os.getenv("OPENCODE_COMMAND", "opencode"),
+        "api_key_env": "",
+        "api_key_required": False,
+        "extra_headers": {},
+    },
+    "aider": {
+        # aider AI pair programming — `aider --no-pretty --message <prompt>`
+        "type": "subprocess",
+        "cli_style": "aider",
+        "command": os.getenv("AIDER_COMMAND", "aider"),
+        "api_key_env": "",
+        "api_key_required": False,
+        "extra_headers": {},
+    },
+    "gemini_cli": {
+        # Google Gemini CLI — `gemini -p <prompt>`
+        "type": "subprocess",
+        "cli_style": "gemini_cli",
+        "command": os.getenv("GEMINI_COMMAND", "gemini"),
+        "api_key_env": "GEMINI_API_KEY",
+        "api_key_required": False,
+        "extra_headers": {},
+    },
+    "claude_code_proxy": {
+        # Claude Code CLI routed through free-claude-code local proxy (:8082).
+        # Proxy speaks Anthropic Messages API; CC routes through it via ANTHROPIC_BASE_URL.
+        # Gives CC access to Groq/Cerebras/DeepSeek/NIM/etc at no Anthropic cost.
+        # Requires free-claude-code service running (managed by OS ai-harnesses role).
+        "type": "subprocess",
+        "cli_style": "claude_code",
+        "command": os.getenv("CC_COMMAND", "claude"),
+        "api_key_env": "",
+        "api_key_required": False,
+        "extra_headers": {},
+        "subprocess_env": {
+            "ANTHROPIC_BASE_URL": os.getenv("FCC_URL", "http://localhost:8082"),
+            "ANTHROPIC_AUTH_TOKEN": os.getenv("FCC_AUTH_TOKEN", "fcc-no-auth"),
+        },
+    },
+    # ── Local inference — OpenAI-compatible servers ───────────────────────────
     "local_llm": {
+        # Ollama (11434), llama.cpp server, vllm — default local target
         "url": os.getenv("LOCAL_LLM_URL", "http://localhost:11434") + "/v1/chat/completions",
         "api_key_env": "LOCAL_LLM_API_KEY",
         "extra_headers": {},
         "api_key_required": False,
     },
+    "lm_studio": {
+        # LM Studio GUI server — port 1234, OpenAI-compat
+        "url": os.getenv("LM_STUDIO_URL", "http://localhost:1234") + "/v1/chat/completions",
+        "api_key_env": "LM_STUDIO_API_KEY",
+        "api_key_required": False,
+        "extra_headers": {},
+    },
+    "llamafile": {
+        # llamafile self-contained binary server — port 8080, OpenAI-compat
+        "url": os.getenv("LLAMAFILE_URL", "http://localhost:8080") + "/v1/chat/completions",
+        "api_key_env": "",
+        "api_key_required": False,
+        "extra_headers": {},
+    },
 }
 
 DEFAULT_MODEL_CHAINS = {
-    # fast — speed first; local dev prefers CC/local; cloud falls to GPT-OSS-20B (1000 t/s)
-    # and Llama-4-Scout (750 t/s) — both ~3× more capable than the old 8B for identity holding.
+    # fast — speed first. Local/CC preferred on dev; Cerebras (700+ t/s) leads cloud path.
     "fast": [
-        {"provider": "claude_code", "model": "claude-haiku-4-5-20251001"},
-        {"provider": "local_llm",   "model": os.getenv("LOCAL_LLM_MODEL", "llama3.2")},
+        {"provider": "claude_code",       "model": "claude-haiku-4-5-20251001"},
+        {"provider": "claude_code_proxy", "model": "claude-haiku-4-5-20251001"},
+        {"provider": "local_llm",         "model": os.getenv("LOCAL_LLM_MODEL", "llama3.2")},
+        {"provider": "cerebras",    "model": "llama-3.3-70b"},
         {"provider": "groq",        "model": "openai/gpt-oss-20b"},
         {"provider": "groq",        "model": "meta-llama/llama-4-scout-17b-16e-instruct"},
         {"provider": "groq",        "model": "llama-3.1-8b-instant"},
         {"provider": "openrouter",  "model": "google/gemma-4-26b-a4b-it:free"},
     ],
-    # medium — Qwen3-32B leads (best tool-calling in free tier), 70B as proven fallback.
+    # medium — DeepSeek-V3 leads (near-frontier quality, near-zero cost); Qwen3 + NIM free tier.
     "medium": [
-        {"provider": "groq",       "model": "qwen/qwen3-32b"},
-        {"provider": "groq",       "model": "llama-3.3-70b-versatile"},
-        {"provider": "openrouter", "model": "google/gemma-4-26b-a4b-it:free"},
+        {"provider": "deepseek",    "model": "deepseek-chat"},
+        {"provider": "groq",        "model": "qwen/qwen3-32b"},
+        {"provider": "nvidia_nim",  "model": "meta/llama-3.3-70b-instruct"},
+        {"provider": "together",    "model": "meta-llama/Llama-3.3-70B-Instruct-Turbo"},
+        {"provider": "groq",        "model": "llama-3.3-70b-versatile"},
+        {"provider": "openrouter",  "model": "google/gemma-4-26b-a4b-it:free"},
     ],
-    # strong — Claude Sonnet for agentic quality; GPT-OSS-120B as fast capable fallback.
+    # strong — Claude Sonnet for agentic quality; DeepSeek-R1 for reasoning; NIM Nemotron free.
     "strong": [
-        {"provider": "openrouter", "model": "anthropic/claude-sonnet-4-6"},
-        {"provider": "groq",       "model": "openai/gpt-oss-120b"},
-        {"provider": "groq",       "model": "llama-3.3-70b-versatile"},
+        {"provider": "openrouter",  "model": "anthropic/claude-sonnet-4-6"},
+        {"provider": "deepseek",    "model": "deepseek-reasoner"},
+        {"provider": "nvidia_nim",  "model": "nvidia/llama-3.3-nemotron-super-49b-v1"},
+        {"provider": "groq",        "model": "openai/gpt-oss-120b"},
+        {"provider": "groq",        "model": "llama-3.3-70b-versatile"},
     ],
 }
 
@@ -170,21 +293,43 @@ def resolve_user_chain(user: dict, model_tier: str = "medium") -> list[dict]:
     """
     Returns the model chain for this user based on their llm_backend setting.
     Falls back to DEFAULT_MODEL_CHAINS[model_tier] if backend is hosted.
-    For BYO backends, returns a single-item chain using the user's key.
+    For BYO backends, returns a single-item chain with the user's key injected.
     """
     backend = user.get("llm_backend", "hosted_openrouter")
-    if backend == "hosted_groq":
-        groq_candidates = [c for c in DEFAULT_MODEL_CHAINS[model_tier] if c["provider"] == "groq"]
-        return groq_candidates or DEFAULT_MODEL_CHAINS[model_tier]
-    elif backend == "byo_openrouter":
+
+    # ── Hosted backends (server key, filtered chain) ──────────────────────────
+    _hosted_provider_map = {
+        "hosted_groq":       "groq",
+        "hosted_deepseek":   "deepseek",
+        "hosted_cerebras":   "cerebras",
+        "hosted_nvidia_nim": "nvidia_nim",
+        "hosted_together":   "together",
+        "hosted_mistral":    "mistral",
+    }
+    if backend in _hosted_provider_map:
+        provider = _hosted_provider_map[backend]
+        candidates = [c for c in DEFAULT_MODEL_CHAINS[model_tier] if c["provider"] == provider]
+        return candidates or DEFAULT_MODEL_CHAINS[model_tier]
+
+    # ── Local backends (no remote key needed) ─────────────────────────────────
+    if backend == "local_ollama":
+        return [{"provider": "local_llm", "model": os.getenv("LOCAL_LLM_MODEL", "llama3.2")}]
+    if backend == "local_lm_studio":
+        return [{"provider": "lm_studio", "model": os.getenv("LM_STUDIO_MODEL", "local-model")}]
+
+    # ── BYO key backends ──────────────────────────────────────────────────────
+    _byo_provider_map = {
+        "byo_openrouter": ("openrouter_byo", DEFAULT_MODEL_CHAINS[model_tier][0]["model"]),
+        "byo_deepseek":   ("deepseek_byo",   "deepseek-chat"),
+        "byo_mistral":    ("mistral_byo",     "mistral-large-latest"),
+        "byo_openai":     ("openai",          "gpt-4o"),
+    }
+    if backend in _byo_provider_map:
         byo_key = user.get("byo_key_plain")
         if byo_key:
-            base_model = DEFAULT_MODEL_CHAINS[model_tier][0]["model"]
-            return [{"provider": "openrouter_byo", "model": base_model, "api_key_override": byo_key}]
-    elif backend == "byo_openai":
-        byo_key = user.get("byo_key_plain")
-        if byo_key:
-            return [{"provider": "openai", "model": "gpt-4o", "api_key_override": byo_key}]
+            provider, model = _byo_provider_map[backend]
+            return [{"provider": provider, "model": model, "api_key_override": byo_key}]
+
     return DEFAULT_MODEL_CHAINS[model_tier]
 
 def _available_candidates(tier: str, chain: list[dict] | None = None) -> list[dict]:
@@ -286,34 +431,61 @@ def _format_messages_for_cli(messages: list[dict]) -> str:
     last = messages[-1].get("content", "")
     return f"[Prior conversation:]\n{history}\n\n[Current message:]\n{last}"
 
+def _subprocess_argv(p: dict, model: str, system_prompt: str, prompt: str) -> list[str]:
+    """Build argv for a subprocess harness based on its cli_style."""
+    command = p.get("command", "claude")
+    style = p.get("cli_style", "claude_code")
+    if style == "claude_code":
+        return [command, "--print", "--model", model, "--system-prompt", system_prompt, "-p", prompt]
+    if style == "codex":
+        # Codex CLI: non-interactive full-context mode
+        return [command, "--full-context", "--quiet", "-m", model, prompt]
+    if style == "opencode":
+        # opencode non-interactive: `opencode run --print <prompt>`
+        return [command, "run", "--print", "--model", model, prompt]
+    if style == "aider":
+        # aider non-interactive: `aider --no-pretty --message <prompt>`
+        return [command, "--no-pretty", "--no-auto-commits", "--message", prompt]
+    if style == "gemini_cli":
+        # Google Gemini CLI: `gemini -p <prompt>`
+        return [command, "-p", prompt]
+    # Unknown style — fall back to CC pattern
+    return [command, "--print", "--model", model, "-p", prompt]
+
+
 async def _stream_subprocess(
     candidate: dict,
     messages: list[dict],
     system_prompt: str,
 ) -> AsyncGenerator[str, None]:
-    """Run CC/Codex via subprocess --print, yield the full response as one chunk."""
+    """Run a code-agent CLI subprocess, yield the full response as one chunk."""
     p = _provider(candidate["provider"])
     command = p.get("command", "claude")
     model = candidate["model"]
     prompt = _format_messages_for_cli(messages)
+    argv = _subprocess_argv(p, model, system_prompt, prompt)
+
+    # Merge any provider-level env overrides (e.g. ANTHROPIC_BASE_URL for fcc proxy)
+    env: dict | None = None
+    if p.get("subprocess_env"):
+        env = {**os.environ, **p["subprocess_env"]}
 
     logger.warning(
-        "subprocess request provider=%s model=%s command=%s",
+        "subprocess request provider=%s model=%s command=%s proxy=%s",
         candidate["provider"], model, command,
+        p.get("subprocess_env", {}).get("ANTHROPIC_BASE_URL", "none"),
     )
 
     try:
         proc = await asyncio.create_subprocess_exec(
-            command, "--print",
-            "--model", model,
-            "--system-prompt", system_prompt,
-            "-p", prompt,
+            *argv,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
     except FileNotFoundError:
-        raise RuntimeError(f"{command} not found — is Claude Code installed?")
+        raise RuntimeError(f"{command} not found — install it or check PATH")
     except asyncio.TimeoutError:
         proc.kill()
         raise RuntimeError(f"{command} subprocess timed out after 120s")
