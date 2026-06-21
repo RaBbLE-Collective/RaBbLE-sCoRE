@@ -41,7 +41,7 @@ BUILTIN_PROVIDERS = {
     "nvidia_nim": {
         # NVIDIA Inference Microservices — free tier, 100+ models, Nemotron/Llama/Mistral.
         "url": "https://integrate.api.nvidia.com/v1/chat/completions",
-        "api_key_env": "NVIDIA_API_KEY",
+        "api_key_env": "NVIDIA_NIM_API_KEY",
         "extra_headers": {},
     },
     "mistral": {
