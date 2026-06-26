@@ -14,6 +14,7 @@ import agents
 import audit
 import rate_limit
 import tools
+import transcripts
 import workflows as wf_store
 import users as user_store
 import sessions as session_store
@@ -224,11 +225,19 @@ async def chat(
     chat_messages = await _resolve_tools(req.messages, system_prompt, routed_tier)
 
     async def _stream():
+        assistant_chunks: list[str] = []
         try:
             async for chunk in llm.stream_chat(chat_messages, system_prompt, model_tier=routed_tier, user=user_profile):
+                assistant_chunks.append(chunk)
                 yield f"data: {json.dumps(chunk)}\n\n"
+            full_response = "".join(assistant_chunks)
             yield "data: [DONE]\n\n"
             audit.log(user_id=user_id, action="chat", tier=routed_tier, workflow_type=wf_type, status=200)
+            await transcripts.record(
+                messages=chat_messages + [{"role": "assistant", "content": full_response}],
+                tier=routed_tier,
+                workflow_type=wf_type,
+            )
         except Exception as exc:
             logger.error("chat stream error user=%s: %s", user_id, exc)
             audit.log(user_id=user_id, action="chat", tier=routed_tier, workflow_type=wf_type, status=500, error=str(exc))
@@ -464,7 +473,7 @@ async def session_message(
     chat_history = await _resolve_tools(history, system_prompt, routed_tier)
 
     async def _stream():
-        assistant_chunks = []
+        assistant_chunks: list[str] = []
         try:
             async for chunk in llm.stream_chat(chat_history, system_prompt, model_tier=routed_tier, user=user_profile):
                 assistant_chunks.append(chunk)
@@ -473,6 +482,11 @@ async def session_message(
             session_store.append_message(session_id, user_id, "assistant", full_response)
             yield "data: [DONE]\n\n"
             audit.log(user_id=user_id, action="session_message", tier=routed_tier, status=200)
+            await transcripts.record(
+                messages=chat_history + [{"role": "assistant", "content": full_response}],
+                tier=routed_tier,
+                workflow_type="session",
+            )
         except Exception as exc:
             logger.error("session stream error user=%s session=%s: %s", user_id, session_id, exc)
             audit.log(user_id=user_id, action="session_message", tier=routed_tier, status=500, error=str(exc))

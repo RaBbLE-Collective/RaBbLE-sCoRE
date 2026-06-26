@@ -26,6 +26,19 @@ services:
       # restart/cold-sleep. Client state lives in the browser (localStorage).
       - key: DATA_DIR
         value: "/tmp/rabble-data"
+      # Transcript persistence — training/tuning data (no user identity stored).
+      # Flip TRANSCRIPT_BACKEND to "r2" and fill CF_* once a Cloudflare R2 bucket
+      # is provisioned. Until then, transcripts write to DATA_DIR/transcripts/
+      # (ephemeral on Render free tier, durable locally).
+      # R2 token requires Workers R2 Storage:Edit permission on the target bucket.
+      - key: TRANSCRIPT_BACKEND
+        value: "file"
+      - key: CF_ACCOUNT_ID
+        sync: false
+      - key: CF_R2_TOKEN
+        sync: false
+      - key: CF_R2_BUCKET
+        sync: false
       # Cloud fast tier: skip claude_code/local_llm (unavailable on Render) and
       # go straight to the OpenRouter free model — no failover latency.
       - key: LLM_FAST_CHAIN
