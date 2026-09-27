@@ -2,8 +2,10 @@ name: Deploy sCoRE CF Proxy to Cloudflare Workers
 
 on:
   push:
-    branches: [main]
+    branches: [main, new-horizons]
+    paths: ['cf-proxy.js', 'wrangler.jsonc', '.github/workflows/deploy-proxy.yml']
     tags: ['v*']
+  workflow_dispatch:
 
 jobs:
   deploy:

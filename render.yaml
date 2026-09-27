@@ -20,8 +20,10 @@ services:
         sync: false
       - key: RABBLE_ADMIN_KEY
         sync: false
+      # Comma list, exact-match CORS origins (server/main.py _cors_origins).
+      # dev + chrysalis channels added S234 so previews reach the live backend.
       - key: FRONTEND_URL
-        value: "https://joinrabble.world"
+        value: "https://joinrabble.world,https://dev.joinrabble.world,https://chrysalis.joinrabble.world"
       # Free tier = no persistent disk. Ephemeral storage; data resets on
       # restart/cold-sleep. Client state lives in the browser (localStorage).
       - key: DATA_DIR
