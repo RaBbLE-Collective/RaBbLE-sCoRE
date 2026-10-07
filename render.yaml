@@ -20,6 +20,13 @@ services:
         sync: false
       - key: RABBLE_ADMIN_KEY
         sync: false
+      # RaBbLE-Pocket's beam (server/beam.py): the device token is required on
+      # Render (DEMO_MODE doesn't open the beam: it spends Groq speech quota).
+      # Device side: >beam.url=wss://<this service>/api/v1/beam, >beam.token=...
+      - key: BEAM_DEVICE_TOKEN
+        sync: false
+      - key: BEAM_LLM_CHAIN
+        value: "groq:openai/gpt-oss-20b,groq:openai/gpt-oss-120b"
       # Comma list, exact-match CORS origins (server/main.py _cors_origins).
       # dev + chrysalis channels added S234 so previews reach the live backend.
       - key: FRONTEND_URL

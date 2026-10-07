@@ -254,7 +254,7 @@ def _provider_api_key(provider_name: str) -> str | None:
 def _env_chain_name(tier: str) -> str:
     return f"LLM_{tier.upper()}_CHAIN"
 
-def _parse_model_chain(value: str) -> list[dict]:
+def parse_model_chain(value: str) -> list[dict]:
     chain = []
     for raw_entry in value.split(","):
         entry = raw_entry.strip()
@@ -277,7 +277,7 @@ def _parse_model_chain(value: str) -> list[dict]:
 def _model_chain(tier: str) -> list[dict]:
     configured = os.getenv(_env_chain_name(tier), "").strip()
     if configured:
-        return _parse_model_chain(configured)
+        return parse_model_chain(configured)
     return DEFAULT_MODEL_CHAINS[tier]
 
 def _headers(provider_name: str, api_key_override: str | None = None) -> dict:
@@ -505,10 +505,16 @@ async def stream_chat(
     system_prompt: str,
     model_tier: str = "medium",
     user: dict | None = None,
+    chain: list[dict] | None = None,
+    max_tokens: int = 1024,
+    extra_body: dict | None = None,
 ) -> AsyncGenerator[str, None]:
-    """Stream a chat response, yielding clean text chunks (SSE parsed server-side)."""
+    """Stream a chat response, yielding clean text chunks (SSE parsed server-side).
+
+    `chain` overrides the tier's model chain (the beam pins Groq for speed)."""
     model_tier = _ensure_tier(model_tier)
-    chain = resolve_user_chain(user, model_tier) if user else None
+    if chain is None:
+        chain = resolve_user_chain(user, model_tier) if user else None
     candidates = _available_candidates(model_tier, chain)
     last_error = None
     async with httpx.AsyncClient() as client:
@@ -536,7 +542,8 @@ async def stream_chat(
                         "model":      candidate["model"],
                         "messages":   _build_messages(system_prompt, messages),
                         "stream":     True,
-                        "max_tokens": 1024,
+                        "max_tokens": max_tokens,
+                        **(extra_body or {}),
                     },
                     timeout=60,
                 ) as response:

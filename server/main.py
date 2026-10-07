@@ -19,6 +19,7 @@ import workflows as wf_store
 import users as user_store
 import sessions as session_store
 from auth_routes import router as auth_router, member_router
+from beam import router as beam_router
 
 logger = logging.getLogger("rabble")
 logging.basicConfig(level=logging.INFO)
@@ -47,6 +48,7 @@ app.add_middleware(
 
 app.include_router(auth_router)
 app.include_router(member_router)
+app.include_router(beam_router)   # RaBbLE-Pocket's voice link (beam.py)
 
 
 # ── Request models ─────────────────────────────────────────────────────────────

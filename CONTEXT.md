@@ -106,6 +106,14 @@ sCoRE can now be run as a local coordination shell (default) **or** as a web API
 
 ---
 
+### The Beam — RaBbLE-Pocket's voice (S243)
+
+`server/beam.py`: WebSocket `/api/v1/beam` (beam protocol v0, `RaBbLE-Grimoire/RaBbLE-Pocket/RaBbLE-Pocket-Beam-Protocol.md`). Push-to-talk PCM in → Groq Whisper (`whisper-large-v3-turbo`) → RaBbLE persona + voice addendum on Groq `openai/gpt-oss-20b` (reasoning low; `BEAM_LLM_CHAIN`) with 8 turns of per-device memory → reply text streamed → Groq Orpheus speech (≤195-char chunks, first chunk at the first sentence) resampled to 16 kHz PCM. Voices daniel (default) / austin / troy, picked per turn by the device. Auth: `BEAM_DEVICE_TOKEN`, a member API key or JWT; never DEMO_MODE guest (`BEAM_ALLOW_GUEST=true` for LAN dev only). Measured on the Pocket: speech starts 1.5–2.2 s after release. Free Groq plan: Orpheus needs its terms accepted once in the console; 100 TTS requests/day.
+
+Run locally for the Pocket: `cd server && BEAM_ALLOW_GUEST=true uv run --with-requirements requirements.txt uvicorn main:app --host 0.0.0.0 --port 8000` (firewall: 8000/tcp open).
+
+**Known stale:** `DEFAULT_MODEL_CHAINS` in `server/llm.py` still lists Groq models the key no longer has (`llama-3.3-70b-versatile`, `llama-3.1-8b-instant`, `llama-4-scout`, `qwen3-32b`); a Groq 404 doesn't fall back, so the local medium tier likely errors. Not fixed yet.
+
 ## What Is Not Done Yet
 
 ### Episode 1 Exit Conditions (current target)
