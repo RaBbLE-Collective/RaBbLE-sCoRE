@@ -5,7 +5,7 @@
   "observability": {
     "enabled": true
   },
-  // Keep-warm: Render free tier sleeps after ~15 min idle (≈30 s cold start).
+  // Keep-warm: the free-tier host sleeps after ~15 min idle (≈30 s cold start).
   // Pinging /health every 10 min keeps one service awake within the 750 h/mo allowance.
   "triggers": {
     "crons": ["*/10 * * * *"]

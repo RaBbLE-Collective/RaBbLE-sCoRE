@@ -5,7 +5,7 @@ Exercises all server endpoints. Requires httpx (in requirements.txt).
 
 Usage:
   python3 api_test.py                        # localhost:8000
-  python3 api_test.py https://your.railway.app
+  python3 api_test.py https://score.joinrabble.world
   python3 api_test.py http://localhost:8000 --verbose
 """
 

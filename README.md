@@ -80,10 +80,9 @@ server/               — FastAPI web API (absorbed from RaBbLE-Server)
   agents.py           — RaBbLE persona + workflow classifier
   requirements.txt    — Python dependencies
   secrets.example     — template for .secrets (API keys)
-harness/              — deployment tooling for Railway
+harness/              — local server tooling
   local.sh            — start server locally with auto-venv
-  deploy.sh           — interactive Railway deploy TUI
-  railway_ctl.sh      — Railway CLI wrapper
+  env_gen.sh          — build server/.env from .secrets + env.defaults
 projects/             — git submodule mount points
 grimoire/             — sCoRE lore, architecture, roadmap
 ```
@@ -102,7 +101,7 @@ npm install -g @anthropic-ai/claude-code
 ### Bootstrap
 
 ```bash
-git clone git@github.com:markm1206/RaBbLE-sCoRE
+git clone https://github.com/RaBbLE-Collective/RaBbLE-sCoRE
 cd RaBbLE-sCoRE
 chmod +x scripts/*.sh scripts/hooks/*.sh
 ./scripts/start-rabble.sh
@@ -124,7 +123,7 @@ tmux attach -t rabble-score
 
 ## Web API Mode
 
-sCoRE includes a FastAPI server (`server/`) for HTTP access — local development or Railway deployment.
+sCoRE includes a FastAPI server (`server/`) for HTTP access — run it locally or host it anywhere that runs uvicorn.
 
 ### Start with web API
 
@@ -151,11 +150,11 @@ cp server/secrets.example server/.secrets  # fill in GROQ_API_KEY, OPENROUTER_AP
 
 Workflow types: `brainstorm` · `reflect` · `create` · `solve` · `learn` · `thrive`
 
-### Deploy to Railway
+### Hosting
 
-```bash
-./harness/deploy.sh   # interactive TUI
-```
+The server needs `JWT_SECRET` (16+ chars) and refuses to start without it. Set it, the provider keys
+and `RABBLE_ADMIN_KEY` in your host's environment, run `uvicorn main:app` from `server/`, and check
+`GET /health`. RaBbLE's own instance sits behind `score.joinrabble.world`.
 
 ---
 
@@ -192,6 +191,14 @@ sCoRE is the coordination member of the RaBbLE Collective.
 - Source of truth: `RaBbLE-Collective/grimoire/`
 - Registry: `RaBbLE-Collective/registry/`
 - OS substrate: `RaBbLE-OS`
+
+## License
+
+RaBbLE-sCoRE is licensed under the **RaBbLE Sovereign Accord** (source-available, not open source): see [`LICENSE`](LICENSE).
+
+- **Personal use:** Encouraged. Modify, fork, create.
+- **Attribution:** Keep the lineage intact. Mention RaBbLE.
+- **Commercial use:** Reserved. Contact the Copyright Holder for a pact.
 
 ---
 

@@ -1,11 +1,13 @@
 import os
 import json
+import base64
+import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, MultiFernet
 from pydantic import BaseModel
 
 
@@ -39,13 +41,16 @@ def get_data_dir() -> Path:
     return base
 
 
-def _fernet() -> Fernet:
-    raw = os.getenv("JWT_SECRET", "")
-    # Pad or truncate to exactly 32 bytes, then base64url-encode for Fernet
-    key_bytes = (raw.encode()[:32]).ljust(32, b"\x00")
-    import base64
-    fernet_key = base64.urlsafe_b64encode(key_bytes)
-    return Fernet(fernet_key)
+def _fernet() -> MultiFernet:
+    # Key = SHA-256(JWT_SECRET). auth.py refuses to start without the secret, so
+    # there is no empty-key path. The legacy key (secret padded/truncated to 32
+    # bytes) stays second so keys stored before S250 still decrypt.
+    raw = os.getenv("JWT_SECRET", "").encode()
+    if len(raw) < 16:
+        raise RuntimeError("JWT_SECRET is unset or shorter than 16 chars")
+    current = base64.urlsafe_b64encode(hashlib.sha256(raw).digest())
+    legacy  = base64.urlsafe_b64encode(raw[:32].ljust(32, b"\x00"))
+    return MultiFernet([Fernet(current), Fernet(legacy)])
 
 
 def encrypt_key(plain: str) -> str:

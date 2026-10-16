@@ -8,7 +8,14 @@ from jose import jwt, JWTError
 from fastapi import Depends, HTTPException, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
-SECRET    = os.getenv("JWT_SECRET") or secrets.token_hex(32)
+# Required, no fallback: it signs every JWT and keys the stored BYO-key encryption
+# (users.py). Missing or short = refuse to start. Local: server/.env via harness/env_gen.sh.
+SECRET = os.getenv("JWT_SECRET", "")
+if len(SECRET) < 16:
+    raise RuntimeError(
+        "JWT_SECRET is unset or shorter than 16 chars. Set it in server/.env "
+        "(python -c 'import secrets; print(secrets.token_hex(32))')."
+    )
 ALGORITHM = "HS256"
 TTL       = 60 * 60 * 8  # 8 hours
 

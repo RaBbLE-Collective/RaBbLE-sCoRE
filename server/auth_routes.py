@@ -1,5 +1,6 @@
 import os
 import re
+import hmac
 import secrets
 import logging
 from datetime import datetime, timezone
@@ -66,7 +67,7 @@ class ProfileUpdateRequest(BaseModel):
 
 def _require_admin(x_admin_key: Optional[str] = Header(default=None, alias="X-Admin-Key"),
                    user: dict = Depends(auth.require_user)) -> dict:
-    if _ADMIN_KEY and x_admin_key == _ADMIN_KEY:
+    if _ADMIN_KEY and x_admin_key and hmac.compare_digest(x_admin_key.encode(), _ADMIN_KEY.encode()):
         return _ADMIN_USER
     if user.get("tier") == "admin":
         return user
@@ -254,7 +255,7 @@ async def update_profile(body: ProfileUpdateRequest, user: dict = Depends(auth.r
 # ── verify_api_key — called by auth.require_user ───────────────────────────────
 
 def verify_api_key(key: str) -> dict | None:
-    if _ADMIN_KEY and key == _ADMIN_KEY:
+    if _ADMIN_KEY and hmac.compare_digest(key.encode(), _ADMIN_KEY.encode()):
         return _ADMIN_USER
     profile = user_store.get_user_by_api_key(key)
     if profile:

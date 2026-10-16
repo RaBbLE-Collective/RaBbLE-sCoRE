@@ -5,11 +5,9 @@
 # Usage:
 #   ./harness/env_gen.sh [service]            write <svc>/.env (default: server)
 #   ./harness/env_gen.sh [service] --print    print to stdout only
-#   ./harness/env_gen.sh [service] --railway  print railway variables set commands
 #
 # Examples:
 #   ./harness/env_gen.sh                      # intelligence (default)
-#   ./harness/env_gen.sh intelligence --railway | bash
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -17,7 +15,7 @@ HARNESS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HARNESS_DIR/.." && pwd)"
 
 SERVICE="${1:-server}"
-MODE="${2:-}"   # --print | --railway | ""
+MODE="${2:-}"   # --print | ""
 
 SECRETS_FILE="$ROOT/.secrets"
 SERVICE_DIR="$ROOT/$SERVICE"
@@ -71,16 +69,16 @@ if [ "${#VARS[@]}" -eq 0 ]; then
   exit 1
 fi
 
+# The server refuses to start without JWT_SECRET (server/auth.py). A blank one
+# gets a fresh random value in the generated .env; .secrets stays untouched.
+if [ -z "${VARS[JWT_SECRET]:-}" ]; then
+  VARS[JWT_SECRET]="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+  echo "· JWT_SECRET blank in .secrets: generated one for this .env" >&2
+fi
+
 # ── Output ──────────────────────────────────────────────────────────────────
 
 case "$MODE" in
-
-  --railway)
-    echo "# Railway variable set commands for service: $SERVICE"
-    for key in "${!VARS[@]}"; do
-      printf 'railway variables set "%s=%s"\n' "$key" "${VARS[$key]}"
-    done
-    ;;
 
   --print)
     echo "# $SERVICE environment — $(date)"

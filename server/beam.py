@@ -28,6 +28,7 @@ Env:
 
 import array
 import asyncio
+import hmac
 import io
 import json
 import logging
@@ -89,7 +90,7 @@ def _authorize(ws: WebSocket) -> dict | None:
     token = header[7:].strip() if header.lower().startswith("bearer ") else ""
     device_token = os.getenv("BEAM_DEVICE_TOKEN", "").strip()
     if token:
-        if device_token and token == device_token:
+        if device_token and hmac.compare_digest(token.encode(), device_token.encode()):
             return {"sub": "pocket", "name": "RaBbLE-Pocket", "tier": "pro"}
         from auth_routes import verify_api_key  # avoid circular at module load
         user = verify_api_key(token)

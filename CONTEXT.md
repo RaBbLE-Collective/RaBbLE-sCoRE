@@ -96,7 +96,7 @@ All subsequent turns use `--continue` on the already-warm session.
 | Item | Notes |
 |---|---|
 | `server/` — FastAPI intelligence service | Moved from RaBbLE-Server. Provides HTTP transport for sCoRE as a web API. |
-| `harness/` — deployment tooling | Moved from RaBbLE-Server. local.sh, deploy.sh, railway_ctl.sh, env_gen.sh. |
+| `harness/` — deployment tooling | Moved from RaBbLE-Server. local.sh, env_gen.sh (the Railway tools were retired S250). |
 | `scripts/start-rabble.sh --with-server` | Optional flag to start uvicorn as `rabble-server` tmux session alongside sCoRE. |
 | `scripts/status.sh` server block | Displays rabble-server session state + /health response. |
 | RaBbLE-Server repo deprecated | CONTEXT.md updated to point here. |
@@ -110,7 +110,7 @@ sCoRE can now be run as a local coordination shell (default) **or** as a web API
 
 `server/beam.py`: WebSocket `/api/v1/beam` (beam protocol v0, `RaBbLE-Grimoire/RaBbLE-Pocket/RaBbLE-Pocket-Beam-Protocol.md`). Push-to-talk PCM in → Groq Whisper (`whisper-large-v3-turbo`) → RaBbLE persona + voice addendum on Groq `openai/gpt-oss-20b` (reasoning low; `BEAM_LLM_CHAIN`) with 8 turns of per-device memory → reply text streamed → Groq Orpheus speech (≤195-char chunks, first chunk at the first sentence) resampled to 16 kHz PCM. Voices daniel (default) / austin / troy, picked per turn by the device. Auth: `BEAM_DEVICE_TOKEN`, a member API key or JWT; never DEMO_MODE guest (`BEAM_ALLOW_GUEST=true` for LAN dev only). Measured on the Pocket: speech starts 1.5–2.2 s after release. Free Groq plan: Orpheus needs its terms accepted once in the console; limits are 100 requests/day, 1,200 tokens/min and **3,600 tokens/day (the one that bites: ~25 spoken replies a day, rolling 24 h)**. Over it, Groq 429s and the beam falls back to text without saying why: log the 429 body and tell the device (todo), cap spoken length, or move to Dev tier / the S244 vocoder.
 
-**Deployed on Render (S243):** `wss://score-origin.invalid/api/v1/beam`; `BEAM_DEVICE_TOKEN` set on the service (and in local `server/.env`); without it the upgrade gets 403. Shares the Groq key, so the same daily speech cap.
+**Deployed (S243):** `/api/v1/beam` on the cloud host (the Pocket points `>beam.url` at it; through `score.joinrabble.world` is untested); `BEAM_DEVICE_TOKEN` set on the service (and in local `server/.env`); without it the upgrade gets 403. Shares the Groq key, so the same daily speech cap.
 
 Run locally for the Pocket: `cd server && BEAM_ALLOW_GUEST=true uv run --with-requirements requirements.txt uvicorn main:app --host 0.0.0.0 --port 8000` (firewall: 8000/tcp open).
 
@@ -126,7 +126,7 @@ Run locally for the Pocket: `cd server && BEAM_ALLOW_GUEST=true uv run --with-re
 | `server/main.py` version aligned to `v0.0.0.0` | Done |
 | `server/api_test.py` Python test client | Done |
 | `harness/local.sh` starts server successfully | Needs verification |
-| Render deploy live | Done — https://score-origin.invalid/health ✓ |
+| Cloud deploy live | Done — https://score.joinrabble.world/health ✓ |
 | `RaBbLE-Grimoire/spells/deploy-score.sh` spell | Pending |
 | Episode 1 tagged on `main` | Pending — airs when Collective Episode 1 ready |
 
