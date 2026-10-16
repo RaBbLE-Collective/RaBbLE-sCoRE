@@ -1,7 +1,10 @@
 import httpx
 import os
 import logging
+import time
+from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 logger = logging.getLogger("rabble.tools")
 
@@ -46,7 +49,38 @@ FETCH_GRIMOIRE_TOOL = {
     },
 }
 
-ALL_TOOLS = [FETCH_GRIMOIRE_TOOL]
+GET_TIME_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_time",
+        "description": (
+            "The current date and time. Call it whenever the answer depends on what time or day it is now; "
+            "never guess. Give an IANA time zone (e.g. America/New_York) when you know where the user is."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "tz": {"type": "string", "description": "IANA time zone name; omit for UTC."}
+            },
+        },
+    },
+}
+
+ALL_TOOLS = [FETCH_GRIMOIRE_TOOL, GET_TIME_TOOL]
+
+
+def server_time(tz: str | None = None) -> dict:
+    """sCoRE's clock, the one time source for every client: the Pocket's beam `ready`,
+    GET /api/v1/time, and the get_time tool. `time` is UTC seconds since the epoch.
+    With a valid IANA zone, also that zone's local time and offset; raises
+    ZoneInfoNotFoundError (a KeyError) on an unknown one."""
+    now = time.time()
+    out = {"time": round(now, 3), "utc": datetime.fromtimestamp(now, timezone.utc).isoformat(timespec="seconds")}
+    if tz:
+        local = datetime.fromtimestamp(now, ZoneInfo(tz))
+        out.update(tz=tz, local=local.isoformat(timespec="seconds"),
+                   offset_s=int(local.utcoffset().total_seconds()), abbr=local.tzname())
+    return out
 
 
 def _find_local_gist_dir() -> Path | None:
@@ -68,6 +102,12 @@ def _find_local_gist_dir() -> Path | None:
 async def execute_tool(name: str, arguments: dict) -> str:
     if name == "fetch_grimoire":
         return await _fetch_grimoire(arguments.get("doc", ""))
+    if name == "get_time":
+        try:
+            t = server_time(arguments.get("tz") or None)
+        except (ZoneInfoNotFoundError, ValueError):
+            t = server_time()
+        return t.get("local", t["utc"]) + (f" ({t['tz']})" if "tz" in t else " (UTC)")
     return f"[unknown tool: {name}]"
 
 

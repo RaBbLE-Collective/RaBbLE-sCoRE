@@ -6,3 +6,4 @@ python-jose[cryptography]
 cryptography
 bcrypt
 pydantic[email]
+tzdata

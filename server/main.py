@@ -181,6 +181,19 @@ async def health():
     return {"status": "ok", "entity": "RaBbLE", "version": "v0.0.0.0"}
 
 
+# ── Time ───────────────────────────────────────────────────────────────────────
+# sCoRE serves the time to RaBbLE-Pocket, the app and any client. Public: nothing
+# about the user, only rate limited. ?tz=America/New_York adds that zone's local time.
+
+@app.get("/api/v1/time")
+async def server_time(request: Request, tz: str | None = None):
+    rate_limit.apply_ip_limit(request.client.host)
+    try:
+        return tools.server_time(tz)
+    except (tools.ZoneInfoNotFoundError, ValueError):
+        raise HTTPException(status_code=400, detail=f"unknown time zone: {tz}")
+
+
 # ── Status ─────────────────────────────────────────────────────────────────────
 
 @app.get("/api/v1/status")

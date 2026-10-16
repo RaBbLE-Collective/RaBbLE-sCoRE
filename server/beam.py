@@ -45,6 +45,7 @@ import agents
 import audit
 import auth
 import llm
+from tools import server_time
 
 logger = logging.getLogger("rabble.beam")
 router = APIRouter()
@@ -290,7 +291,9 @@ class BeamSession:
             self.device = str(msg.get("device", "unknown"))[:40]
             logger.info("beam hello device=%s fw=%s proto=%s user=%s",
                         self.device, msg.get("fw"), msg.get("proto"), self.user["sub"])
-            await self.send({"type": "ready", "name": "sCoRE"})
+            # time: UTC seconds (tools.server_time), so the device sets its clock on every
+            # connect; it adds half the round trip.
+            await self.send({"type": "ready", "name": "sCoRE", "time": server_time()["time"]})
         elif kind == "turn.begin":
             self.cancel_task()
             self.turn, self.turn_mode = turn, msg.get("mode", "voice")
