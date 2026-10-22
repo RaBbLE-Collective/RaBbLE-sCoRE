@@ -24,6 +24,7 @@ Env:
   BEAM_TTS_VOICE       the voice when the device doesn't pick one (default daniel)
   BEAM_TTS_VOICES      the voices a device may pick per turn (default daniel,austin,troy)
   BEAM_HISTORY_TURNS   conversation turns remembered per device (default 8)
+  BEAM_CAPTURE_MAX_S   longest capture recording accepted, seconds (default 600)
 """
 
 import array
@@ -44,6 +45,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 import agents
 import audit
 import auth
+import capture
 import llm
 from tools import server_time
 
@@ -55,6 +57,11 @@ KIND_MIC, KIND_REPLY, CODEC_PCM16 = 0x01, 0x02, 0x00
 RATE = 16000
 FRAME_BYTES = RATE * 2 * 40 // 1000          # 40 ms of reply speech per frame
 MAX_NOTE_BYTES = RATE * 2 * 30               # 30 s: the device stops at 15
+CAPTURE_MAX_S = int(os.getenv("BEAM_CAPTURE_MAX_S", "600"))
+MAX_CAPTURE_BYTES = RATE * 2 * CAPTURE_MAX_S
+STT_SEGMENT_BYTES = RATE * 2 * 300           # Whisper gets at most 5 min per request
+SHAPE_TIMEOUT_S = 20                         # past this a capture goes out unshaped
+KEEP_NOTES, KEEP_NOTES_S = 20, 24 * 3600
 
 GROQ = "https://api.groq.com/openai/v1"
 STT_MODEL = os.getenv("BEAM_STT_MODEL", "whisper-large-v3-turbo")
@@ -82,6 +89,26 @@ in speech.
 # Recent conversation per device, so the pendant holds the thread across turns
 # and reconnects. In memory: a restart (or Render's cold sleep) forgets it.
 _history: dict[str, list[dict]] = {}
+
+# Assembled capture notes per user and device, kept until the device answers
+# note.saved, so a note that didn't reach the device is sent again on the next
+# connection. Same caveat: in memory only.
+_kept: dict[str, list[dict]] = {}
+
+
+def _keep_note(key: str, note: dict):
+    notes = _kept.setdefault(key, [])
+    notes[:] = [n for n in notes if n["id"] != note["id"]] + [note]
+    _prune_kept(key)
+
+
+def _prune_kept(key: str):
+    notes = [n for n in _kept.get(key, []) if time.time() - n["ts"] < KEEP_NOTES_S]
+    notes = notes[-KEEP_NOTES:]
+    if notes:
+        _kept[key] = notes
+    else:
+        _kept.pop(key, None)
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
@@ -158,13 +185,13 @@ def _groq_headers() -> dict:
     return {"Authorization": f"Bearer {key}"}
 
 
-async def transcribe(client: httpx.AsyncClient, pcm: bytes) -> str:
+async def transcribe(client: httpx.AsyncClient, pcm: bytes, timeout: float = 30) -> str:
     response = await client.post(
         f"{GROQ}/audio/transcriptions",
         headers=_groq_headers(),
         files={"file": ("note.wav", _wav(pcm), "audio/wav")},
         data={"model": STT_MODEL, "response_format": "json", "temperature": "0"},
-        timeout=30,
+        timeout=timeout,
     )
     if response.status_code == 429:
         raise SpeechLimited("speech-to-text")
@@ -256,6 +283,9 @@ class BeamSession:
         self.turn_mode = "voice"
         self.speak = True
         self.voice = TTS_VOICE
+        self.note_id = None
+        self.started = None
+        self.tz = None
         self.pcm = bytearray()
         self.task: asyncio.Task | None = None
         self.client = httpx.AsyncClient()
@@ -294,6 +324,7 @@ class BeamSession:
             # time: UTC seconds (tools.server_time), so the device sets its clock on every
             # connect; it adds half the round trip.
             await self.send({"type": "ready", "name": "sCoRE", "time": server_time()["time"]})
+            await self.resend_kept()
         elif kind == "turn.begin":
             self.cancel_task()
             self.turn, self.turn_mode = turn, msg.get("mode", "voice")
@@ -301,14 +332,30 @@ class BeamSession:
             voice = str(msg.get("voice", "")).lower()
             self.voice = voice if voice in TTS_VOICES else TTS_VOICE
             self.pcm = bytearray()
-            if self.turn_mode == "text":
+            if self.turn_mode == "capture":
+                self.speak = False
+                self.note_id, self.started, self.tz = msg.get("id"), msg.get("started"), msg.get("tz")
+                if msg.get("text") is not None:   # typed capture: no speech to wait for
+                    await self.send({"type": "sent", "turn": turn})
+                    self.task = asyncio.create_task(self.run_capture(turn, text=str(msg["text"])))
+            elif self.turn_mode == "text":
                 text = str(msg.get("text", ""))
                 await self.send({"type": "sent", "turn": turn})
                 self.task = asyncio.create_task(self.run_turn(turn, text=text))
-        elif kind == "turn.end" and turn == self.turn and self.turn_mode == "voice":
+        elif kind == "turn.end" and turn == self.turn and self.turn_mode in ("voice", "capture"):
             pcm, self.pcm = bytes(self.pcm), bytearray()
             await self.send({"type": "sent", "turn": turn})
-            self.task = asyncio.create_task(self.run_turn(turn, pcm=pcm))
+            if self.turn_mode == "capture":
+                self.task = asyncio.create_task(self.run_capture(turn, pcm=pcm))
+            else:
+                self.task = asyncio.create_task(self.run_turn(turn, pcm=pcm))
+        elif kind == "note.saved":
+            key = self.history_key()
+            left = [n for n in _kept.get(key, []) if n["id"] != msg.get("id")]
+            if left:
+                _kept[key] = left
+            else:
+                _kept.pop(key, None)
         elif kind == "turn.cancel":
             if turn == self.turn:
                 self.cancel_task()
@@ -319,8 +366,9 @@ class BeamSession:
             return
         if struct.unpack("<H", data[2:4])[0] != self.turn & 0xFFFF:
             return
-        if len(self.pcm) < MAX_NOTE_BYTES:
-            self.pcm += data[4:]
+        cap = MAX_CAPTURE_BYTES if self.turn_mode == "capture" else MAX_NOTE_BYTES
+        if len(self.pcm) < cap:
+            self.pcm += data[4:4 + cap - len(self.pcm)]
 
     def cancel_task(self):
         if self.task and not self.task.done():
@@ -391,6 +439,85 @@ class BeamSession:
                 await self.send({"type": "error", "turn": turn, "text": "sCoRE HIT A SNAG"})
             except Exception:
                 pass
+
+    # ── a capture ──
+
+    async def run_capture(self, turn: int, pcm: bytes | None = None, text: str | None = None):
+        """A note, not a conversation: transcribe, shape, send the file. No reply,
+        no speech, and the conversation history is never touched."""
+        t0 = time.monotonic()
+        try:
+            source, duration = "text", None
+            if pcm is not None:
+                source, duration = "voice", round(len(pcm) / (RATE * 2))
+                if len(pcm) / (RATE * 2) < 0.3:
+                    await self.send({"type": "error", "turn": turn, "text": "TOO SHORT TO HEAR"})
+                    return
+                # Whisper takes long audio badly (and a body limit): 5 min at a time.
+                texts = [await transcribe(self.client, pcm[i:i + STT_SEGMENT_BYTES], timeout=120)
+                         for i in range(0, len(pcm), STT_SEGMENT_BYTES)]
+                text = " ".join(t for t in texts if t)
+            text = (text or "").strip()
+            if not text:
+                await self.send({"type": "error", "turn": turn, "text": "DIDN'T CATCH THAT"})
+                return
+            if source == "voice":
+                await self.send({"type": "heard", "turn": turn, "text": text, "final": True})
+
+            shaped = await self.shape(text, source)
+            created = capture.local_time(self.started, self.tz)
+            note_id = capture.safe_id(self.note_id, self.started or time.time(), self.tz, turn)
+            md = capture.assemble_note(note_id, created, self.device, source, duration, text, shaped)
+            note = {"id": note_id, "title": capture.note_title(md), "md": md,
+                    "path": capture.note_path(note_id, created), "ts": time.time()}
+            _keep_note(self.history_key(), note)   # kept first: the link may drop mid-send
+            await self.send_note(turn, note)
+            await self.send({"type": "done", "turn": turn})
+            logger.info("beam capture %s done: %s %.2fs shaped=%s", note_id, source,
+                        time.monotonic() - t0, bool(shaped))
+            audit.log(user_id=self.user["sub"], action="beam", tier="fast", workflow_type="capture", status=200)
+        except asyncio.CancelledError:
+            raise
+        except SpeechLimited as exc:
+            logger.warning("beam %s rate-limited", exc)
+            await self.send({"type": "error", "turn": turn, "text": "SPEECH LIMIT REACHED"})
+        except Exception as exc:
+            logger.exception("beam capture %s failed", turn)
+            audit.log(user_id=self.user["sub"], action="beam", tier="fast", workflow_type="capture",
+                      status=500, error=str(exc))
+            try:
+                await self.send({"type": "error", "turn": turn, "text": "sCoRE HIT A SNAG"})
+            except Exception:
+                pass
+
+    async def shape(self, transcript: str, source: str) -> dict | None:
+        """One fast-tier call for title, tags, summary and notes; None on any
+        failure, so the note still goes out with the transcript alone."""
+        system, messages = capture.build_prompt(transcript, source)
+
+        async def collect() -> str:
+            return "".join([p async for p in llm.stream_chat(
+                messages, system, model_tier="fast", chain=self.chain,
+                max_tokens=2000, extra_body=LLM_EXTRA)])
+        try:
+            return capture.parse_shaped(await asyncio.wait_for(collect(), SHAPE_TIMEOUT_S))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:   # includes the timeout
+            logger.warning("beam capture shaping failed: %r", exc)
+            return None
+
+    async def send_note(self, turn: int, note: dict):
+        parts = capture.split_parts(note["md"])
+        for seq, part in enumerate(parts):
+            await self.send({"type": "note", "turn": turn, "id": note["id"], "title": note["title"],
+                             "path": note["path"], "seq": seq, "last": seq == len(parts) - 1, "md": part})
+
+    async def resend_kept(self):
+        key = self.history_key()
+        _prune_kept(key)
+        for note in list(_kept.get(key, [])):
+            await self.send_note(0, note)
 
     async def speak_chunks(self, turn: int, speech: asyncio.Queue, marks: dict, t0: float):
         """Synthesizes each chunk while the one before plays; out of quota, the
