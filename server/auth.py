@@ -5,7 +5,7 @@ from typing import Optional
 
 import bcrypt
 from jose import jwt, JWTError
-from fastapi import Depends, HTTPException, Header
+from fastapi import Depends, HTTPException, Header, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 # Required, no fallback: it signs every JWT and keys the stored BYO-key encryption
@@ -23,8 +23,50 @@ _bearer = HTTPBearer(auto_error=False)
 
 DEMO_MODE = os.getenv("DEMO_MODE", "").lower() in ("1", "true", "yes")
 
-# Guest identity returned when DEMO_MODE is on and no credentials provided
-_GUEST = {"sub": "guest", "name": "Guest", "tier": "free"}
+# DEMO_MODE guests are loopback-only unless this is also set. Cloud (public demo) sets it;
+# a laptop never does. See is_loopback_client / startup_guard.
+DEMO_MODE_PUBLIC = os.getenv("DEMO_MODE_PUBLIC", "").lower() in ("1", "true", "yes")
+
+_LOOPBACK = {"127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost"}
+
+# Guest identity returned when DEMO_MODE is on and no credentials provided.
+# llm_backend pins guests to Groq so the default chains never reach the CLI providers
+# (claude_code etc. run with the host's own account and filesystem access).
+_GUEST = {"sub": "guest", "name": "Guest", "tier": "free", "llm_backend": "hosted_groq"}
+
+
+def is_loopback_client(request: Request) -> bool:
+    """True only for a direct loopback connection. A forwarding header means a local
+    reverse proxy/tunnel is relaying someone else, so it does not count."""
+    if request.headers.get("x-forwarded-for") or request.headers.get("forwarded"):
+        return False
+    return bool(request.client) and request.client.host in _LOOPBACK
+
+
+def _bind_hosts(argv: list[str]) -> list[str]:
+    hosts = [os.getenv("BIND_HOST", ""), os.getenv("HOST", "")]
+    for i, a in enumerate(argv):
+        if a == "--host" and i + 1 < len(argv):
+            hosts.append(argv[i + 1])
+        elif a.startswith("--host="):
+            hosts.append(a[len("--host="):])
+    return [h.strip() for h in hosts if h.strip()]
+
+
+def startup_guard(argv: list[str] | None = None) -> None:
+    """Refuse DEMO_MODE on a non-loopback bind unless DEMO_MODE_PUBLIC is explicit.
+    The bind host is only visible via --host in argv or a BIND_HOST/HOST env var;
+    the request-time loopback check in require_user covers everything else."""
+    if not DEMO_MODE or DEMO_MODE_PUBLIC:
+        return
+    import sys
+    bad = [h for h in _bind_hosts(sys.argv if argv is None else argv) if h not in _LOOPBACK]
+    if bad:
+        raise RuntimeError(
+            f"DEMO_MODE=true while bound to {bad[0]}: unauthenticated guests would be reachable "
+            "off-machine. Bind 127.0.0.1, set DEMO_MODE=false, or set DEMO_MODE_PUBLIC=true "
+            "for a deliberately public demo."
+        )
 
 
 def make_token(user_id: str, name: str, tier: str = "free", handle: str = "") -> str:
@@ -43,6 +85,7 @@ def decode_token(token: str) -> dict:
 
 
 async def require_user(
+    request:   Request,
     creds:     Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
     x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
 ) -> dict:
@@ -63,9 +106,9 @@ async def require_user(
             }
         raise HTTPException(401, "Invalid API key")
 
-    # Demo mode — unauthenticated access as guest
-    if DEMO_MODE:
-        return _GUEST
+    # Demo mode: unauthenticated guest, loopback only unless DEMO_MODE_PUBLIC
+    if DEMO_MODE and (DEMO_MODE_PUBLIC or is_loopback_client(request)):
+        return dict(_GUEST)
 
     raise HTTPException(
         401,

@@ -19,10 +19,12 @@ Env:
   BEAM_DEVICE_TOKEN    the token a Pocket sends (>beam.token= on the device)
   BEAM_ALLOW_GUEST     true: no token needed (local dev only)
   BEAM_LLM_CHAIN       provider:model,... (default Groq gpt-oss-20b, then gpt-oss-120b)
+                       a linked, healthy laptop node (server/node.py) is tried first per turn
   BEAM_STT_MODEL       default whisper-large-v3-turbo
   BEAM_TTS_MODEL       default canopylabs/orpheus-v1-english
   BEAM_TTS_VOICE       the voice when the device doesn't pick one (default daniel)
   BEAM_TTS_VOICES      the voices a device may pick per turn (default daniel,austin,troy)
+  BEAM_NODE_DEADLINE_S seconds to wait for a linked laptop node before falling back (default 25)
   BEAM_HISTORY_TURNS   conversation turns remembered per device (default 8)
   BEAM_CAPTURE_MAX_S   longest capture recording accepted, seconds (default 600)
 """
@@ -47,6 +49,7 @@ import audit
 import auth
 import capture
 import llm
+import node
 from tools import server_time
 
 logger = logging.getLogger("rabble.beam")
@@ -292,6 +295,11 @@ class BeamSession:
         chain_env = os.getenv("BEAM_LLM_CHAIN", "").strip() or DEFAULT_CHAIN
         self.chain = llm.parse_model_chain(chain_env)
 
+    def turn_chain(self) -> list[dict]:
+        """Voice turns: the owner's laptop node first when one is linked and healthy,
+        then BEAM_LLM_CHAIN. Capture shaping keeps plain self.chain (spec D4)."""
+        return [{**n, "device_id": self.device} for n in node.node_route(self.user["sub"])] + self.chain
+
     async def send(self, msg: dict):
         async with self.send_lock:
             await self.ws.send_text(json.dumps(msg))
@@ -404,7 +412,7 @@ class BeamSession:
             chunker = Chunker()
             reply = []
             async for piece in llm.stream_chat(messages, system, model_tier="fast",
-                                               chain=self.chain, max_tokens=600,
+                                               chain=self.turn_chain(), user=self.user, max_tokens=600,
                                                extra_body=LLM_EXTRA):
                 if "first_text" not in marks:
                     marks["first_text"] = time.monotonic() - t0
@@ -498,7 +506,7 @@ class BeamSession:
         async def collect() -> str:
             return "".join([p async for p in llm.stream_chat(
                 messages, system, model_tier="fast", chain=self.chain,
-                max_tokens=2000, extra_body=LLM_EXTRA)])
+                user=self.user, max_tokens=2000, extra_body=LLM_EXTRA)])
         try:
             return capture.parse_shaped(await asyncio.wait_for(collect(), SHAPE_TIMEOUT_S))
         except asyncio.CancelledError:

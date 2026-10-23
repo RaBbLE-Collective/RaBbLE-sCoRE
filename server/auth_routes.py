@@ -85,7 +85,10 @@ def _profile_to_dict(profile: UserProfile) -> dict:
 
 @router.post("/register", status_code=201)
 async def register(body: RegisterRequest):
-    """Legacy registration — creates a file-backed UserProfile with an auto-handle."""
+    """Legacy registration — creates a file-backed UserProfile with an auto-handle.
+    Off unless ALLOW_REGISTER=true: it is open to anyone and returns a working API key."""
+    if os.getenv("ALLOW_REGISTER", "").lower() not in ("1", "true", "yes"):
+        raise HTTPException(404, "Not found")
     base_handle = re.sub(r"[^a-z0-9]", "-", body.name.lower().strip())[:20].strip("-") or "user"
     handle = base_handle
     existing_handles = user_store.list_handles()

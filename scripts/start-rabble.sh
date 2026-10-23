@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Bootstrap all RaBbLE-sCoRE sessions in tmux
 # Flags: --restart  kill existing sessions before starting
-#        --with-server  also start the FastAPI web server on :8000
+#        --with-server  also start the FastAPI web server on 127.0.0.1:8083
 
 set -euo pipefail
 
@@ -30,9 +30,9 @@ tmux new-session -d -s rabble-score -c "$REPO_ROOT" \
   echo "[sCoRE] rabble-score already running"
 
 if $WITH_SERVER; then
-  echo "[sCoRE] Starting web server on :8000..."
+  echo "[sCoRE] Starting web server on 127.0.0.1:8083..."
   tmux new-session -d -s rabble-server -c "$REPO_ROOT/server" \
-    "uvicorn main:app --host 0.0.0.0 --port 8000 --reload" 2>/dev/null || \
+    "uvicorn main:app --host 127.0.0.1 --port 8083 --reload" 2>/dev/null || \
     echo "[sCoRE] rabble-server already running"
 fi
 
@@ -42,5 +42,5 @@ tmux list-sessions 2>/dev/null | grep -E "rabble-(score|dispatch|memory|search|e
 echo ""
 echo "[sCoRE] Attach: tmux attach -t rabble-score"
 if $WITH_SERVER; then
-  echo "[sCoRE] Server:  http://localhost:8000/health"
+  echo "[sCoRE] Server:  http://127.0.0.1:8083/health"
 fi

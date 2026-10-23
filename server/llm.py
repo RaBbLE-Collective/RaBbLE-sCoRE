@@ -101,6 +101,14 @@ BUILTIN_PROVIDERS = {
         "api_key_required": False,
         "extra_headers": {},
     },
+    # The laptop node link (server/node.py): a turn goes out over the node's
+    # WebSocket and Claude Code runs there.  Chain entries carry an "owner".
+    "node": {
+        "type": "node",
+        "api_key_env": "",
+        "api_key_required": False,
+        "extra_headers": {},
+    },
     "codex": {
         "type": "subprocess",
         "cli_style": "codex",
@@ -309,7 +317,7 @@ def resolve_user_chain(user: dict, model_tier: str = "medium") -> list[dict]:
     if backend in _hosted_provider_map:
         provider = _hosted_provider_map[backend]
         candidates = [c for c in DEFAULT_MODEL_CHAINS[model_tier] if c["provider"] == provider]
-        return candidates or DEFAULT_MODEL_CHAINS[model_tier]
+        return candidates or _without_cli(DEFAULT_MODEL_CHAINS[model_tier])
 
     # ── Local backends (no remote key needed) ─────────────────────────────────
     if backend == "local_ollama":
@@ -331,6 +339,41 @@ def resolve_user_chain(user: dict, model_tier: str = "medium") -> list[dict]:
             return [{"provider": provider, "model": model, "api_key_override": byo_key}]
 
     return DEFAULT_MODEL_CHAINS[model_tier]
+
+def _is_cli(provider_name: str) -> bool:
+    """A subprocess provider: it runs a binary on this machine with this machine's account."""
+    return _provider(provider_name).get("type") == "subprocess"
+
+def _without_cli(chain: list[dict]) -> list[dict]:
+    """A chain minus the subprocess/CLI providers (Claude Code, Codex, ...)."""
+    return [c for c in chain if not _is_cli(c["provider"])]
+
+# The owner identity: the Pocket's beam device token (beam._authorize) files itself under this sub.
+OWNER_SUB = "pocket"
+
+def _cli_allowed_subs() -> set[str]:
+    return {s.strip() for s in os.getenv("CLI_ALLOWED_SUBS", "").split(",") if s.strip()}
+
+def _cli_allowed(user: dict | None) -> bool:
+    """CLI providers are explicit-allow: the owner identity, or a sub listed in CLI_ALLOWED_SUBS.
+    Anonymous callers, guests and registered members never qualify."""
+    if not user:
+        return False
+    sub = user.get("sub")
+    return bool(sub) and (sub == OWNER_SUB or sub in _cli_allowed_subs())
+
+def _resolve_candidates(tier: str, chain: list[dict] | None, user: dict | None) -> list[dict]:
+    """The candidates to try. CLI providers run on the owner's machine and account, so
+    only _cli_allowed users reach them, whatever chain they came from (an explicit
+    chain included). A `node` entry only serves the owner it was built for."""
+    if chain is None:
+        chain = resolve_user_chain(user, tier) if user else _model_chain(tier)
+    if not _cli_allowed(user):
+        chain = _without_cli(chain)
+    sub = (user or {}).get("sub")
+    chain = [c for c in chain
+             if _provider(c["provider"]).get("type") != "node" or (sub and c.get("owner") == sub)]
+    return _available_candidates(tier, chain)
 
 def _available_candidates(tier: str, chain: list[dict] | None = None) -> list[dict]:
     candidates = []
@@ -431,6 +474,28 @@ def _format_messages_for_cli(messages: list[dict]) -> str:
     last = messages[-1].get("content", "")
     return f"[Prior conversation:]\n{history}\n\n[Current message:]\n{last}"
 
+CC_DEFAULT_TOOLS = "WebSearch,WebFetch"
+CC_DISALLOWED_TOOLS = "Bash,Read,Edit,Write,Glob,Grep,NotebookEdit"
+
+def cc_cwd() -> str | None:
+    """Working directory for Claude Code: the curated context dir, else the legacy workdir."""
+    path = os.getenv("CC_CONTEXT_DIR") or os.getenv("CC_WORKDIR") or None
+    return os.path.expanduser(path) if path else None
+
+# Claude Code gets only these from the parent environment; everything else (server
+# secrets, *_API_KEY, JWT_SECRET, SCORE_NODE_SECRET, BEAM_DEVICE_TOKEN, RENDER_*, ...) is dropped.
+_CC_ENV_EXACT = {"PATH", "HOME", "USER", "LOGNAME", "LANG", "TERM", "TMPDIR", "SHELL", "TZ",
+                 "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+                 "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS"}
+_CC_ENV_PREFIXES = ("LC_", "XDG_", "CLAUDE_", "ANTHROPIC_")
+
+def scrubbed_env(extra: dict | None = None) -> dict:
+    """A minimal environment for Claude Code: allowlisted names only, plus `extra`."""
+    env = {k: v for k, v in os.environ.items()
+           if k in _CC_ENV_EXACT or k.startswith(_CC_ENV_PREFIXES)}
+    env.update(extra or {})
+    return env
+
 def _subprocess_argv(p: dict, model: str, system_prompt: str, prompt: str) -> list[str]:
     """Build argv for a subprocess harness based on its cli_style."""
     # Commands can include a wrapper, for example:
@@ -443,27 +508,37 @@ def _subprocess_argv(p: dict, model: str, system_prompt: str, prompt: str) -> li
     style = p.get("cli_style", "claude_code")
     if style == "claude_code":
         argv = [*command, "--print", "--model", model, "--system-prompt", system_prompt]
-        # Print mode cannot answer an interactive permission prompt.  A local
-        # Beam can explicitly pre-approve a narrow tool set (normally only
-        # WebSearch and WebFetch) without granting filesystem or shell access.
-        allowed_tools = os.getenv("CC_ALLOWED_TOOLS", "").strip()
-        if allowed_tools:
-            argv.extend(["--allowedTools", allowed_tools])
-        return [*argv, "-p", prompt]
+        # --tools sets which built-in tools exist at all (default WebSearch and
+        # WebFetch only); --allowedTools just pre-approves them, because print
+        # mode cannot answer a permission prompt.  --allowedTools alone does NOT
+        # remove Read/Bash/etc., so --disallowedTools repeats the ban as a
+        # second layer.  No user/project/local settings and no MCP servers are
+        # loaded, and nothing is persisted.  The remaining file wall is cwd
+        # (cc_cwd): point CC_CONTEXT_DIR at a directory with nothing secret in it.
+        tools = os.getenv("CC_TOOLS", "").strip() or CC_DEFAULT_TOOLS
+        allowed_tools = os.getenv("CC_ALLOWED_TOOLS", "").strip() or tools
+        argv.extend(["--tools", tools, "--allowedTools", allowed_tools,
+                     "--disallowedTools", CC_DISALLOWED_TOOLS,
+                     "--setting-sources", "", "--strict-mcp-config",
+                     "--no-session-persistence"])
+        # "--" ends option parsing: a prompt like "--settings={...}" stays the prompt.
+        return [*argv, "--", prompt]
+    # The prompt is user text.  Positional prompts follow "--"; flag-valued ones use the
+    # joined --flag=value form so a leading "--" can never be read as another option.
     if style == "codex":
         # Codex CLI: non-interactive full-context mode
-        return [*command, "--full-context", "--quiet", "-m", model, prompt]
+        return [*command, "--full-context", "--quiet", "-m", model, "--", prompt]
     if style == "opencode":
         # opencode non-interactive: `opencode run --print <prompt>`
-        return [*command, "run", "--print", "--model", model, prompt]
+        return [*command, "run", "--print", "--model", model, "--", prompt]
     if style == "aider":
-        # aider non-interactive: `aider --no-pretty --message <prompt>`
-        return [*command, "--no-pretty", "--no-auto-commits", "--message", prompt]
+        # aider non-interactive: `aider --no-pretty --message=<prompt>`
+        return [*command, "--no-pretty", "--no-auto-commits", f"--message={prompt}"]
     if style == "gemini_cli":
-        # Google Gemini CLI: `gemini -p <prompt>`
-        return [*command, "-p", prompt]
+        # Google Gemini CLI: `gemini --prompt=<prompt>` (-p)
+        return [*command, f"--prompt={prompt}"]
     # Unknown style — fall back to CC pattern
-    return [*command, "--print", "--model", model, "-p", prompt]
+    return [*command, "--print", "--model", model, "--", prompt]
 
 
 async def _stream_subprocess(
@@ -478,9 +553,12 @@ async def _stream_subprocess(
     prompt = _format_messages_for_cli(messages)
     argv = _subprocess_argv(p, model, system_prompt, prompt)
 
-    # Merge any provider-level env overrides (e.g. ANTHROPIC_BASE_URL for fcc proxy)
+    # Merge any provider-level env overrides (e.g. ANTHROPIC_BASE_URL for fcc proxy).
+    # Claude Code gets a scrubbed environment; other CLIs keep theirs (they carry their own keys).
     env: dict | None = None
-    if p.get("subprocess_env"):
+    if p.get("cli_style") == "claude_code":
+        env = scrubbed_env(p.get("subprocess_env"))
+    elif p.get("subprocess_env"):
         env = {**os.environ, **p["subprocess_env"]}
 
     logger.warning(
@@ -492,18 +570,20 @@ async def _stream_subprocess(
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
-            # Run in the Collective root to load its AGENT.md / CLAUDE.md and
-            # expose the Grimoire plus RaBbLE-OS to the Claude session.
-            cwd=os.getenv("CC_WORKDIR") or None,
+            # CC_CONTEXT_DIR (a curated, secret-free dir) wins over CC_WORKDIR
+            # (e.g. the Collective root, which exposes .env files to any tool).
+            cwd=cc_cwd(),
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
     except FileNotFoundError:
         raise RuntimeError(f"{command} not found — install it or check PATH")
     except asyncio.TimeoutError:
         proc.kill()
+        await proc.wait()
         raise RuntimeError(f"{command} subprocess timed out after 120s")
 
     if proc.returncode != 0:
@@ -529,12 +609,23 @@ async def stream_chat(
 
     `chain` overrides the tier's model chain (the beam pins Groq for speed)."""
     model_tier = _ensure_tier(model_tier)
-    if chain is None:
-        chain = resolve_user_chain(user, model_tier) if user else None
-    candidates = _available_candidates(model_tier, chain)
+    candidates = _resolve_candidates(model_tier, chain, user)
     last_error = None
     async with httpx.AsyncClient() as client:
         for index, candidate in enumerate(candidates, start=1):
+            if _provider(candidate["provider"]).get("type") == "node":
+                import node  # lazy: node.py is the cloud side of the node link
+                try:
+                    async for chunk in node.stream_turn(candidate, messages, system_prompt):
+                        yield chunk
+                    return
+                except Exception as exc:
+                    last_error = exc
+                    if index < len(candidates):
+                        logger.warning("node fallback owner=%s reason=%s", candidate.get("owner"), exc)
+                        continue
+                    raise last_error
+
             # Subprocess providers (CC, Codex) bypass HTTP
             if _provider(candidate["provider"]).get("type") == "subprocess":
                 try:
@@ -605,8 +696,7 @@ async def complete_chat(
 ) -> str:
     """Non-streaming completion — use for structured extraction."""
     model_tier = _ensure_tier(model_tier)
-    chain = resolve_user_chain(user, model_tier) if user else None
-    candidates = _available_candidates(model_tier, chain)
+    candidates = _resolve_candidates(model_tier, None, user)
     last_error = None
     async with httpx.AsyncClient() as client:
         for index, candidate in enumerate(candidates, start=1):
@@ -658,6 +748,7 @@ async def chat_with_tools(
     system_prompt: str,
     tools: list[dict],
     model_tier: str = "medium",
+    user: dict | None = None,
 ) -> dict:
     """
     Function-calling completion. Returns either:
@@ -665,7 +756,7 @@ async def chat_with_tools(
       {"type": "tool_call", "name": "...", "arguments": {...}}
     """
     model_tier = _ensure_tier(model_tier)
-    candidates = _available_candidates(model_tier)
+    candidates = _resolve_candidates(model_tier, None, user)
     last_error = None
     async with httpx.AsyncClient() as client:
         for index, candidate in enumerate(candidates, start=1):

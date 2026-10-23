@@ -20,9 +20,17 @@ import users as user_store
 import sessions as session_store
 from auth_routes import router as auth_router, member_router
 from beam import router as beam_router
+from node import router as node_router
 
 logger = logging.getLogger("rabble")
 logging.basicConfig(level=logging.INFO)
+
+auth.startup_guard()   # raises on DEMO_MODE + non-loopback bind
+if auth.DEMO_MODE:
+    logger.warning(
+        "DEMO_MODE is on: unauthenticated guests allowed from %s",
+        "ANY address (DEMO_MODE_PUBLIC)" if auth.DEMO_MODE_PUBLIC else "loopback only",
+    )
 
 app = FastAPI(
     title="RaBbLE",
@@ -32,16 +40,26 @@ app = FastAPI(
 
 
 def _cors_origins() -> list[str]:
+    """CORS_ORIGINS (comma-separated) wins everywhere.  Without it, the public cloud
+    demo (DEMO_MODE_PUBLIC) keeps FRONTEND_URL (default *); any other instance, a local
+    one, allows no cross-origin pages at all."""
+    explicit = os.getenv("CORS_ORIGINS", "").strip()
+    if explicit:
+        return [o.strip() for o in explicit.split(",") if o.strip()]
+    if not auth.DEMO_MODE_PUBLIC:
+        return []
     raw = os.getenv("FRONTEND_URL", "*").strip()
     if not raw or raw == "*":
         return ["*"]
     return [o.strip() for o in raw.split(",") if o.strip()]
 
 
+_CORS_ORIGINS = _cors_origins()
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_cors_origins(),
-    allow_credentials=True,
+    allow_origins=_CORS_ORIGINS,
+    allow_credentials="*" not in _CORS_ORIGINS,   # auth is Bearer/X-API-Key, never cookies
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -49,6 +67,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(member_router)
 app.include_router(beam_router)   # RaBbLE-Pocket's voice link (beam.py)
+app.include_router(node_router)   # laptop node link (node.py)
 
 
 # ── Request models ─────────────────────────────────────────────────────────────
@@ -144,6 +163,7 @@ async def _resolve_tools(
     messages: list[dict],
     system_prompt: str,
     tier: str,
+    user: dict | None = None,
 ) -> list[dict]:
     """Run a tool-calling pre-pass for medium/strong tiers.
 
@@ -155,7 +175,7 @@ async def _resolve_tools(
         return messages
     try:
         result = await llm.chat_with_tools(
-            messages, system_prompt, tools.ALL_TOOLS, model_tier=tier
+            messages, system_prompt, tools.ALL_TOOLS, model_tier=tier, user=user
         )
         if result["type"] != "tool_call":
             return messages
@@ -237,7 +257,7 @@ async def chat(
     logger.info("chat user=%s tier=%s wf=%s", user_id, routed_tier, wf_type)
     audit.log(user_id=user_id, action="chat", tier=routed_tier, workflow_type=wf_type, status=0)
 
-    chat_messages = await _resolve_tools(req.messages, system_prompt, routed_tier)
+    chat_messages = await _resolve_tools(req.messages, system_prompt, routed_tier, user_profile)
 
     async def _stream():
         assistant_chunks: list[str] = []
@@ -319,6 +339,7 @@ async def create_workflow(
             [{"role": "user", "content": init_content}],
             system_prompt,
             model_tier=req.model_tier,
+            user=_load_user_profile(user),
         )
         wf_store.add_message(wf_id, "assistant", response)
         wf_store.set_state(
@@ -383,7 +404,7 @@ async def workflow_step(
     messages = wf_store.get(wf_id, user_id)["messages"]
 
     try:
-        response = await llm.complete_chat(messages, system_prompt, model_tier=record["model_tier"])
+        response = await llm.complete_chat(messages, system_prompt, model_tier=record["model_tier"], user=_load_user_profile(user))
         step_num = len(record["steps"])
         wf_store.add_message(wf_id, "assistant", response)
         wf_store.set_state(
@@ -485,7 +506,7 @@ async def session_message(
     system_prompt = build_session_prompt(user_profile, model_tier=routed_tier)
     audit.log(user_id=user_id, action="session_message", tier=routed_tier, status=0)
 
-    chat_history = await _resolve_tools(history, system_prompt, routed_tier)
+    chat_history = await _resolve_tools(history, system_prompt, routed_tier, user_profile)
 
     async def _stream():
         assistant_chunks: list[str] = []
