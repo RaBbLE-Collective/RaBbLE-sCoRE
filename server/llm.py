@@ -1,4 +1,4 @@
-import httpx, os, json, logging, asyncio
+import httpx, os, json, logging, asyncio, shlex
 from typing import AsyncGenerator
 
 logger = logging.getLogger("rabble.llm")
@@ -433,24 +433,37 @@ def _format_messages_for_cli(messages: list[dict]) -> str:
 
 def _subprocess_argv(p: dict, model: str, system_prompt: str, prompt: str) -> list[str]:
     """Build argv for a subprocess harness based on its cli_style."""
-    command = p.get("command", "claude")
+    # Commands can include a wrapper, for example:
+    # CC_COMMAND="podman exec -i rabble-claude claude"
+    # Keep this as argv (rather than a shell string) so prompts never become
+    # shell input.
+    command = shlex.split(p.get("command", "claude"))
+    if not command:
+        raise RuntimeError("configured CLI command is empty")
     style = p.get("cli_style", "claude_code")
     if style == "claude_code":
-        return [command, "--print", "--model", model, "--system-prompt", system_prompt, "-p", prompt]
+        argv = [*command, "--print", "--model", model, "--system-prompt", system_prompt]
+        # Print mode cannot answer an interactive permission prompt.  A local
+        # Beam can explicitly pre-approve a narrow tool set (normally only
+        # WebSearch and WebFetch) without granting filesystem or shell access.
+        allowed_tools = os.getenv("CC_ALLOWED_TOOLS", "").strip()
+        if allowed_tools:
+            argv.extend(["--allowedTools", allowed_tools])
+        return [*argv, "-p", prompt]
     if style == "codex":
         # Codex CLI: non-interactive full-context mode
-        return [command, "--full-context", "--quiet", "-m", model, prompt]
+        return [*command, "--full-context", "--quiet", "-m", model, prompt]
     if style == "opencode":
         # opencode non-interactive: `opencode run --print <prompt>`
-        return [command, "run", "--print", "--model", model, prompt]
+        return [*command, "run", "--print", "--model", model, prompt]
     if style == "aider":
         # aider non-interactive: `aider --no-pretty --message <prompt>`
-        return [command, "--no-pretty", "--no-auto-commits", "--message", prompt]
+        return [*command, "--no-pretty", "--no-auto-commits", "--message", prompt]
     if style == "gemini_cli":
         # Google Gemini CLI: `gemini -p <prompt>`
-        return [command, "-p", prompt]
+        return [*command, "-p", prompt]
     # Unknown style — fall back to CC pattern
-    return [command, "--print", "--model", model, "-p", prompt]
+    return [*command, "--print", "--model", model, "-p", prompt]
 
 
 async def _stream_subprocess(
@@ -482,6 +495,9 @@ async def _stream_subprocess(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
+            # Run in the Collective root to load its AGENT.md / CLAUDE.md and
+            # expose the Grimoire plus RaBbLE-OS to the Claude session.
+            cwd=os.getenv("CC_WORKDIR") or None,
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
     except FileNotFoundError:

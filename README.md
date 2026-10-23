@@ -138,6 +138,39 @@ cp server/secrets.example server/.secrets  # fill in GROQ_API_KEY, OPENROUTER_AP
 ./harness/local.sh                         # creates .venv, generates .env, starts uvicorn --reload
 ```
 
+### RaBbLE-Pocket → Claude Code bridge
+
+The Beam keeps Groq for speech-to-text and text-to-speech, then sends the
+transcribed intent to Claude Code. Configure the local `server/.env`:
+
+```dotenv
+BEAM_LLM_CHAIN=claude_code:sonnet
+CC_COMMAND=claude
+CC_WORKDIR=/home/rabble/RaBbLE-Collective
+```
+
+`CC_WORKDIR` makes each Claude Code invocation start at the Collective root,
+where `CLAUDE.md` loads the shared operating context and the Grimoire and
+RaBbLE-OS member trees are reachable. Start the local server, then make the
+Pocket beam to the laptop's LAN address on port `8000`.
+
+```bash
+./harness/local.sh
+# Pocket console, substituting the laptop's LAN address and its Beam token:
+# >beam.url=ws://192.168.x.x:8000/api/v1/beam
+```
+
+For a Claude Code process already running in a persistent Podman or Docker
+container, set `CC_COMMAND` to an argv-style wrapper instead:
+
+```dotenv
+CC_COMMAND=podman exec -i rabble-claude claude
+```
+
+Mount the Collective at the same `CC_WORKDIR` path inside that container and
+authenticate Claude Code there. The sCoRE server remains on the host so the
+Pocket can reach it and the audio path stays local.
+
 ### API surface
 
 | Route | Purpose |
