@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# rabble: open Claude Code as RaBbLE with the Crew (S273). See crew/rabble.py.
+# Installed to ~/.local/bin/rabble by RaBbLE-OS ai-harnesses (claude-code task).
+set -euo pipefail
+here="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+exec python3 "$here/../crew/rabble.py" "$@"

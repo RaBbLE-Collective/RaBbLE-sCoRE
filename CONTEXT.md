@@ -116,6 +116,10 @@ Run locally for the Pocket: `cd server && BEAM_ALLOW_GUEST=true uv run --with-re
 
 **Known stale:** `DEFAULT_MODEL_CHAINS` in `server/llm.py` still lists Groq models the key no longer has (`llama-3.3-70b-versatile`, `llama-3.1-8b-instant`, `llama-4-scout`, `qwen3-32b`); a Groq 404 doesn't fall back, so the local medium tier likely errors. Not fixed yet.
 
+### The Crew — `rabble` wraps Claude Code (S273)
+
+`crew/rabble.py` (+ `scripts/rabble`, linked to `~/.local/bin/rabble` by RaBbLE-OS `layerctl apply claude-code`) opens an interactive Claude Code session as **RaBbLE**, lead of the Crew, with the eight organs (GoBbLE, QuiBbLE, CoBbLE, CrumBbLE, NiBbLE, the Archivist, BaBbLE, DaBbLE) available as agent-team teammates. Persona specs are canonical in `RaBbLE-Grimoire/RaBbLE/Crew/`; this repo holds only the Claude Code adapter. Run it from the Collective root, never from inside this repo (`.claude/settings.json` here blocks Bash and Agent). Design: `RaBbLE-Grimoire/RaBbLE-sCoRE/RaBbLE-sCoRE-Crew.md`. Positional `rabble "msg"` stays reserved for L-09.
+
 ## What Is Not Done Yet
 
 ### Episode 1 Exit Conditions (current target)
