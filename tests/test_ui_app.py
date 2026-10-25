@@ -154,3 +154,28 @@ async def test_at_completion(tmp_path):
         assert app.prompt.dropdown.option_count == 1
         await pilot.press("tab")
         assert app.composer.text == "@notes.md "
+
+
+@pytest.mark.asyncio
+async def test_engine_calls_that_raise_become_notices(tmp_path):
+    # the client is None until start() finishes: typing fast at launch must not exit the app
+    class NotConnected(ReplayBackend):
+        async def send(self, text):
+            raise RuntimeError("Not connected")
+
+        async def set_model(self, model):
+            raise RuntimeError("Not connected")
+
+        async def interrupt(self):
+            raise RuntimeError("Not connected")
+
+    app = RabbleApp(lambda r, c: NotConnected.from_file(FIX / "tool-turn.jsonl"), cwd=str(tmp_path))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await say(pilot, "hi")
+        await say(pilot, "/model opus")
+        await pilot.press("escape")
+        await pilot.pause(0.2)
+        assert app.is_running
+        errors = [str(w.render()) for w in app.transcript.query("Static.error")]
+        assert sum("Not connected" in e for e in errors) == 3
+        assert app.header.model != "opus"

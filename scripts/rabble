@@ -17,4 +17,5 @@ if [[ ! -x "$venv_py" ]]; then
   echo "rabble: RaBbLE-UI venv missing ($venv_py); opening the Claude Code wrapper. Build it: layerctl apply claude-code" >&2
   exec python3 "$score/crew/rabble.py" "$@"
 fi
-exec env PYTHONPATH="$score${PYTHONPATH:+:$PYTHONPATH}" "$venv_py" -m ui --cwd "$PWD" "$@"
+# -P: the launch dir must not shadow sCoRE's packages (a repo with its own ui/ would run instead)
+exec env PYTHONPATH="$score${PYTHONPATH:+:$PYTHONPATH}" "$venv_py" -P -m ui --cwd "$PWD" "$@"

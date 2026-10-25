@@ -220,8 +220,8 @@ class RabbleApp(App):
             await self._command(word, text[len(word):].strip())
         else:
             await self.transcript.user(text)
-            await self.backend.send(text)
-            await self.transcript.thinking()
+            if await self._engine("send", self.backend.send, text):
+                await self.transcript.thinking()
         self._set_mood()
 
     async def _command(self, word: str, arg: str) -> None:
@@ -231,7 +231,8 @@ class RabbleApp(App):
         elif word == "/model":
             if not arg:
                 return await t.notice(f"model: {self.header.model}")
-            await self.backend.set_model(arg)
+            if not await self._engine("model", self.backend.set_model, arg):
+                return
             self.header.model = arg
             self.header.refresh_info()
             await t.notice(f"model set to {arg}")
@@ -257,6 +258,22 @@ class RabbleApp(App):
 
             self.push_screen(picker(self.cwd), lambda sid: self.run_worker(chosen(sid)))
 
+    async def _engine(self, what: str, fn, *args) -> bool:
+        """Every face → engine call goes through here. The client is None until start()
+        finishes and gone once the engine dies; a raise in a message handler would exit
+        the app and lose the transcript, so it becomes a notice instead."""
+        if self.backend is None:
+            await self.transcript.notice(f"{what}: engine not running (/clear restarts it)", error=True)
+            return False
+        try:
+            result = fn(*args)
+            if hasattr(result, "__await__"):
+                await result
+            return True
+        except Exception as e:
+            await self.transcript.notice(f"{what} failed: {e} (/clear restarts the engine)", error=True)
+            return False
+
     async def _restart(self, resume: str | None, cont: bool, clear: bool = False) -> None:
         self.workers.cancel_group(self, "engine")
         old = self.backend
@@ -275,7 +292,8 @@ class RabbleApp(App):
         self._pump(self.backend)
 
     async def _set_mode(self, mode: str) -> None:
-        await self.backend.set_permission_mode(mode)
+        if not await self._engine("mode", self.backend.set_permission_mode, mode):
+            return
         self.mode = mode
         self.header.mode = mode
         self.header.refresh_info()
@@ -284,7 +302,7 @@ class RabbleApp(App):
         name = m.name
         if name == "interrupt":
             self._asks.clear()
-            await self.backend.interrupt()
+            await self._engine("interrupt", self.backend.interrupt)
             await self.transcript.stop_thinking()
         elif name == "cycle_mode":
             await self._set_mode(MODES[(MODES.index(self.mode) + 1) % len(MODES)])

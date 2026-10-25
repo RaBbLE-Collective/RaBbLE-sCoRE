@@ -48,6 +48,12 @@ def drive(screen, keys, text=None):
     return asyncio.run(go())
 
 
+@pytest.fixture(autouse=True)
+def armed_now(monkeypatch):
+    """Tests press keys at once; the arming delay has its own test."""
+    monkeypatch.setattr(PermissionScreen, "ARM_SECONDS", 0.0)
+
+
 def ask(tool="Bash", **inp):
     return PermissionAsk(id="1", organ="rabble", tool=tool, input=inp)
 
@@ -143,3 +149,21 @@ def test_no_hex_literals():
     for f in ("widgets/permission.py", "widgets/sessions.py"):
         src = open(os.path.join(ROOT, "ui", f)).read()
         assert not re.search(r"#[0-9a-fA-F]{6}\b", src), f
+
+
+def test_keys_inside_the_arming_window_are_ignored(monkeypatch):
+    # a keystroke meant for the composer must not answer an ask nobody has read
+    monkeypatch.setattr(PermissionScreen, "ARM_SECONDS", 30.0)
+
+    async def go():
+        app = Host(PermissionScreen(ask(command="rm -rf build")))
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            for k in ("a", "y", "n"):
+                await pilot.press(k)
+            await pilot.pause()
+            early = app.result
+            await pilot.press("escape")  # deny is never held back
+            await pilot.pause()
+        return early, app.result
+    assert asyncio.run(go()) == ("unset", PermissionReply("deny"))

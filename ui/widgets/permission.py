@@ -7,6 +7,7 @@ Colours come from theme variables only.
 
 import difflib
 import json
+import time
 
 from textual import on
 from textual.app import ComposeResult
@@ -81,9 +82,21 @@ class PermissionScreen(ModalScreen[PermissionReply]):
     PermissionScreen.-denying #perm-buttons { display: none; }
     """
 
+    # keys are ignored this long after the modal appears: a keystroke meant for the composer
+    # (or a second "y" meant for the previous ask) must not answer an ask nobody has read yet.
+    # Esc (deny) is never held back.
+    ARM_SECONDS = 0.4
+
     def __init__(self, ask: PermissionAsk) -> None:
         super().__init__()
         self.ask = ask
+        self._armed_at = float("inf")
+
+    def on_mount(self) -> None:
+        self._armed_at = time.monotonic() + self.ARM_SECONDS
+
+    def _armed(self) -> bool:
+        return time.monotonic() >= self._armed_at
 
     def compose(self) -> ComposeResult:
         a = self.ask
@@ -105,11 +118,13 @@ class PermissionScreen(ModalScreen[PermissionReply]):
             yield Input(placeholder="why not? (optional, Enter to deny)", id="perm-reason")
 
     def action_choose(self, decision: str) -> None:
-        if self.has_class("-denying"):
+        if self.has_class("-denying") or not self._armed():
             return
         self.dismiss(PermissionReply(decision))  # type: ignore[arg-type]
 
     def action_deny(self) -> None:
+        if not self._armed():
+            return
         self.add_class("-denying")
         self.query_one("#perm-reason", Input).focus()
 
