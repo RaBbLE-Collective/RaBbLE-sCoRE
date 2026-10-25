@@ -1,6 +1,20 @@
 #!/usr/bin/env bash
-# rabble: open Claude Code as RaBbLE with the Crew (S273). See crew/rabble.py.
-# Installed to ~/.local/bin/rabble by RaBbLE-OS ai-harnesses (claude-code task).
+# rabble: RaBbLE's own terminal face over a headless Claude Code (ui/, S278).
+#   rabble [--model M] [--continue] [--resume ID] [--permission-mode MODE]   the UI
+#   rabble --cc [args]                                                         the S273 Claude Code wrapper (crew/rabble.py)
+# The UI runs in the RaBbLE-UI venv built by RaBbLE-OS ai-harnesses (layerctl apply claude-code);
+# without it, rabble falls back to the wrapper. Installed to ~/.local/bin/rabble by that same task.
 set -euo pipefail
 here="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
-exec python3 "$here/../crew/rabble.py" "$@"
+score="$(dirname "$here")"
+venv_py="${RABBLE_UI_PYTHON:-$HOME/.local/share/RaBbLE/rabble-ui/bin/python}"
+
+if [[ "${1:-}" == "--cc" ]]; then
+  shift
+  exec python3 "$score/crew/rabble.py" "$@"
+fi
+if [[ ! -x "$venv_py" ]]; then
+  echo "rabble: RaBbLE-UI venv missing ($venv_py); opening the Claude Code wrapper. Build it: layerctl apply claude-code" >&2
+  exec python3 "$score/crew/rabble.py" "$@"
+fi
+exec env PYTHONPATH="$score${PYTHONPATH:+:$PYTHONPATH}" "$venv_py" -m ui --cwd "$PWD" "$@"

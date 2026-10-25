@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """rabble: open Claude Code as RaBbLE, with the Crew as agent-team organs.
 
-Bare `rabble` is the Claude Code wrapper (S273). Positional words (`rabble "msg"`,
-`rabble status`) stay reserved for the L-09 sCoRE streaming CLI.
+`rabble --cc` reaches this Claude Code wrapper (S273); bare `rabble` opens RaBbLE-UI
+(ui/, S278; see scripts/rabble). Positional words (`rabble "msg"`, `rabble status`) stay
+reserved for the L-09 sCoRE streaming CLI.
 
-  rabble                       RaBbLE lead session, Crew available as teammates
-  rabble --model opus ...      flags starting with '-' pass straight to claude
-  rabble -- "first prompt"     everything after '--' passes to claude
-  rabble --crew-list           print the roster and exit
-  rabble --crew-print          print the lead prompt + agents JSON and exit
+  rabble --cc                     RaBbLE lead session, Crew available as teammates
+  rabble --cc --model opus ...    flags starting with '-' pass straight to claude
+  rabble --cc -- "first prompt"   everything after '--' passes to claude
+  rabble --cc --crew-list         print the roster and exit
+  rabble --cc --crew-print        print the lead prompt + agents JSON and exit
 
 Persona specs are canonical in RaBbLE-Grimoire/RaBbLE/Crew/ (LLM-agnostic); this
 file is only the Claude Code adapter. Design: RaBbLE-Grimoire/RaBbLE-sCoRE/RaBbLE-sCoRE-Crew.md
@@ -41,8 +42,9 @@ HEADLESS_FLAGS = {"-p", "--print"}
 PROMPT_KEEP_SECONDS = 7 * 24 * 3600
 RESERVED_MSG = (
     "rabble: positional words are reserved for the sCoRE streaming CLI (L-09, not built yet).\n"
-    "  rabble                  open the RaBbLE Claude Code session\n"
-    "  rabble -- \"prompt\"      open it with a first prompt\n"
+    "  rabble                     open RaBbLE-UI\n"
+    "  rabble --cc                open the RaBbLE Claude Code session\n"
+    "  rabble --cc -- \"prompt\"   open it with a first prompt\n"
 )
 # Crew Thread (candidate, RaBbLE-Palette-Candidates.md); muted text is canonical
 THREAD = "#31c7d5"
