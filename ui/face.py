@@ -24,7 +24,7 @@ from rich.style import Style
 from textual.strip import Strip
 from textual.widget import Widget
 
-from ui import theme
+from ui import eyes, theme
 
 # ── face rig (alive-backend.js, face units) ─────────────────────────────────
 EYE_RX, EYE_RY, POR_RX, POR_RY, EYE_X, POR_OFF = 43.5, 136, 117, 35, 92, 126
@@ -128,6 +128,7 @@ class Canvas:
         self.bg = [[bg] * cols for _ in range(rows)]
         self.fill = {}  # (px, py) -> rgb
         self.dots = {}  # (dx, dy) -> (rgb, weight)
+        self.override = {}  # (row, col) -> (glyph, fg, bg): cells drawn by the fine eye renderer
 
     def glow(self, fn):
         for r in range(self.rows):
@@ -156,6 +157,8 @@ class Canvas:
 
     def _cell(self, r, c):
         """(char, fg, bg) for one cell."""
+        if (r, c) in self.override:
+            return self.override[(r, c)]
         bg = self.bg[r][c]
         if self.octant:
             return self._octant_cell(r, c, bg)
@@ -289,12 +292,15 @@ class Face:
         # ovals, wider, solid rim on the long sides only (octant cells hold two colours, so a rim at
         # the tips turns them into arrowheads), and no glow behind them
         full = detail == "full"
-        self.eye_n = eye_n or (3 if full else 2)
+        self.eye_n = eye_n or (3 if full else 2)   # the stepped drawing; the fine renderer uses true ellipses
         self.mins["erx"] = (eye_w or self.mins["erx"]) if full else (eye_w or 4)
         self.aura_k = aura if aura is not None else (1.0 if full else 0.0)
         self.rim = rim if rim is not None else (0.75 if full else 1.0)
         self.rim_tips = rim_tips if rim_tips is not None else full
         self.lids = not full
+        self.fine_eyes = True   # anti-aliased octant-resolution eyes; False = the original stepped drawing
+        self.rim_w = 1.0
+        self._eye_key, self._eye_cells = None, {}
         self._mesh = self._build_mesh() if detail == "full" else ([], [])
 
     # mesh nodes are fixed per instance; they shimmer, not move
@@ -334,8 +340,9 @@ class Face:
         u = (x - self.cx) / max(1.0, self.hw or self.R)
         return mix(P["cyan"], P["magenta"], 0.5 + u * 0.9)
 
-    def rig(self, t, blink=0.0, gaze=(0.0, 0.0)):
-        """The four ellipses in px: dict of name -> (cx, cy, rx, ry, rot)."""
+    def rig(self, t, blink=0.0, gaze=(0.0, 0.0), snap=True):
+        """The four ellipses in px: dict of name -> (cx, cy, rx, ry, rot). `snap` rounds to whole
+        pixels (the old half-block drawing); the fine eye renderer takes them unrounded so motion is smooth."""
         e = self.pose or EXPR[self.expr]
         k = self.k
         gx, gy = gaze
@@ -354,16 +361,20 @@ class Face:
             ery_b = ery * (1 - b)
             ey_b = ey + (anchor - ey) * b
             m = self.mins
-            erx = max(round(erx), m["erx"])  # whole-pixel widths keep both sides of the pill symmetric
-            out["e" + name] = (round(ex), ey_b, erx, max(ery_b, 0.6), math.radians(ep["rot"]))
-            out["p" + name] = (round(px_), por_y, max(prx, m["prx"]), max(pry, m["pry"]), math.radians(pp["rot"]))
+            if snap:
+                erx = max(round(erx), m["erx"])  # whole-pixel widths keep both sides of the pill symmetric
+                ex, px_ = round(ex), round(px_)
+            else:
+                erx = max(erx, m["erx"])
+            out["e" + name] = (ex, ey_b, erx, max(ery_b, 0.6), math.radians(ep["rot"]))
+            out["p" + name] = (px_, por_y, max(prx, m["prx"]), max(pry, m["pry"]), math.radians(pp["rot"]))
         return out
 
     def frame(self, t=0.0, blink=0.0, gaze=(0.0, 0.0)):
         P = self.P
         cv = Canvas(self.cols, self.rows, P["bg"], octant=self.octant)
         cx, cy, R = self.cx, self.cy, self.R
-        rig = self.rig(t, blink, gaze)
+        rig = self.rig(t, blink, gaze, snap=not self.fine_eyes)
 
         # aura: nebula inside the orb, glow under each eye
         def aura(x, y, base):
@@ -384,8 +395,19 @@ class Face:
             self._envelope(cv, t)
             self._mesh_draw(cv, t)
         self._orb(cv, t)
-        for name in ("L", "R"):
-            self._eye_and_portal(cv, rig, name)
+        if self.fine_eyes:
+            lid = LIDS.get(self.expr) if self.lids else None
+            # the eye cells depend only on the rig (and the glow, which follows it), and the rig
+            # holds still between saccades and blinks: reuse them
+            key = (tuple(round(v, 2) for name in sorted(rig) for v in rig[name]), lid, self.rim_w)
+            if key != self._eye_key:
+                self._eye_cells = eyes.paint(cv, rig, self.P, _OCTANT, fine=1 if self.octant else 2, n=2.0,
+                                             lids={"L": lid, "R": lid} if lid else None, rim_w=self.rim_w)
+                self._eye_key = key
+            cv.override.update(self._eye_cells)
+        else:
+            for name in ("L", "R"):
+                self._eye_and_portal(cv, rig, name)
         return cv
 
     def _envelope(self, cv, t):
