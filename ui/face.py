@@ -559,6 +559,61 @@ MOODS = {
     "denied": ("angry", 1.0),
 }
 DENIED_SECONDS = 2.0
+ENTROPY_FLOOR = 0.15   # below this the signal is clean
+STATIC_CHARS = "░▒▓·:.'"
+
+
+def signal_level(score):
+    """Entropy score -> 0..1 signal damage. STABLE (< 0.2) is nearly clean."""
+    return max(0.0, min(1.0, (score - ENTROPY_FLOOR) / (1.0 - ENTROPY_FLOOR)))
+
+
+def degrade(cells, level, pal, rng, state):
+    """The entity's signal at a given entropy level: colour drains toward grey, static eats
+    cells, bursts tear rows sideways with a magenta/cyan channel split, and at the top rows
+    drop out. `state` carries the running burst between frames. Pure: cells in, cells out."""
+    if level <= 0 or not cells:
+        return cells
+    bg, text, muted = pal["bg"], pal["text"], pal["muted"]
+    magenta, cyan = pal["magenta"], pal["cyan"]
+    rows, cols = len(cells), len(cells[0])
+    out = []
+    # 1. signal loss: drain colour toward its own luma, dim toward the void
+    for row in cells:
+        new = []
+        for ch, fg, back in row:
+            luma = round(0.3 * fg[0] + 0.59 * fg[1] + 0.11 * fg[2])
+            fg = mix(mix(fg, (luma, luma, luma), level * 0.7), bg, level * 0.35)
+            new.append((ch, fg, back))
+        out.append(new)
+    # 2. bursts: a few rows tear sideways and split into magenta/cyan ghosts
+    burst = state.get("burst")
+    if burst is None and rng.random() < level * 0.18:
+        n = 1 + int(level * 2.5)
+        burst = {"ticks": rng.randint(2, 5), "shift": {}}
+        for r in rng.sample(range(rows), min(rows, n)):
+            burst["shift"][r] = rng.choice((-1, 1)) * rng.randint(1, 2 + int(level * 4))
+    if burst:
+        for r, k in burst["shift"].items():
+            row = out[r]
+            moved = row[-k:] + row[:-k] if k else row
+            ghost = magenta if k > 0 else cyan
+            out[r] = [(ch, mix(fg, ghost, 0.55) if ch != " " else fg, back) for ch, fg, back in moved]
+        burst["ticks"] -= 1
+        state["burst"] = burst if burst["ticks"] > 0 else None
+    # 3. dropout: from 0.6 up, a row sometimes loses signal entirely
+    if level > 0.6 and rng.random() < (level - 0.6) * 0.5:
+        r = rng.randrange(rows)
+        out[r] = [(" ", fg, back) for _, fg, back in out[r]]
+    # 4. static: noise replaces cells; denser as entropy rises
+    density = level * 0.14
+    for r in range(rows):
+        for c in range(cols):
+            if rng.random() < density:
+                ch, _, back = out[r][c]
+                grey = mix(muted, text, rng.random() * 0.5)
+                out[r][c] = (rng.choice(STATIC_CHARS), mix(grey, bg, rng.random() * 0.6), back)
+    return out
 FPS = 20
 SPRING = 8.0  # pose ease rate per second
 
@@ -593,6 +648,14 @@ class FaceWidget(Widget):
         self._blend = 1.0
         self._timer = None
         self._revert = None
+        self.entropy = 0.0
+        self._rng = random.Random(11)
+        self._glitch = {}
+
+    def set_entropy(self, score):
+        self.entropy = float(score)
+        if signal_level(self.entropy) <= 0:
+            self._glitch = {}
 
     def _make_face(self):
         if self.detail == "full":
@@ -646,7 +709,8 @@ class FaceWidget(Widget):
         blink, gaze = self.life.step(t, dt)
         self.face.pose = self._pose()
         self.face.expr = self._expr_now()
-        self._cells = self.face.frame(t, blink, gaze).cells()
+        self._cells = degrade(self.face.frame(t, blink, gaze).cells(), signal_level(self.entropy),
+                              self._pal, self._rng, self._glitch)
         self.refresh()
 
     def render_line(self, y):
