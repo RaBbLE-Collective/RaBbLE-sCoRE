@@ -143,6 +143,7 @@ class OrganStarted(Event):
     tool_use_id: str
     task_id: str | None
     brief: str
+    context: bool = True  # False = a thin brief (no paths, short): an implicit handoff, entropy +0.25
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +183,23 @@ class RateLimited(Event):
 class TurnDone(Event):
     stop_reason: str
     origin: TurnOrigin = "observer"
+
+
+@dataclass(frozen=True, slots=True)
+class ModelUsed(Event):
+    """The lead's replies came from this model. Sent first and whenever it changes, so a
+    silent fallback to another model is visible to the entropy score."""
+    model: str
+
+
+@dataclass(frozen=True, slots=True)
+class EntropyChanged(Event):
+    """Session entropy (orchestra/entropy.py): drives the entity's glitch and the trust profile.
+    `reason` names what moved it; empty on the first report."""
+    score: float
+    band: str
+    trust: str
+    reason: str = ""
 
 
 @dataclass(frozen=True, slots=True)

@@ -14,6 +14,7 @@ owns the client; this owns the bookkeeping that turns one flat stream into organ
   or (foreground organs) the Agent tool's own result, whichever comes first.
 """
 
+import re
 from typing import Any
 
 from claude_agent_sdk import (
@@ -54,6 +55,16 @@ def _brief(tool_input: dict[str, Any]) -> str:
     return text if len(text) <= BRIEF_CHARS else text[:BRIEF_CHARS - 1] + "…"
 
 
+_PATHISH = re.compile(r"(?:[\w.-]+/[\w./-]+|\b[\w-]+\.(?:md|py|js|ts|c|h|yml|yaml|json|toml|sh|html|css)\b)")
+THIN_BRIEF_CHARS = 300
+
+
+def _has_context(tool_input: dict[str, Any]) -> bool:
+    """A handoff carries context when the organ's prompt is substantial or points at files."""
+    prompt = str(tool_input.get("prompt") or "")
+    return len(prompt) >= THIN_BRIEF_CHARS or bool(_PATHISH.search(prompt))
+
+
 def _tokens(usage: dict[str, Any] | None) -> int:
     if not usage:
         return 0
@@ -71,6 +82,7 @@ class SdkMapper:
         self.done: set[str] = set()               # Agent tool_use ids already ended
         self.last_text: dict[str, str] = {}       # Agent tool_use id → organ's latest text
         self.lead_thinking = False
+        self.lead_model: str | None = None
 
     def organ_for(self, parent_tool_use_id: str | None) -> str:
         if parent_tool_use_id is None:
@@ -152,6 +164,9 @@ class SdkMapper:
     def _assistant(self, msg: AssistantMessage) -> list[ev.Event]:
         organ = self.organ_for(msg.parent_tool_use_id)
         out: list[ev.Event] = []
+        if organ == ev.LEAD and msg.model and msg.model != self.lead_model:
+            self.lead_model = msg.model
+            out.append(ev.ModelUsed(msg.model))
         if msg.error:
             out.append(ev.Error(f"{organ}: {msg.error}"))
         for block in msg.content:
@@ -168,7 +183,7 @@ class SdkMapper:
                 if block.name in AGENT_TOOLS:
                     slug = str(block.input.get("subagent_type") or "agent")
                     self.organ_by_tool[block.id] = slug
-                    out.append(ev.OrganStarted(slug, block.id, None, _brief(block.input)))
+                    out.append(ev.OrganStarted(slug, block.id, None, _brief(block.input), _has_context(block.input)))
         return out
 
     def _user(self, msg: UserMessage) -> list[ev.Event]:

@@ -26,6 +26,8 @@ SAMPLES = [
     ev.OrganDone("gobble", "t1", "completed", "it lives in beam.py"),
     ev.Usage(1200, 0.01, 4.5),
     ev.RateLimited("warning", 1761400000.0),
+    ev.EntropyChanged(0.55, "ELEVATED", "strict", "context compacted"),
+    ev.ModelUsed("claude-opus-5-5"),
     ev.TurnDone("end_turn", "background"),
     ev.Error("boom"),
 ]

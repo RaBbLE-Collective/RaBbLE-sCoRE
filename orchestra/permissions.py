@@ -40,9 +40,11 @@ def _suggestion_dict(s: PermissionUpdate) -> dict[str, Any]:
 
 
 class Permissions:
-    def __init__(self, emit: Callable[[ev.Event], None], organ_of_agent: Callable[[str | None], str]):
+    def __init__(self, emit: Callable[[ev.Event], None], organ_of_agent: Callable[[str | None], str],
+                 auto: Callable[[str, dict[str, Any]], bool] | None = None):
         self._emit = emit
         self._organ_of_agent = organ_of_agent
+        self._auto = auto  # trust profile: True = approve without asking (orchestra/trust.py)
         self._pending: dict[str, tuple[asyncio.Future, str, dict[str, Any], list[PermissionUpdate]]] = {}
 
     @property
@@ -50,6 +52,8 @@ class Permissions:
         return list(self._pending)
 
     async def can_use_tool(self, tool: str, tool_input: dict[str, Any], context: Any):
+        if self._auto is not None and self._auto(tool, tool_input):
+            return PermissionResultAllow()
         ask_id = context.tool_use_id or uuid.uuid4().hex
         future = asyncio.get_running_loop().create_future()
         suggestions = list(context.suggestions or [])

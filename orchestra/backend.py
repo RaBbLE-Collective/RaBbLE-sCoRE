@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from . import events as ev
+from . import trust
+from .entropy import Entropy
 
 _CLOSED = object()
 
@@ -29,6 +31,7 @@ class Backend(Protocol):
     def answer(self, ask_id: str, reply: ev.PermissionReply) -> bool: ...
     async def set_model(self, model: str | None) -> None: ...
     async def set_permission_mode(self, mode: str) -> None: ...
+    def set_trust(self, profile: str | None) -> None: ...
     async def stop_task(self, task_id: str) -> None: ...
     async def close(self) -> None: ...
 
@@ -56,7 +59,8 @@ class _Queued:
 class ClaudeCodeBackend(_Queued):
     def __init__(self, cwd: str | Path, *, append: str | None = None, agents: dict[str, Any] | None = None,
                  model: str | None = None, permission_mode: str | None = None,
-                 resume: str | None = None, continue_conversation: bool = False):
+                 resume: str | None = None, continue_conversation: bool = False,
+                 trust_override: str | None = None, entropy: Entropy | None = None):
         super().__init__()
         self.cwd = str(cwd)
         self.append = append
@@ -65,11 +69,58 @@ class ClaudeCodeBackend(_Queued):
         self.permission_mode = permission_mode
         self.resume = resume
         self.continue_conversation = continue_conversation
+        self.trust_override = trust_override  # None = what the session's entropy earns
+        # a restart on the same session carries the score: restarting must not launder entropy
+        self.entropy = entropy or Entropy(model)
+        self._carried = entropy is not None
+        self._lead_model: str | None = None
+        self._reported: float | None = None
         self.client = None
         self._pump: asyncio.Task | None = None
         self._side: set[asyncio.Task] = set()
         # agent_id (hooks, can_use_tool) → organ slug, filled by the SubagentStart hook
         self._organ_by_agent: dict[str, str] = {}
+
+    def trust_profile(self) -> str:
+        return trust.profile_for(self.model, self.trust_override, self.entropy.score)
+
+    def _report_entropy(self, reason: str | None = None) -> None:
+        """Emit when the score moved (or on the first report)."""
+        score = self.entropy.score
+        if self._reported is None or score != self._reported or reason:
+            self._reported = score
+            self.emit(ev.EntropyChanged(score, self.entropy.band, self.entropy.trust, reason or ""))
+
+    def _observe(self, event: ev.Event) -> None:
+        """Feed what the stream shows into the entropy score."""
+        reason = None
+        reasons: list[str] = []
+        if isinstance(event, (ev.SessionStarted, ev.SessionResumed)) and self._carried:
+            self._carried = False
+            reasons.append(self.entropy.handoff())
+        if isinstance(event, ev.SessionStarted) and event.model:
+            self.model = event.model  # the real id, so "default" gets its family's baseline
+            self.entropy.observe_model(event.model)
+        elif isinstance(event, ev.Usage) and event.context_pct is not None:
+            reason = self.entropy.context(event.context_pct)
+        elif isinstance(event, ev.RateLimited):
+            reason = self.entropy.rate_limited(event.status == "rejected")
+        elif isinstance(event, ev.TurnDone) and event.origin == "observer":
+            reason = self.entropy.turn_done()
+        elif isinstance(event, ev.ModelUsed):
+            reasons += self.entropy.model_used(event.model, self._lead_model)
+            self._lead_model = event.model
+            self.entropy.observe_model(event.model)
+            self.model = event.model
+        elif isinstance(event, ev.Error):
+            reason = self.entropy.request_failed()
+        elif isinstance(event, ev.OrganStarted):
+            reason = self.entropy.organ_brief(event.organ, event.context)
+        reasons += [reason] if reason else []
+        self._report_entropy("; ".join(reasons) or None)
+
+    def _auto_allow(self, tool: str, tool_input: dict[str, Any]) -> bool:
+        return trust.auto_allow(self.trust_profile(), tool, tool_input, self.cwd)
 
     def organ_of_agent(self, agent_id: str | None) -> str:
         return self._organ_by_agent.get(agent_id, "agent") if agent_id else ev.LEAD
@@ -78,7 +129,7 @@ class ClaudeCodeBackend(_Queued):
         from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
 
         from .permissions import Permissions
-        self.permissions = Permissions(self.emit, self.organ_of_agent)
+        self.permissions = Permissions(self.emit, self.organ_of_agent, self._auto_allow)
         system_prompt: dict[str, Any] = {"type": "preset", "preset": "claude_code"}
         if self.append:
             # an append to Claude Code's own prompt; replacing it drops its coding + safety guidance
@@ -117,6 +168,7 @@ class ClaudeCodeBackend(_Queued):
             async for msg in self.client.receive_messages():
                 for event in self.mapper.map(msg):
                     self.emit(event)
+                    self._observe(event)
                 if isinstance(msg, ResultMessage):
                     self._spawn(self._context_usage())
         except asyncio.CancelledError:
@@ -135,7 +187,9 @@ class ClaudeCodeBackend(_Queued):
         # a control request; run beside the pump, which must keep reading
         with contextlib.suppress(Exception):
             usage = await self.client.get_context_usage()
-            self.emit(ev.Usage(int(usage.get("totalTokens") or 0), None, float(usage.get("percentage") or 0)))
+            usage_event = ev.Usage(int(usage.get("totalTokens") or 0), None, float(usage.get("percentage") or 0))
+            self.emit(usage_event)
+            self._observe(usage_event)
 
     async def send(self, text: str) -> None:
         await self.client.query(text)
@@ -149,9 +203,14 @@ class ClaudeCodeBackend(_Queued):
 
     async def set_model(self, model: str | None) -> None:
         await self.client.set_model(model)
+        self.model = model
+        self._report_entropy(self.entropy.switch_model(model))
 
     async def set_permission_mode(self, mode: str) -> None:
         await self.client.set_permission_mode(mode)
+
+    def set_trust(self, profile: str | None) -> None:
+        self.trust_override = profile
 
     async def stop_task(self, task_id: str) -> None:
         await self.client.stop_task(task_id)
@@ -227,6 +286,9 @@ class ReplayBackend(_Queued):
 
     async def set_permission_mode(self, mode: str) -> None:
         self.calls.append(("set_permission_mode", mode))
+
+    def set_trust(self, profile: str | None) -> None:
+        self.calls.append(("set_trust", profile))
 
     async def stop_task(self, task_id: str) -> None:
         self.calls.append(("stop_task", task_id))

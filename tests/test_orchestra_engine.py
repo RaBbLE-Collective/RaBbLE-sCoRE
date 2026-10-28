@@ -41,7 +41,8 @@ def result(origin=None, error=False):
 
 
 def run(mapper, *msgs):
-    return [e for m in msgs for e in mapper.map(m)]
+    """Mapped events, minus ModelUsed (entropy bookkeeping, tested in test_orchestra_entropy)."""
+    return [e for m in msgs for e in mapper.map(m) if not isinstance(e, ev.ModelUsed)]
 
 
 # ── mapping ─────────────────────────────────────────────────────────────────
@@ -79,7 +80,7 @@ def test_organ_lifecycle_routes_by_parent_tool_use_id():
               tool_result("A1", [{"type": "text", "text": "hand-back"}]))
     assert out == [
         ev.ToolCall(ev.LEAD, "A1", "Agent", {"subagent_type": "gobble", "description": "map it"}),
-        ev.OrganStarted("gobble", "A1", None, "map it"),
+        ev.OrganStarted("gobble", "A1", None, "map it", False),
         ev.ToolCall("gobble", "B1", "Grep", {"pattern": "x"}),
         ev.ToolResult("gobble", "B1", True, "3 hits"),
         ev.OrganProgress("gobble", "T1", {"total_tokens": 9, "tool_uses": 1, "duration_ms": 5}, "Grep"),
