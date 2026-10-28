@@ -10,13 +10,22 @@ Pure: paths, prompts and the file check. The turn handling lives in ui/app.py.
 """
 
 import math
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-PARK_AT = 80.0   # % of the context window: park at the next turn boundary
-WARN_AT = 70.0   # one notice, so the park never comes as a surprise
-HARD_AT = 95.0   # a window this full is Claude Code compacting: park before a turn can get there
+def _env_pct(name: str, default: float) -> float:
+    try:
+        return max(1.0, min(99.0, float(os.environ[name])))
+    except (KeyError, ValueError):
+        return default
+
+
+# RABBLE_PARK_AT=15 rabble: park early to try the flow in a small session (test aid; warns 10 points before)
+PARK_AT = _env_pct("RABBLE_PARK_AT", 80.0)   # % of the context window: park at the next turn boundary
+WARN_AT = max(1.0, PARK_AT - 10.0)           # one notice, so the park never comes as a surprise
+HARD_AT = max(PARK_AT + 1.0, 95.0)           # a window this full is Claude Code compacting: park before a turn can get there
 GROW_WINDOW = 5  # turns of context growth that the rate is read from
 MIN_BYTES = 300  # a handoff shorter than this is a stub, not a cold start
 
