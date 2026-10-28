@@ -47,8 +47,22 @@ class Transcript(VerticalScroll):
     def on_mount(self) -> None:
         self.anchor()
 
-    async def _add(self, widget):
+    # Textual's anchor releases on any wheel/key scroll and only re-arms at the exact bottom, so a
+    # reader who ends a line or two short stops following, and a Markdown update() that collapses
+    # then regrows leaves the view stranded mid-content. Follow whenever the view was at (or near) the bottom.
+    FOLLOW_SLACK = 3
+
+    def _near_bottom(self) -> bool:
+        return self.max_scroll_y - self.scroll_y <= self.FOLLOW_SLACK
+
+    def _stick(self, follow: bool) -> None:
+        if follow:
+            self.call_after_refresh(self.scroll_end, animate=False)
+
+    async def _add(self, widget, force: bool = False):
+        follow = force or self._near_bottom()
         await self.mount(widget)
+        self._stick(follow)
         return widget
 
     async def clear_all(self) -> None:
@@ -62,7 +76,7 @@ class Transcript(VerticalScroll):
         self.transient.clear()
 
     async def user(self, text: str) -> None:
-        await self._add(Static(Text("› " + text), classes="user"))
+        await self._add(Static(Text("› " + text), classes="user"), force=True)  # the Observer spoke: show it
 
     async def notice(self, text: str, error: bool = False) -> None:
         await self._add(Static(Text(text), classes="error" if error else "notice"))
@@ -80,14 +94,18 @@ class Transcript(VerticalScroll):
         await self.stop_thinking()
         if self._live is None:
             self._live = await self._add(Markdown(""))
+        follow = self._near_bottom()
         await self._live.append(text)
+        self._stick(follow)
 
     async def block(self, organ: str, text: str) -> None:
         await self.stop_thinking()
         if organ == LEAD:
             if self._live is not None:
+                follow = self._near_bottom()
                 await self._live.update(text)
                 self._live = None
+                self._stick(follow)
             else:
                 await self._add(Markdown(text))
             return
@@ -106,7 +124,9 @@ class Transcript(VerticalScroll):
     def tool_result(self, tool_id: str, ok: bool, summary: str) -> None:
         card = self._cards.get(tool_id)
         if card:
+            follow = self._near_bottom()
             card.set_result(ok, summary)
+            self._stick(follow)
 
     def toggle_cards(self) -> None:
         cards = list(self._cards.values())
