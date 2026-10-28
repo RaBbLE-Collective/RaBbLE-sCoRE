@@ -126,3 +126,40 @@ def build_lead_prompt(personas, grimoire):
     if state:
         parts.append("## Where the Collective stands (from the session log, at launch)\n\n" + state)
     return "\n\n".join(parts) + "\n"
+
+
+CREW_RULE = (
+    "## Crew discipline\n\n"
+    "Every organ is a full context window, so organs are expensive. Work alone by default. "
+    "Call an organ only when the work is significant AND splits into independent parallel parts, "
+    "or when you need a critic or verifier who did not write the code. One or two organs is the "
+    "norm; never more than three at once. A small edit, a lookup, a single-file fix or a question "
+    "is yours to do directly."
+)
+
+
+def build_ui_lead_prompt(personas, grimoire, crew):
+    """Lead prompt for RaBbLE-UI. Organs are SDK subagents there (the Agent tool with
+    `subagent_type` = the agent type), not agent-teams teammates. crew=False omits the
+    roster entirely: the lead works solo and the UI passes no agents."""
+    meta, body = personas[LEAD_SLUG]
+    parts = [body]
+    if crew:
+        rows = []
+        for slug, m, _ in organs(personas):
+            scope = f" ({m['scope']})" if m.get("scope") else ""
+            rows.append(f"| {m['name']} | `{slug}` | {m.get('tier', '')} | {m.get('access', '')}{scope} | {m.get('role', '')} |")
+        parts.append(
+            "## The Crew roster\n\n"
+            "Organs run as subagents: call the Agent tool with `subagent_type` set to the agent type below. "
+            "Models are pinned by tier: do not override them upward without the Observer asking. Ask each "
+            "organ to put its full report in its final message.\n\n"
+            "| Organ | Agent type | Tier | Access | Job |\n|---|---|---|---|---|\n" + "\n".join(rows))
+        parts.append(CREW_RULE)
+    else:
+        parts.append("## Crew\n\nThe Crew is switched off for this session: work solo and do not spawn agents. "
+                     "The Observer can switch it on with /crew on.")
+    state = latest_state(grimoire)
+    if state:
+        parts.append("## Where the Collective stands (from the session log, at launch)\n\n" + state)
+    return "\n\n".join(parts) + "\n"

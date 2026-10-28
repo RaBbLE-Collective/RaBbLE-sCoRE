@@ -21,6 +21,8 @@ for _p in (SCORE_ROOT, SCORE_ROOT / "crew"):
         sys.path.insert(0, str(_p))
 
 from orchestra import events as ev  # noqa: E402
+from orchestra import trust  # noqa: E402
+from ui.prefs import MODELS, Settings, resolve_model  # noqa: E402
 from ui.widgets.composer import Composer, Prompt  # noqa: E402
 from ui.widgets.header import Header  # noqa: E402
 from ui.widgets.transcript import Transcript  # noqa: E402
@@ -28,7 +30,19 @@ from ui.widgets.transcript import Transcript  # noqa: E402
 MODES = ["default", "acceptEdits", "plan"]
 QUIT_WINDOW = 2.0
 FLASH = 2.5
-COMMANDS = {"/model", "/mode", "/resume", "/clear", "/face", "/quit"}
+HELP = {
+    "/model": "pick the model (or /model opus|sonnet|haiku|fable|default|<id>)",
+    "/crew": "organs on/off: /crew on|off (off = solo, no agents, cheapest)",
+    "/trust": "auto-approve level: /trust strict|standard|trusted|auto (auto = earned from session entropy)",
+    "/mode": "permission mode: /mode default|acceptEdits|plan (Shift+Tab cycles)",
+    "/status": "model, crew, trust and mode at a glance",
+    "/resume": "pick an earlier session",
+    "/clear": "start a fresh session",
+    "/face": "show the full face",
+    "/help": "this list",
+    "/quit": "leave (Ctrl-C twice also works)",
+}
+COMMANDS = set(HELP)
 
 
 def _optional(module: str, name: str):
@@ -49,12 +63,17 @@ class RabbleApp(App):
     """
 
     def __init__(self, backend_factory, *, cwd: str, model: str | None = None,
-                 mode: str = "default", resume: str | None = None, continue_: bool = False):
+                 mode: str = "default", resume: str | None = None, continue_: bool = False,
+                 settings: Settings | None = None):
         super().__init__()
         self.make_backend = backend_factory
         self.cwd = cwd
-        self.model_name = model
-        self.mode = mode if mode in MODES else "default"
+        # one object shared with the backend factory: edits here apply at the next (re)start
+        self.settings = settings or Settings(model=model, mode=mode)
+        self.model_name = self.settings.model
+        self.mode = self.settings.mode if self.settings.mode in MODES else "default"
+        self.session_id: str | None = None
+        self.entropy: ev.EntropyChanged | None = None  # latest report from the engine
         self._resume, self._continue = resume, continue_
         self.backend = None
         self._asks: deque[ev.PermissionAsk] = deque()
@@ -78,8 +97,9 @@ class RabbleApp(App):
         face_cls = _optional("ui.face", "FaceWidget")
         self.face = face_cls("mini") if face_cls else Static("RaBbLE")
         self.header = Header(self.face, self.palette, model=self.model_name or "", cwd=self.cwd, mode=self.mode)
+        self._sync_header()
         self.transcript = Transcript(self.organ_color)
-        self.prompt = Prompt(self.cwd)
+        self.prompt = Prompt(self.cwd, sorted(COMMANDS))
         yield self.header
         yield self.transcript
         yield self.prompt
@@ -134,9 +154,11 @@ class RabbleApp(App):
         t, h = self.transcript, self.header
         match e:
             case ev.SessionStarted():
+                self.session_id = e.session_id
                 h.model = e.model or h.model
-                h.refresh_info()
+                self._sync_header()
             case ev.SessionResumed():
+                self.session_id = e.session_id
                 await t.notice(f"resumed session {e.session_id[:8]}")
             case ev.TextDelta():
                 self._streaming = True
@@ -162,6 +184,15 @@ class RabbleApp(App):
             case ev.OrganDone():
                 self._busy_ids.discard("organ:" + e.organ)
                 await t.notice(f"{e.organ} {e.status}", error=e.status != "completed")
+            case ev.EntropyChanged():
+                self.entropy = e
+                setter = getattr(self.face, "set_entropy", None)
+                if setter:
+                    setter(e.score)
+                self._sync_header()
+                if e.reason and e.band not in ("STABLE", "NOMINAL"):
+                    await t.notice(f"entropy {e.band.lower()} ({e.score:.2f}): {e.reason}. Verify critical decisions."
+                                   f" trust {e.trust}", error=e.band in ("DEGRADED", "UNSTABLE"))
             case ev.Usage():
                 if e.cost is not None:
                     h.cost = e.cost
@@ -229,13 +260,25 @@ class RabbleApp(App):
         if word == "/quit":
             self.exit()
         elif word == "/model":
-            if not arg:
-                return await t.notice(f"model: {self.header.model}")
-            if not await self._engine("model", self.backend.set_model, arg):
-                return
-            self.header.model = arg
-            self.header.refresh_info()
-            await t.notice(f"model set to {arg}")
+            if arg:
+                await self._set_model(resolve_model(arg))
+            else:
+                from ui.widgets.models import ModelPicker
+
+                async def picked(choice) -> None:
+                    if choice is not None:
+                        await self._set_model(choice[0])
+
+                self.push_screen(ModelPicker(self.settings.model), lambda c: self.run_worker(picked(c)))
+        elif word == "/crew":
+            await self._set_crew(arg.lower())
+        elif word == "/trust":
+            await self._set_trust(arg.lower())
+        elif word == "/status":
+            await t.notice(self._status())
+        elif word == "/help":
+            await t.notice("\n".join(f"{c:8} {d}" for c, d in HELP.items()) +
+                           "\nOther /commands (/compact, /init, skills...) go to Claude Code as typed.")
         elif word == "/mode":
             if arg not in MODES:
                 return await t.notice("usage: /mode " + "|".join(MODES), error=True)
@@ -274,9 +317,10 @@ class RabbleApp(App):
             await self.transcript.notice(f"{what} failed: {e} (/clear restarts the engine)", error=True)
             return False
 
-    async def _restart(self, resume: str | None, cont: bool, clear: bool = False) -> None:
+    async def _restart(self, resume: str | None, cont: bool, clear: bool = False, keep: bool = False) -> None:
         self.workers.cancel_group(self, "engine")
         old = self.backend
+        self.settings.carry = getattr(old, "entropy", None) if keep else None
         if old is not None:
             try:
                 await old.close()
@@ -285,18 +329,73 @@ class RabbleApp(App):
         self._asks.clear()
         self._busy_ids.clear()
         self._streaming = False
-        if clear or resume:
+        if clear or not resume:
+            self.entropy = None  # a new session starts from its model's baseline
+        if clear or (resume and not keep):
             await self.transcript.clear_all()
-        await self.transcript.notice("new session" if clear else f"resuming {resume[:8]}")
+        if not keep:
+            await self.transcript.notice("new session" if clear else f"resuming {resume[:8]}")
         self.backend = self.make_backend(resume, cont)
         self._pump(self.backend)
 
     async def _set_mode(self, mode: str) -> None:
         if not await self._engine("mode", self.backend.set_permission_mode, mode):
             return
-        self.mode = mode
-        self.header.mode = mode
+        self.mode = self.settings.mode = mode
+        self.settings.save()
+        self._sync_header()
+
+    # settings
+    def trust_profile(self) -> str:
+        return trust.profile_for(self.header.model if self.header.model != "default" else self.settings.model,
+                                 self.settings.trust, self.entropy.score if self.entropy else None)
+
+    def _sync_header(self) -> None:
+        self.header.mode = self.mode
+        self.header.crew = self.settings.crew
+        self.header.trust = self.trust_profile()
+        if self.entropy:
+            self.header.entropy = (self.entropy.score, self.entropy.band)
         self.header.refresh_info()
+
+    def _status(self) -> str:
+        ent = f"entropy {self.entropy.band.lower()} {self.entropy.score:.2f} · " if self.entropy else ""
+        return (f"model {self.header.model} · {ent}crew {'on' if self.settings.crew else 'off'} · "
+                f"trust {self.trust_profile()}{' (set)' if self.settings.trust else ' (from entropy)'} · mode {self.mode}")
+
+    async def _set_model(self, value: str | None) -> None:
+        if not await self._engine("model", self.backend.set_model, value):
+            return
+        self.settings.model = value
+        self.settings.save()
+        self.header.model = value or "default"
+        self._sync_header()
+        await self.transcript.notice(f"model {value or 'default'} · trust {self.trust_profile()}")
+
+    async def _set_trust(self, arg: str) -> None:
+        if arg not in (*trust.PROFILES, "auto"):
+            return await self.transcript.notice(
+                f"trust is {self.trust_profile()}; usage: /trust {'|'.join(trust.PROFILES)}|auto", error=arg != "")
+        self.settings.trust = None if arg == "auto" else arg
+        self.settings.save()
+        if self.backend is not None:
+            self.backend.set_trust(self.settings.trust)
+        self._sync_header()
+        await self.transcript.notice(f"trust {self.trust_profile()}" + (" (from entropy)" if arg == "auto" else ""))
+
+    async def _set_crew(self, arg: str) -> None:
+        if arg not in ("on", "off"):
+            return await self.transcript.notice(
+                f"crew is {'on' if self.settings.crew else 'off'}; usage: /crew on|off", error=arg != "")
+        want = arg == "on"
+        if want == self.settings.crew:
+            return await self.transcript.notice(f"crew already {arg}")
+        self.settings.crew = want
+        self.settings.save()
+        self._sync_header()
+        # agents and the roster live in the engine's start options, so the engine restarts on the same session
+        await self._restart(self.session_id, False, keep=True)
+        await self.transcript.notice(f"crew {arg}" + (" · organs cost a full context each, use for parallel work" if want else " · solo"))
 
     async def on_composer_command(self, m: Composer.Command) -> None:
         name = m.name

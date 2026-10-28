@@ -58,9 +58,11 @@ class Composer(TextArea):
             super().__init__()
             self.name = name
 
-    def __init__(self, cwd: str, dropdown: OptionList, **kw):
+    def __init__(self, cwd: str, dropdown: OptionList, commands: list[str] | None = None, **kw):
         super().__init__(show_line_numbers=False, soft_wrap=True, **kw)
         self.cwd = cwd
+        self.commands = sorted(commands or [])
+        self._slash = False
         self._dropdown = dropdown
         self._files: list[str] | None = None
         self._frag_len = 0
@@ -79,6 +81,18 @@ class Composer(TextArea):
     def on_text_area_changed(self, event) -> None:
         row, col = self.cursor_location
         before = self.document[row][:col]
+        self._slash = False
+        if row == 0 and before.startswith("/") and not re.search(r"\s", before) and self.commands:
+            hits = [c for c in self.commands if c.startswith(before.lower())]
+            self._dropdown.clear_options()
+            if not hits or hits == [before]:
+                self._hide()
+                return
+            self._slash = True
+            self._dropdown.add_options([Option(h, id=h) for h in hits])
+            self._dropdown.highlighted = 0
+            self._dropdown.display = True
+            return
         m = _AT.search(before)
         if not m:
             self._hide()
@@ -101,6 +115,10 @@ class Composer(TextArea):
             return
         path = str(self._dropdown.get_option_at_index(idx).id)
         row, col = self.cursor_location
+        if self._slash:
+            self.replace(path + " ", (0, 0), (row, col))
+            self._hide()
+            return
         self.replace(path if path.endswith("/") else path + " ", (row, col - self._frag_len), (row, col))
         self._hide()
 
@@ -123,7 +141,9 @@ class Composer(TextArea):
     async def _on_key(self, event) -> None:
         key = event.key
         handled = True
-        if key == "enter":
+        if key == "enter" and self.completing and self._slash:
+            self._accept()
+        elif key == "enter":
             text = self.text.strip()
             self._hide()
             if text:
@@ -167,10 +187,10 @@ class Prompt(Vertical):
     Prompt Composer:focus { border: round $accent; }
     """
 
-    def __init__(self, cwd: str):
+    def __init__(self, cwd: str, commands: list[str] | None = None):
         super().__init__()
         self.dropdown = OptionList()
-        self.composer = Composer(cwd, self.dropdown)
+        self.composer = Composer(cwd, self.dropdown, commands)
 
     def compose(self):
         yield self.dropdown

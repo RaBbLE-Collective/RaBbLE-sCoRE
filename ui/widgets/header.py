@@ -20,6 +20,11 @@ def gradient(text: str, a: str, b: str) -> Text:
     return out
 
 
+# the Entropy Tracker doc's glyphs; colours are palette names
+ENTROPY_GLYPH = {"STABLE": ("◆", "cyan"), "NOMINAL": ("◆", "cyan"), "ELEVATED": ("▲", "yellow"),
+                 "DEGRADED": ("⚠", "magenta"), "UNSTABLE": ("✗", "red")}
+
+
 def short_path(path: str) -> str:
     home = str(Path.home())
     return "~" + path[len(home):] if path == home or path.startswith(home + "/") else path
@@ -36,6 +41,9 @@ class Header(Horizontal):
         self._face = face
         self._pal = palette
         self.model, self.cwd, self.mode = model or "default", cwd, mode
+        self.crew = False
+        self.trust = "standard"
+        self.entropy: tuple[float, str] | None = None  # (score, band) from the engine
         self.context_pct: float | None = None
         self.cost: float | None = None
         self.limit = "allowed"
@@ -72,10 +80,15 @@ class Header(Horizontal):
         mag, cy = self._pal.get("magenta", "magenta"), self._pal.get("cyan", "cyan")
         t = gradient("RaBbLE", mag, cy)
         t.append("\n")
-        t.append(f"{self.model} · mode {self.mode}\n", style="bold")
+        t.append(f"{self.model} · mode {self.mode} · trust {self.trust} · crew {'on' if self.crew else 'off'}\n", style="bold")
         t.append(short_path(self.cwd) + "\n", style="dim")
         ctx = "ctx --" if self.context_pct is None else f"ctx {self.context_pct:.0f}%"
         t.append(ctx + " · ")
+        if self.entropy:
+            score, band = self.entropy
+            glyph, color = ENTROPY_GLYPH.get(band, ("◆", "cyan"))
+            t.append(f"{glyph} {band.lower()} {score:.2f}", style=self._pal.get(color, color))
+            t.append(" · ")
         t.append_text(self._limit_text())
         cost = "--" if self.cost is None else f"${self.cost:.4f}"
         t.append(f" · {cost} API equiv")

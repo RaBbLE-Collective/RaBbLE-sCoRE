@@ -11,6 +11,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "crew"))
 
 import rabble  # noqa: E402
+import roster  # noqa: E402
 
 CREW_DIR = rabble.grimoire_root() / rabble.CREW_SUBDIR
 EXPECTED = ["gobble", "quibble", "cobble", "crumble", "nibble", "archivist", "babble", "dabble"]
@@ -156,3 +157,14 @@ def test_claude_argv_adds_teammate_mode_once(tmp_path, monkeypatch):
     assert argv[argv.index("--teammate-mode") + 1] == "in-process"
     argv = rabble.claude_argv(tmp_path / "p.md", {}, ["--teammate-mode", "tmux"])
     assert argv.count("--teammate-mode") == 1 and argv[-1] == "tmux"
+
+
+def test_ui_lead_prompt_crew_switch(mini_crew, tmp_path):
+    grimoire = tmp_path / "g"
+    grimoire.mkdir()
+    personas = rabble.load_crew(mini_crew)
+    off = roster.build_ui_lead_prompt(personas, grimoire, crew=False)
+    assert "LEAD BODY" in off and "switched off" in off and "`nibble`" not in off
+    on = roster.build_ui_lead_prompt(personas, grimoire, crew=True)
+    assert "`nibble`" in on and "`cobble`" in on and "subagent_type" in on
+    assert "significant AND splits" in on and "teammate" not in on.lower()
