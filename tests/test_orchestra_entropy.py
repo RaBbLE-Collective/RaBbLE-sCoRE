@@ -19,10 +19,17 @@ def test_baselines_and_bands():
     assert en.Entropy("claude-opus-5-5").band == "STABLE"
     assert en.Entropy("claude-sonnet-5-5").band == "STABLE"   # frontier tier: low entropy, trusted
     assert en.Entropy("claude-haiku-5-5").band == "ELEVATED"   # a weak model starts degraded
-    for m in ("opus", "sonnet", "fable"):   # frontier models: near-clean entity after a model switch too
+    for m in ("opus", "fable", "sonnet"):   # a /model switch costs a little, never trust or a visible tear
         e = en.Entropy(f"claude-{m}-5-5"); e.turns = 1; e.switch_model("claude-opus-5-5")
-        assert face.signal_level(e.score) == 0
-    assert face.signal_level(en.Entropy("claude-haiku-5-5").score) > 0.4   # weak model: visibly degraded
+        assert e.band == "STABLE" and face.signal_level(e.score) < 0.12
+    assert face.signal_level(en.Entropy("claude-opus-5-5").score) == 0
+    e = en.Entropy("claude-opus-5-5"); e.turns = 1; e.switch_model("claude-sonnet-5-5")
+    assert e.band == "STABLE"   # switching up to sonnet stays trusted
+    sonnet = face.signal_level(en.Entropy("claude-sonnet-5-5").score)
+    haiku = face.signal_level(en.Entropy("claude-haiku-5-5").score)
+    assert 0.05 < sonnet < 0.2          # sonnet: a faint flicker, not clean
+    assert 0.2 < haiku < 0.4            # haiku: clearly degraded but readable
+    assert sonnet < haiku
     assert en.Entropy("mystery").score == en.UNKNOWN[0]
     assert [en.band_of(x) for x in (0, 0.2, 0.5, 0.7, 0.9, 1.0)] == \
         ["STABLE", "NOMINAL", "ELEVATED", "DEGRADED", "UNSTABLE", "UNSTABLE"]
@@ -109,7 +116,8 @@ def test_degrade_clean_below_floor_and_worse_above():
     pal = face.load_palette()
     cells = [[("█", pal["cyan"], pal["bg"])] * 24 for _ in range(6)]
     assert face.degrade(cells, 0.0, pal, random.Random(1), {}) == cells
-    assert face.signal_level(0.1) == 0 and face.signal_level(1.0) == 1
+    assert face.signal_level(0.05) == 0 and face.signal_level(1.0) == 1
+    assert face.signal_level(0.3) < face.signal_level(0.6) < face.signal_level(0.9)   # monotonic
 
     def damage(level):
         st, rng, total = {}, random.Random(5), 0

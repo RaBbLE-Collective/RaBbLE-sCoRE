@@ -21,7 +21,7 @@ BANDS = (("STABLE", 0.2), ("NOMINAL", 0.5), ("ELEVATED", 0.7), ("DEGRADED", 0.9)
 # future GPT backend (plan U5). Frontier models (fable, opus, sonnet, gpt) are low entropy: STABLE,
 # trusted, near-clean glitch. Only weak (haiku) or unknown models start degraded. Unknown models get the middle of the road.
 FAMILIES = (("fable", 0.05, "strong"), ("opus", 0.05, "strong"), ("gpt", 0.05, "strong"),
-            ("sonnet", 0.10, "strong"), ("haiku", 0.55, "fast"))
+            ("sonnet", 0.13, "strong"), ("haiku", 0.55, "fast"))
 UNKNOWN = (0.25, "medium")
 TIER_RANK = {"strong": 2, "medium": 1, "fast": 0}
 

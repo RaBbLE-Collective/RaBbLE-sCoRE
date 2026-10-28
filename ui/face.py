@@ -559,13 +559,20 @@ MOODS = {
     "denied": ("angry", 1.0),
 }
 DENIED_SECONDS = 2.0
-ENTROPY_FLOOR = 0.15   # below this the signal is clean
+# entropy score -> glitch level, piecewise linear through these anchors (tuned by eye, S287):
+# opus/fable (0.05) clean, sonnet (0.13) a faint flicker, haiku (0.55) clearly degraded but readable.
+SIGNAL_CURVE = ((0.05, 0.0), (0.13, 0.12), (0.55, 0.30), (1.0, 1.0))
 STATIC_CHARS = "░▒▓·:.'"
 
 
 def signal_level(score):
-    """Entropy score -> 0..1 signal damage. STABLE (< 0.2) is nearly clean."""
-    return max(0.0, min(1.0, (score - ENTROPY_FLOOR) / (1.0 - ENTROPY_FLOOR)))
+    """Entropy score -> 0..1 signal damage along SIGNAL_CURVE."""
+    if score <= SIGNAL_CURVE[0][0]:
+        return 0.0
+    for (x0, y0), (x1, y1) in zip(SIGNAL_CURVE, SIGNAL_CURVE[1:]):
+        if score <= x1:
+            return y0 + (y1 - y0) * (score - x0) / (x1 - x0)
+    return 1.0
 
 
 def degrade(cells, level, pal, rng, state):
