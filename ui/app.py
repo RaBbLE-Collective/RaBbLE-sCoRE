@@ -128,6 +128,13 @@ class RabbleApp(App):
         except Exception as e:  # the session is over; say so rather than crash the face
             await self.transcript.notice(f"engine: {e}", error=True)
 
+    # terminal focus: the view must survive switching away and back
+    def on_app_blur(self, event) -> None:
+        self.transcript.remember_view()
+
+    def on_app_focus(self, event) -> None:
+        self.transcript.restore_view()
+
     # mood
     def _mood(self) -> str:
         if self._flash and time.monotonic() < self._flash[1]:

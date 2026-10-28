@@ -59,6 +59,27 @@ class Transcript(VerticalScroll):
         if follow:
             self.call_after_refresh(self.scroll_end, animate=False)
 
+    def remember_view(self) -> None:
+        """Window blurred: note where the reader was (at the bottom, or a line number)."""
+        self._saved_view = ("end", 0.0) if self._near_bottom() else ("y", self.scroll_y)
+
+    def restore_view(self) -> None:
+        """Window refocused: put the reader back. Focus and style refreshes can re-layout the
+        Markdown blocks and strand the view at the top, because the released anchor never re-follows."""
+        saved, self._saved_view = getattr(self, "_saved_view", None), None
+        if saved is None:
+            return
+        kind, y = saved
+
+        def put() -> None:
+            if kind == "end":
+                self.scroll_end(animate=False)
+            else:
+                self.scroll_to(y=y, animate=False)
+        put()
+        self.call_after_refresh(put)
+        self.set_timer(0.15, put)  # after any late re-layout
+
     async def _add(self, widget, force: bool = False):
         follow = force or self._near_bottom()
         await self.mount(widget)
