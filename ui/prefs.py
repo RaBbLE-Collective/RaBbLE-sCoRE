@@ -32,6 +32,8 @@ class Settings:
     crew: bool = False  # off by default: organs cost a full context each
     mode: str = "default"
     trust: str | None = None  # None = earned from entropy (orchestra/trust.py)
+    park: str = "auto"  # auto | ask | off: what happens when context passes park.PARK_AT
+    park_continue: bool = False  # the fresh session carries on from the handoff instead of waiting for Mark
     path: Path | None = None
     # not saved: the running session's Entropy, handed to the next backend when the engine
     # restarts on the same session (/crew), so a restart can't reset the score
@@ -51,6 +53,8 @@ class Settings:
             s.crew = data.get("crew") is True
             s.trust = data.get("trust") if data.get("trust") in ("strict", "standard", "trusted") else None
             s.mode = data.get("mode") if data.get("mode") in MODES else "default"
+            s.park = data.get("park") if data.get("park") in ("auto", "ask", "off") else "auto"
+            s.park_continue = data.get("park_continue") is True
         return s
 
     def save(self) -> None:
@@ -58,7 +62,8 @@ class Settings:
             return
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(json.dumps({"model": self.model, "crew": self.crew, "mode": self.mode, "trust": self.trust}, indent=2) + "\n",
+            self.path.write_text(json.dumps({"model": self.model, "crew": self.crew, "mode": self.mode, "trust": self.trust,
+                                         "park": self.park, "park_continue": self.park_continue}, indent=2) + "\n",
                                  encoding="utf-8")
         except OSError:
             pass  # a read-only home must not stop the session

@@ -21,7 +21,8 @@ for _p in (SCORE_ROOT, SCORE_ROOT / "crew"):
         sys.path.insert(0, str(_p))
 
 from orchestra import events as ev  # noqa: E402
-from orchestra import trust  # noqa: E402
+from orchestra import park, trust  # noqa: E402
+from orchestra.entropy import Entropy  # noqa: E402
 from ui.prefs import MODELS, Settings, resolve_model  # noqa: E402
 from ui.widgets.composer import Composer, Prompt  # noqa: E402
 from ui.widgets.header import Header  # noqa: E402
@@ -36,6 +37,7 @@ HELP = {
     "/trust": "auto-approve level: /trust strict|standard|trusted|auto (auto = earned from session entropy)",
     "/mode": "permission mode: /mode default|acceptEdits|plan (Shift+Tab cycles)",
     "/status": "model, crew, trust and mode at a glance",
+    "/park": "hand off to a fresh session: /park [now|continue] | auto|ask|off | continue on|off (parks itself at 80% context)",
     "/resume": "pick an earlier session",
     "/clear": "start a fresh session",
     "/face": "show the full face",
@@ -84,6 +86,11 @@ class RabbleApp(App):
         self._busy_ids: set[str] = set()
         self._typing = False
         self._closing = False
+        self._turn_open = False  # a turn we sent is still running
+        self._parking: tuple[Path, float] | None = None  # (handoff path, started) while the lead writes it
+        self._park_pending = self._park_warned = self._park_blocked = self._park_asked = False
+        self._seed: str | None = None  # first message for a session parked from a handoff
+        self._continue_once = False
         palette = _optional("ui.theme", "load_palette")
         self.palette = palette() if palette else {}
         self.organ_color = _optional("ui.theme", "organ_color") or _fallback_color
@@ -164,6 +171,11 @@ class RabbleApp(App):
                 self.session_id = e.session_id
                 h.model = e.model or h.model
                 self._sync_header()
+                if self._seed:
+                    seed, self._seed = self._seed, None
+                    self._turn_open = True
+                    if await self._engine("send", self.backend.send, seed):
+                        await t.thinking()
             case ev.SessionResumed():
                 self.session_id = e.session_id
                 await t.notice(f"resumed session {e.session_id[:8]}")
@@ -206,6 +218,8 @@ class RabbleApp(App):
                 if e.context_pct is not None:
                     h.context_pct = e.context_pct
                 h.refresh_info()
+                if e.context_pct is not None:
+                    await self._check_park(e.context_pct)
             case ev.RateLimited():
                 h.limit, h.limit_until = e.status, e.until
                 h.refresh_info()
@@ -217,6 +231,12 @@ class RabbleApp(App):
                 t.end_turn()
                 if e.origin == "observer":
                     self._busy_ids.clear()
+                    self._turn_open = False
+                    if self._parking:
+                        # the restart cancels this worker's group, so it runs in its own
+                        self.run_worker(self._finish_park(), group="park")
+                    elif self._park_pending:
+                        await self._begin_park()
                 else:
                     await t.notice("background turn finished")
             case ev.Error():
@@ -256,8 +276,11 @@ class RabbleApp(App):
         word = text.split(None, 1)[0]
         if word in COMMANDS:
             await self._command(word, text[len(word):].strip())
+        elif self._parking:
+            await self.transcript.notice("parking: the handoff is being written, then a fresh session starts", error=True)
         else:
             await self.transcript.user(text)
+            self._turn_open = True
             if await self._engine("send", self.backend.send, text):
                 await self.transcript.thinking()
         self._set_mood()
@@ -281,6 +304,8 @@ class RabbleApp(App):
             await self._set_crew(arg.lower())
         elif word == "/trust":
             await self._set_trust(arg.lower())
+        elif word == "/park":
+            await self._park_command(arg.lower().split())
         elif word == "/status":
             await t.notice(self._status())
         elif word == "/help":
@@ -324,10 +349,14 @@ class RabbleApp(App):
             await self.transcript.notice(f"{what} failed: {e} (/clear restarts the engine)", error=True)
             return False
 
-    async def _restart(self, resume: str | None, cont: bool, clear: bool = False, keep: bool = False) -> None:
+    async def _restart(self, resume: str | None, cont: bool, clear: bool = False, keep: bool = False,
+                       parked: Path | None = None) -> None:
         self.workers.cancel_group(self, "engine")
         old = self.backend
         self.settings.carry = getattr(old, "entropy", None) if keep else None
+        if parked:
+            # a fresh score at the model's baseline; the backend marks it as an explicit (cheap) handoff
+            self.settings.carry = Entropy(self.settings.model)
         if old is not None:
             try:
                 await old.close()
@@ -336,14 +365,98 @@ class RabbleApp(App):
         self._asks.clear()
         self._busy_ids.clear()
         self._streaming = False
+        self._turn_open = False
+        self._parking = None
+        self._park_pending = self._park_warned = self._park_blocked = self._park_asked = False
+        if not keep:
+            self.header.context_pct = None
         if clear or not resume:
             self.entropy = None  # a new session starts from its model's baseline
-        if clear or (resume and not keep):
+        if clear or parked or (resume and not keep):
             await self.transcript.clear_all()
-        if not keep:
+        if parked:
+            keep_going = self.settings.park_continue or self._continue_once
+            self._continue_once = False
+            self._seed = park.fresh_prompt(parked, keep_going)
+            await self.transcript.notice(f"parked; fresh session starting from {parked}"
+                                         + (" and carrying on" if keep_going else " and waiting for you"))
+        elif not keep:
             await self.transcript.notice("new session" if clear else f"resuming {resume[:8]}")
         self.backend = self.make_backend(resume, cont)
         self._pump(self.backend)
+
+    # parking: hand off to a fresh session before the context fills (orchestra/park.py)
+    async def _check_park(self, pct: float) -> None:
+        mode = self.settings.park
+        if mode == "off" or self._parking or self._park_blocked:
+            return
+        if pct >= park.PARK_AT:
+            if mode == "ask":
+                if not self._park_asked:
+                    self._park_asked = True
+                    await self.transcript.notice(f"context {pct:.0f}%: /park hands off to a fresh session")
+            elif self._turn_open:
+                self._park_pending = True
+            else:
+                await self._begin_park(pct)
+        elif pct >= park.WARN_AT and not self._park_warned:
+            self._park_warned = True
+            await self.transcript.notice(
+                f"context {pct:.0f}%: parking at {park.PARK_AT:.0f}% (handoff, then a fresh session; /park off to stop)")
+
+    async def _begin_park(self, pct: float | None = None) -> None:
+        pct = pct if pct is not None else (self.header.context_pct or 0.0)
+        self._park_pending = False
+        path = park.handoff_path(self.cwd, self.session_id)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            self._park_blocked = True
+            return await self.transcript.notice(f"park failed: cannot use {path.parent}: {e}", error=True)
+        self._parking = (path, time.time())
+        self._turn_open = True
+        await self.transcript.notice(f"context {pct:.0f}%: parking. Handoff and session log first, then a fresh session")
+        if await self._engine("park", self.backend.send, park.park_prompt(path, pct)):
+            await self.transcript.thinking()
+        else:
+            self._parking = None
+            self._park_blocked = True
+
+    async def _finish_park(self) -> None:
+        path, since = self._parking or (None, 0.0)
+        self._parking = None
+        if path is None:
+            return
+        why = park.check_handoff(path, since)
+        if why:
+            self._park_blocked = True
+            return await self.transcript.notice(
+                f"park failed: {why}. Staying in this session; /park tries again", error=True)
+        await self._restart(None, False, clear=True, parked=path)
+
+    async def _park_command(self, words: list[str]) -> None:
+        t = self.transcript
+        s = self.settings
+        if not words or words[0] == "status":
+            return await t.notice(f"park {s.park} at {park.PARK_AT:.0f}% context, new session "
+                                  f"{'carries on' if s.park_continue else 'waits for you'}; "
+                                  f"/park now | /park continue | /park auto|ask|off | /park continue on|off")
+        if words[0] in park.MODES:
+            s.park = words[0]
+            s.save()
+            self._park_blocked = False
+            return await t.notice(f"park {s.park}")
+        if words[0] == "continue" and len(words) > 1 and words[1] in ("on", "off"):
+            s.park_continue = words[1] == "on"
+            s.save()
+            return await t.notice(f"after a park the fresh session {'carries on' if s.park_continue else 'waits for you'}")
+        if words[0] in ("now", "continue"):
+            if self._turn_open or self._parking:
+                return await t.notice("a turn is running; park when it finishes", error=True)
+            self._continue_once = "continue" in words
+            self._park_blocked = False
+            return await self._begin_park()
+        await t.notice("usage: /park [now|continue] | auto|ask|off | continue on|off", error=True)
 
     async def _set_mode(self, mode: str) -> None:
         if not await self._engine("mode", self.backend.set_permission_mode, mode):
