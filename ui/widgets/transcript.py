@@ -4,6 +4,10 @@ Lead text arrives as TextDeltas and then a TextBlock of the same text; the block
 REPLACES the streamed Markdown so nothing shows twice.
 """
 
+import os
+import time
+import traceback
+
 from rich.text import Text
 from textual.containers import VerticalScroll
 from textual.widgets import Markdown, Static
@@ -43,17 +47,51 @@ class Transcript(VerticalScroll):
         self._thinking: Thinking | None = None
         self._cards: dict[str, ToolCard] = {}
         self.transient: list = []
+        self._following = True  # changes only when the reader scrolls, never from layout churn
+        self._blurred = False
+        self._refocused_at = 0.0
 
     def on_mount(self) -> None:
         self.anchor()
+        self.watch(self, "virtual_size", self._regrew)
 
     # Textual's anchor releases on any wheel/key scroll and only re-arms at the exact bottom, so a
     # reader who ends a line or two short stops following, and a Markdown update() that collapses
     # then regrows leaves the view stranded mid-content. Follow whenever the view was at (or near) the bottom.
     FOLLOW_SLACK = 3
 
+    # a drop to the top while blurred, or just after refocus, with plenty of content is a layout
+    # stranding, not the reader (nobody scrolls a window they are not in)
+    REFOCUS_GRACE = 2.0
+
     def _near_bottom(self) -> bool:
-        return self.max_scroll_y - self.scroll_y <= self.FOLLOW_SLACK
+        return self._following or self.max_scroll_y - self.scroll_y <= self.FOLLOW_SLACK
+
+    def watch_scroll_y(self, old_value: float, new_value: float) -> None:
+        super().watch_scroll_y(old_value, new_value)
+        stranded = (
+            self._following
+            and new_value <= 1
+            and old_value > 10
+            and self.max_scroll_y > self.size.height
+            and (self._blurred or time.monotonic() - self._refocused_at < self.REFOCUS_GRACE)
+        )
+        if os.environ.get("RABBLE_SCROLL_DEBUG") and (abs(new_value - old_value) > 5 or new_value <= 1):
+            frames = " < ".join(f"{f.name}:{f.lineno}" for f in traceback.extract_stack()[-7:-1])
+            with open("/tmp/rabble-scroll.log", "a") as log:
+                log.write(
+                    f"{time.strftime('%H:%M:%S')} y {old_value:.0f}->{new_value:.0f} max={self.max_scroll_y:.0f} "
+                    f"following={self._following} blurred={self._blurred} stranded={stranded} | {frames}\n"
+                )
+        if stranded:
+            self.call_after_refresh(self.scroll_end, animate=False)
+            return
+        # the reader's own scroll decides; a layout clamp to the new max keeps us following
+        self._following = new_value >= self.max_scroll_y - self.FOLLOW_SLACK + 1
+
+    def _regrew(self, _size) -> None:
+        if self._following:
+            self.call_after_refresh(self.scroll_end, animate=False)
 
     def _stick(self, follow: bool) -> None:
         if follow:
@@ -61,11 +99,14 @@ class Transcript(VerticalScroll):
 
     def remember_view(self) -> None:
         """Window blurred: note where the reader was (at the bottom, or a line number)."""
+        self._blurred = True
         self._saved_view = ("end", 0.0) if self._near_bottom() else ("y", self.scroll_y)
 
     def restore_view(self) -> None:
         """Window refocused: put the reader back. Focus and style refreshes can re-layout the
         Markdown blocks and strand the view at the top, because the released anchor never re-follows."""
+        self._blurred = False
+        self._refocused_at = time.monotonic()
         saved, self._saved_view = getattr(self, "_saved_view", None), None
         if saved is None:
             return
@@ -88,6 +129,7 @@ class Transcript(VerticalScroll):
 
     async def clear_all(self) -> None:
         self._live = self._thinking = None
+        self._following = True
         self._cards.clear()
         await self.remove_children()
 

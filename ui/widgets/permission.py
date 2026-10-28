@@ -80,7 +80,19 @@ class PermissionScreen(ModalScreen[PermissionReply]):
     PermissionScreen #perm-reason { margin-top: 1; display: none; }
     PermissionScreen.-denying #perm-reason { display: block; }
     PermissionScreen.-denying #perm-buttons { display: none; }
+    /* short pane: drop the chrome so the buttons always fit; the body scroll gives up its rows first */
+    PermissionScreen.-short #perm-box { max-height: 100%; padding: 0 1; }
+    PermissionScreen.-short .perm-meta, PermissionScreen.-short #perm-body-wrap,
+    PermissionScreen.-short #perm-buttons, PermissionScreen.-short #perm-reason { margin-top: 0; }
+    PermissionScreen.-short #perm-buttons Button { margin-right: 1; }
+    PermissionScreen.-short #perm-reason { height: 1; border: none; padding: 0; }
+    PermissionScreen.-tiny .perm-meta { display: none; }
     """
+
+    SHORT_ROWS = 26
+    TINY_ROWS = 12
+    BODY_MAX = 20
+    BODY_MIN = 3
 
     # keys are ignored this long after the modal appears: a keystroke meant for the composer
     # (or a second "y" meant for the previous ask) must not answer an ask nobody has read yet.
@@ -94,6 +106,33 @@ class PermissionScreen(ModalScreen[PermissionReply]):
 
     def on_mount(self) -> None:
         self._armed_at = time.monotonic() + self.ARM_SECONDS
+        self._fit()
+
+    def on_resize(self) -> None:
+        self._fit()
+
+    def _fit(self) -> None:
+        """Keep the answer controls on screen: compact below SHORT_ROWS, and cap the body
+        scroll to whatever rows the rest of the box leaves free."""
+        rows = self.size.height
+        if not rows:
+            return
+        self.set_class(rows < self.SHORT_ROWS, "-short")
+        self.set_class(rows < self.TINY_ROWS, "-tiny")
+        for b in self.query("#perm-buttons Button"):
+            b.compact = rows < self.SHORT_ROWS
+        self.call_after_refresh(self._fit_body)
+
+    def _fit_body(self) -> None:
+        box = self.query_one("#perm-box")
+        wrap = self.query_one("#perm-body-wrap")
+        others = sum(
+            w.outer_size.height + w.styles.margin.top + w.styles.margin.bottom
+            for w in box.children
+            if w is not wrap and w.display
+        )
+        free = self.size.height - box.gutter.height - others - wrap.styles.margin.top - wrap.styles.margin.bottom
+        wrap.styles.max_height = max(self.BODY_MIN, min(self.BODY_MAX, free))
 
     def _armed(self) -> bool:
         return time.monotonic() >= self._armed_at
@@ -127,6 +166,7 @@ class PermissionScreen(ModalScreen[PermissionReply]):
             return
         self.add_class("-denying")
         self.query_one("#perm-reason", Input).focus()
+        self.call_after_refresh(self._fit_body)
 
     def action_deny_now(self) -> None:
         self.dismiss(PermissionReply("deny"))

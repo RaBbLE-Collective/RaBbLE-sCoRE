@@ -167,3 +167,31 @@ def test_keys_inside_the_arming_window_are_ignored(monkeypatch):
             await pilot.pause()
         return early, app.result
     assert asyncio.run(go()) == ("unset", PermissionReply("deny"))
+
+
+@pytest.mark.parametrize("rows", [40, 24, 16, 10, 8])
+def test_answer_controls_stay_on_screen_in_a_short_pane(rows):
+    """Tiled panes can be a dozen rows tall: the buttons and the deny reason must still fit."""
+    ask = PermissionAsk(id="p", organ="lead", tool="Bash", input={"command": "git push origin main\n" * 30},
+                        title="Claude wants to run: git push", description="Push the branch.")
+
+    async def go():
+        app = Host(PermissionScreen(ask))
+        async with app.run_test(size=(100, rows)) as pilot:
+            await pilot.pause(0.6)
+            box = app.screen.query_one("#perm-box").content_region  # inside border and padding
+            for b in app.screen.query("Button"):
+                assert box.y <= b.region.y and b.region.bottom <= box.bottom, (rows, b.id, b.region, box)
+            await pilot.click("#perm-session")
+            await pilot.pause(0.2)
+        assert app.result.decision == "allow_session"
+
+        app = Host(PermissionScreen(ask))
+        async with app.run_test(size=(100, rows)) as pilot:
+            await pilot.pause(0.6)
+            await pilot.press("n")
+            await pilot.pause(0.3)
+            r = app.screen.query_one("#perm-reason")
+            box = app.screen.query_one("#perm-box").content_region
+            assert r.region.height > 0 and r.region.bottom <= box.bottom, (rows, r.region, box)
+    asyncio.run(go())
