@@ -66,10 +66,10 @@ async def test_model_crew_trust_commands(tmp_path):
         await until(pilot, lambda: app.session_id)
         await pilot.press(*"/model haiku", "enter")
         await until(pilot, lambda: settings.model == "haiku")
-        assert "trust strict" in app.header.plain and "crew off" in app.header.plain
+        assert "strict 35" in app.header.plain and "crew off" in app.header.plain
         await pilot.press(*"/trust trusted", "enter")
         await until(pilot, lambda: settings.trust == "trusted")
-        assert "trust trusted" in app.header.plain
+        assert "trusted 35" in app.header.plain
         n = len(made)
         await pilot.press(*"/crew on", "enter")
         await until(pilot, lambda: settings.crew and len(made) > n)

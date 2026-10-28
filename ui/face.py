@@ -581,9 +581,10 @@ MOODS = {
     "denied": ("angry", 1.0),
 }
 DENIED_SECONDS = 2.0
-# entropy score -> glitch level, piecewise linear through these anchors (tuned by eye, S287):
-# opus/fable (0.05) clean, sonnet (0.13) a faint flicker, haiku (0.55) clearly degraded but readable.
-SIGNAL_CURVE = ((0.05, 0.0), (0.13, 0.12), (0.55, 0.30), (1.0, 1.0))
+# entropy score (1 - general capability/100) -> glitch level, piecewise linear through these anchors
+# (tuned by eye, S287): opus (capability 85) clean, sonnet (70) a faint flicker, haiku (35) clearly
+# degraded but readable. A compacted or bloated opus lands near sonnet's flicker.
+SIGNAL_CURVE = ((0.15, 0.0), (0.30, 0.12), (0.65, 0.30), (1.0, 1.0))
 STATIC_CHARS = "░▒▓·:.'"
 
 

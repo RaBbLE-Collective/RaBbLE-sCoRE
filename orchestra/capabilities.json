@@ -1,0 +1,15 @@
+{
+  "_about": "What each model can do, 0-100 per category, before a session degrades it. Matched by name fragment, first match wins. Every number is an estimate until `source` says otherwise: replace them with measurements, or override per user in ~/.config/rabble/capabilities.json (same shape; an entry with the same key replaces fields, a new key is tried first).",
+  "categories": ["general", "coding", "tools", "recall"],
+  "models": [
+    {"key": "fable",  "match": ["fable"],  "general": 95, "coding": 96, "tools": 94, "recall": 95, "local": false, "source": "estimate"},
+    {"key": "opus",   "match": ["opus"],   "general": 85, "coding": 88, "tools": 86, "recall": 84, "local": false, "source": "estimate"},
+    {"key": "gpt",    "match": ["gpt"],    "general": 85, "coding": 85, "tools": 85, "recall": 83, "local": false, "source": "estimate"},
+    {"key": "sonnet", "match": ["sonnet"], "general": 70, "coding": 76, "tools": 72, "recall": 68, "local": false, "source": "estimate"},
+    {"key": "haiku",  "match": ["haiku"],  "general": 35, "coding": 38, "tools": 40, "recall": 40, "local": false, "source": "estimate"},
+    {"key": "local",  "match": ["qwen", "llama", "gemma", "phi", "mistral", "gguf", "ollama", "local"],
+                      "general": 25, "coding": 30, "tools": 20, "recall": 25, "local": true, "source": "estimate"}
+  ],
+  "default": {"key": "default", "general": 50, "coding": 50, "tools": 50, "recall": 50, "local": false, "source": "placeholder until the session reports which model it is"},
+  "unknown": {"key": "unknown", "general": 25, "coding": 25, "tools": 25, "recall": 25, "local": false, "source": "default"}
+}

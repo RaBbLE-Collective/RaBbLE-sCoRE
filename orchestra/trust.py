@@ -9,9 +9,9 @@ directory, and every MCP tool (they reach outside the machine).
   standard  reads, read-only Bash, edits inside the working directory, planning/agent tools
   trusted   standard + any Bash that is not on the danger list
 
-Trust is an entropy question (orchestra/entropy.py): a low-trust model is a high-entropy one,
-and session events (a drop to a weaker model, compaction) raise it. STABLE earns trusted,
-NOMINAL standard, ELEVATED and worse strict, so trust falls as the session degrades.
+Trust is a capability question (orchestra/entropy.py, orchestra/capabilities.py): the tier is read from
+the session's `coding` capability (trusted >= 60, standard >= 40, strict below), so a weaker model starts
+lower and a degrading session (a drop to a weaker model, compaction, a full window) loses trust.
 """
 
 import os
@@ -65,11 +65,14 @@ SENSITIVE_PATH = re.compile(r"(^|/)(\.git|\.ssh|\.gnupg|\.aws|\.config/rabble)(/
 
 
 def profile_for(model: str | None, override: str | None = None, entropy: float | None = None) -> str:
-    """The profile in force: an explicit override, else what the session's entropy earns
-    (orchestra/entropy.py). Without a live score, the model's baseline entropy stands in."""
+    """The profile in force: an explicit override, else what the session earns (orchestra/entropy.py:
+    the tier of its `coding` capability, since trust gates Bash and edits). Given only a score, the
+    `general` scale decides; given only a model, its own capability does."""
     if override in PROFILES:
         return override
-    return entropy_mod.trust_for_score(entropy if entropy is not None else entropy_mod.family(model)[0])
+    if entropy is not None:
+        return entropy_mod.trust_for_score(entropy)
+    return entropy_mod.Entropy(model).trust
 
 
 def _segments(command: str) -> list[str]:

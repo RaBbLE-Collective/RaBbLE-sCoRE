@@ -87,6 +87,7 @@ class RabbleApp(App):
         self._typing = False
         self._closing = False
         self._turn_open = False  # a turn we sent is still running
+        self._bloat = park.Bloat()  # context size and fill rate, per turn
         self._parking: tuple[Path, float] | None = None  # (handoff path, started) while the lead writes it
         self._park_pending = self._park_warned = self._park_blocked = self._park_asked = False
         self._seed: str | None = None  # first message for a session parked from a handoff
@@ -219,6 +220,9 @@ class RabbleApp(App):
                     h.context_pct = e.context_pct
                 h.refresh_info()
                 if e.context_pct is not None:
+                    self._bloat.add(e.tokens, e.context_pct)
+                    h.park_eta = self._bloat.eta() if self.settings.park != "off" else None
+                    h.refresh_info()
                     await self._check_park(e.context_pct)
             case ev.RateLimited():
                 h.limit, h.limit_until = e.status, e.until
@@ -369,7 +373,9 @@ class RabbleApp(App):
         self._parking = None
         self._park_pending = self._park_warned = self._park_blocked = self._park_asked = False
         if not keep:
+            self._bloat = park.Bloat()
             self.header.context_pct = None
+            self.header.park_eta = None
         if clear or not resume:
             self.entropy = None  # a new session starts from its model's baseline
         if clear or parked or (resume and not keep):
@@ -390,21 +396,22 @@ class RabbleApp(App):
         mode = self.settings.park
         if mode == "off" or self._parking or self._park_blocked:
             return
-        if pct >= park.PARK_AT:
+        why = self._bloat.reason()
+        if why:
             if mode == "ask":
                 if not self._park_asked:
                     self._park_asked = True
-                    await self.transcript.notice(f"context {pct:.0f}%: /park hands off to a fresh session")
+                    await self.transcript.notice(f"{why}: /park hands off to a fresh session")
             elif self._turn_open:
                 self._park_pending = True
             else:
-                await self._begin_park(pct)
+                await self._begin_park(pct, why)
         elif pct >= park.WARN_AT and not self._park_warned:
             self._park_warned = True
             await self.transcript.notice(
                 f"context {pct:.0f}%: parking at {park.PARK_AT:.0f}% (handoff, then a fresh session; /park off to stop)")
 
-    async def _begin_park(self, pct: float | None = None) -> None:
+    async def _begin_park(self, pct: float | None = None, why: str | None = None) -> None:
         pct = pct if pct is not None else (self.header.context_pct or 0.0)
         self._park_pending = False
         path = park.handoff_path(self.cwd, self.session_id)
@@ -415,7 +422,7 @@ class RabbleApp(App):
             return await self.transcript.notice(f"park failed: cannot use {path.parent}: {e}", error=True)
         self._parking = (path, time.time())
         self._turn_open = True
-        await self.transcript.notice(f"context {pct:.0f}%: parking. Handoff and session log first, then a fresh session")
+        await self.transcript.notice(f"{why or f'context {pct:.0f}%'}: parking. Handoff and session log first, then a fresh session")
         if await self._engine("park", self.backend.send, park.park_prompt(path, pct)):
             await self.transcript.thinking()
         else:
@@ -466,9 +473,13 @@ class RabbleApp(App):
         self._sync_header()
 
     # settings
+    def _model_for_entropy(self) -> str | None:
+        return self.header.model if self.header.model != "default" else self.settings.model
+
     def trust_profile(self) -> str:
-        return trust.profile_for(self.header.model if self.header.model != "default" else self.settings.model,
-                                 self.settings.trust, self.entropy.score if self.entropy else None)
+        if self.settings.trust in trust.PROFILES:
+            return self.settings.trust
+        return self.entropy.trust if self.entropy else trust.profile_for(self._model_for_entropy())
 
     def _sync_header(self) -> None:
         self.header.mode = self.mode
@@ -476,11 +487,21 @@ class RabbleApp(App):
         self.header.trust = self.trust_profile()
         if self.entropy:
             self.header.entropy = (self.entropy.score, self.entropy.band)
+            self.header.capability, self.header.categories = self.entropy.capability, self.entropy.categories
+            self.header.local = self.entropy.local
+        else:  # before the engine reports: the model's own numbers
+            base = Entropy(self._model_for_entropy())
+            self.header.capability, self.header.categories, self.header.local = base.capability(), base.capabilities(), base.local
         self.header.refresh_info()
 
     def _status(self) -> str:
-        ent = f"entropy {self.entropy.band.lower()} {self.entropy.score:.2f} · " if self.entropy else ""
-        return (f"model {self.header.model} · {ent}crew {'on' if self.settings.crew else 'off'} · "
+        ent = ""
+        if self.entropy:
+            c = self.entropy.categories
+            ent = (f"{self.entropy.band.lower()} · capability {self.entropy.capability}"
+                   f" (coding {c.get('coding', '-')} tools {c.get('tools', '-')} recall {c.get('recall', '-')}"
+                   f"{', local' if self.entropy.local else ''}) · ")
+        return (f"model {self.header.model} · {ent}{self._bloat.summary()} · crew {'on' if self.settings.crew else 'off'} · "
                 f"trust {self.trust_profile()}{' (set)' if self.settings.trust else ' (from entropy)'} · mode {self.mode}")
 
     async def _set_model(self, value: str | None) -> None:

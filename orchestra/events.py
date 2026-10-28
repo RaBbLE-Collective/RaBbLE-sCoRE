@@ -200,6 +200,9 @@ class EntropyChanged(Event):
     band: str
     trust: str
     reason: str = ""
+    capability: int = 0   # general capability, 0-100: what the session can still do
+    categories: dict[str, int] = field(default_factory=dict)   # general/coding/tools/recall
+    local: bool = False   # the model runs on this machine
 
 
 @dataclass(frozen=True, slots=True)

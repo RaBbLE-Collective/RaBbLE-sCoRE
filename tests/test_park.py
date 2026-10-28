@@ -55,6 +55,36 @@ def test_check_handoff(tmp_path):
     assert "not written this turn" in park.check_handoff(p, time.time())
 
 
+def test_bloat_tracks_fill_rate_and_eta():
+    b = park.Bloat()
+    assert b.reason() is None and b.eta() is None and "no context" in b.summary()
+    for tokens, pct in ((20_000, 10.0), (40_000, 20.0), (60_000, 30.0)):
+        b.add(tokens, pct)
+    assert b.growth() == 10.0 and b.eta() == 5 and b.reason() is None      # 30 + 5*10 = 80
+    assert b.reads == 120_000 and "0.12M token-reads over 3 turns" in b.summary()
+    b.add(80_000, 40.0); b.add(100_000, 50.0)
+    assert b.reason() is None and b.eta() == 3
+    b.add(156_000, 78.0)                                                  # a 28% jump: the next could pass 95
+    assert "filling" in b.reason() and "95%" in b.reason()
+    b.add(160_000, 80.0)
+    assert b.reason() == "context 80%" and b.eta() == 0
+
+
+def test_bloat_forgets_growth_after_a_compaction():
+    b = park.Bloat()
+    for i in range(1, 8):
+        b.add(i * 10_000, i * 10.0)
+    b.add(10_000, 10.0)                                                   # compacted
+    assert len(b.samples) == 1 and b.growth() == 0.0 and b.eta() is None
+
+
+def test_bloat_ignores_a_session_that_is_not_filling():
+    b = park.Bloat()
+    for pct in (30.0, 30.0, 30.0, 29.0):
+        b.add(1000, pct)
+    assert b.eta() is None and b.reason() is None
+
+
 # ── the app flow ────────────────────────────────────────────────────────────
 
 pytest.importorskip("textual")
@@ -199,6 +229,31 @@ async def test_usage_mid_turn_waits_for_the_turn_to_end(tmp_path):
         assert not any("PARK THIS SESSION" in t for t in sent(made[0]))
         made[0].emit(ev.TurnDone("end_turn"))                            # it ends: now park
         await until(pilot, lambda: any("PARK THIS SESSION" in t for t in sent(made[0])))
+
+
+@pytest.mark.asyncio
+async def test_parks_early_when_one_more_turn_would_overflow(tmp_path):
+    app, made = make(tmp_path)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await first_turn(app, pilot, made)
+        for pct in (45.0, 60.0, 74.0):                                    # 14-15% a turn, still under 80
+            made[0].emit(ev.Usage(1, None, pct))
+            await pilot.pause(0.05)
+        await until(pilot, lambda: any("PARK THIS SESSION" in t for t in sent(made[0])))
+        await until(pilot, lambda: len(made) == 2)
+
+
+@pytest.mark.asyncio
+async def test_header_shows_capability_tier_and_park_eta(tmp_path):
+    app, made = make(tmp_path)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await first_turn(app, pilot, made)
+        made[0].emit(ev.EntropyChanged(0.15, "STABLE", "trusted", "", 85, {"general": 85, "coding": 88}, False))
+        for pct in (20.0, 30.0, 40.0):
+            made[0].emit(ev.Usage(1, None, pct))
+        await until(pilot, lambda: app.header.park_eta is not None)
+        plain = app.header.plain
+        assert "trusted 85" in plain and "code 88" in plain and "park in ~4" in plain
 
 
 @pytest.mark.asyncio

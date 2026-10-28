@@ -45,6 +45,10 @@ class Header(Horizontal):
         self.trust = "standard"
         self.entropy: tuple[float, str] | None = None  # (score, band) from the engine
         self.context_pct: float | None = None
+        self.park_eta: int | None = None   # turns until the park point at the current fill rate
+        self.capability: int | None = None
+        self.categories: dict[str, int] = {}
+        self.local = False
         self.cost: float | None = None
         self.limit = "allowed"
         self.limit_until: float | None = None
@@ -80,14 +84,18 @@ class Header(Horizontal):
         mag, cy = self._pal.get("magenta", "magenta"), self._pal.get("cyan", "cyan")
         t = gradient("RaBbLE", mag, cy)
         t.append("\n")
-        t.append(f"{self.model} · mode {self.mode} · trust {self.trust} · crew {'on' if self.crew else 'off'}\n", style="bold")
+        tier = self.trust + (" local" if self.local else "") + ("" if self.capability is None else f" {self.capability}")
+        t.append(f"{self.model} · mode {self.mode} · {tier} · crew {'on' if self.crew else 'off'}\n", style="bold")
         t.append(short_path(self.cwd) + "\n", style="dim")
         ctx = "ctx --" if self.context_pct is None else f"ctx {self.context_pct:.0f}%"
+        if self.context_pct is not None and self.park_eta is not None and self.park_eta <= 12:
+            ctx += f" (park in ~{self.park_eta})" if self.park_eta else " (parking)"
         t.append(ctx + " · ")
         if self.entropy:
             score, band = self.entropy
             glyph, color = ENTROPY_GLYPH.get(band, ("◆", "cyan"))
-            t.append(f"{glyph} {band.lower()} {score:.2f}", style=self._pal.get(color, color))
+            code = self.categories.get("coding")
+            t.append(f"{glyph} {band.lower()}" + ("" if code is None else f" code {code}"), style=self._pal.get(color, color))
             t.append(" · ")
         t.append_text(self._limit_text())
         cost = "--" if self.cost is None else f"${self.cost:.4f}"

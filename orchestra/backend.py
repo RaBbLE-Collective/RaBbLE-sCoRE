@@ -12,6 +12,7 @@ A later sCoRE HTTP backend (plan U5) slots in behind the same protocol.
 
 import asyncio
 import contextlib
+import re
 from collections.abc import AsyncIterator, Iterable
 from pathlib import Path
 from typing import Any, Protocol
@@ -56,6 +57,10 @@ class _Queued:
             yield item
 
 
+# a command that runs the project's checks; a pass restores some of what compaction or a thin handoff cost
+_TEST_RUN = re.compile(r"\b(pytest|py\.test|unittest|npm\s+(run\s+)?test|pnpm\s+test|yarn\s+test|cargo\s+test|go\s+test|make\s+(test|check)|ctest|tox)\b")
+
+
 class ClaudeCodeBackend(_Queued):
     def __init__(self, cwd: str | Path, *, append: str | None = None, agents: dict[str, Any] | None = None,
                  model: str | None = None, permission_mode: str | None = None,
@@ -78,18 +83,20 @@ class ClaudeCodeBackend(_Queued):
         self.client = None
         self._pump: asyncio.Task | None = None
         self._side: set[asyncio.Task] = set()
+        self._calls: dict[str, tuple[str, dict]] = {}   # tool id -> (name, input), for re-grounding
         # agent_id (hooks, can_use_tool) → organ slug, filled by the SubagentStart hook
         self._organ_by_agent: dict[str, str] = {}
 
     def trust_profile(self) -> str:
-        return trust.profile_for(self.model, self.trust_override, self.entropy.score)
+        return self.trust_override if self.trust_override in trust.PROFILES else self.entropy.trust
 
     def _report_entropy(self, reason: str | None = None) -> None:
         """Emit when the score moved (or on the first report)."""
         score = self.entropy.score
         if self._reported is None or score != self._reported or reason:
             self._reported = score
-            self.emit(ev.EntropyChanged(score, self.entropy.band, self.entropy.trust, reason or ""))
+            self.emit(ev.EntropyChanged(score, self.entropy.band, self.entropy.trust, reason or "",
+                                        self.entropy.capability(), self.entropy.capabilities(), self.entropy.local))
 
     def _observe(self, event: ev.Event) -> None:
         """Feed what the stream shows into the entropy score."""
@@ -103,6 +110,15 @@ class ClaudeCodeBackend(_Queued):
             self.entropy.observe_model(event.model)
         elif isinstance(event, ev.Usage) and event.context_pct is not None:
             reason = self.entropy.context(event.context_pct)
+        elif isinstance(event, ev.ToolCall):
+            if event.name == "Bash":
+                self._calls[event.id] = (event.name, event.input)   # kept until its result says pass or fail
+            if event.name == "Read" and event.input.get("file_path"):
+                self.entropy.reground("read", str(event.input["file_path"]))   # re-loading what was lost
+        elif isinstance(event, ev.ToolResult):
+            name, tool_input = self._calls.pop(event.id, ("", {}))
+            if event.ok and name == "Bash" and _TEST_RUN.search(str(tool_input.get("command", ""))):
+                self.entropy.reground("verify")                                  # a passing test run
         elif isinstance(event, ev.RateLimited):
             reason = self.entropy.rate_limited(event.status)
         elif isinstance(event, ev.TurnDone) and event.origin == "observer":
