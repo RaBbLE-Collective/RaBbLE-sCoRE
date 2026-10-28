@@ -15,9 +15,14 @@ from orchestra import trust  # noqa: E402
 
 
 def test_baselines_and_bands():
+    from ui import face
     assert en.Entropy("claude-opus-5-5").band == "STABLE"
-    assert en.Entropy("claude-sonnet-5-5").band == "NOMINAL"
+    assert en.Entropy("claude-sonnet-5-5").band == "STABLE"   # frontier tier: low entropy, trusted
     assert en.Entropy("claude-haiku-5-5").band == "ELEVATED"   # a weak model starts degraded
+    for m in ("opus", "sonnet", "fable"):   # frontier models: near-clean entity after a model switch too
+        e = en.Entropy(f"claude-{m}-5-5"); e.turns = 1; e.switch_model("claude-opus-5-5")
+        assert face.signal_level(e.score) == 0
+    assert face.signal_level(en.Entropy("claude-haiku-5-5").score) > 0.4   # weak model: visibly degraded
     assert en.Entropy("mystery").score == en.UNKNOWN[0]
     assert [en.band_of(x) for x in (0, 0.2, 0.5, 0.7, 0.9, 1.0)] == \
         ["STABLE", "NOMINAL", "ELEVATED", "DEGRADED", "UNSTABLE", "UNSTABLE"]
@@ -53,12 +58,32 @@ def test_first_pick_is_free_and_events_dedupe():
     e = en.Entropy(None)
     assert e.switch_model("opus") is None and e.events == []
     e.turns = 1
-    assert e.context(80) is None and e.context(30) == "context compacted"
+    assert e.context(40) is None and e.context(20) is None          # small drop, below the compaction threshold
+    assert e.context(80) and e.context(30) == "context compacted"
     assert e.rate_limited(True) and e.rate_limited(True) is None and e.rate_limited(False) is None
     for _ in range(25):
         e.turn_done()
-    assert sum(1 for k, *_ in e.events if k == "long_session_turn") == 26 - en.LONG_SESSION  # turns started at 1
+    assert not any(k == "long_session_turn" for k, *_ in e.events)   # long sessions are pressure, not damage
     assert e.score <= 1.0
+
+
+def test_pressure_rises_and_recovers_damage_does_not():
+    e = en.Entropy("claude-opus-5-5"); e.turns = 1
+    assert e.score == 0.05 and e.pressure == 0
+    assert e.context(50) is None and e.pressure == 0                  # below the ramp: clean
+    assert e.context(85) == "context 85% full" and e.band == "NOMINAL" and e.trust == "standard"
+    e.context(95)
+    assert e.pressure == pytest.approx(en.CONTEXT_MAX) and e.band == "NOMINAL"
+    e._ctx = 20                                                         # window freed: pressure recovers
+    assert e.pressure == 0 and e.band == "STABLE" and e.trust == "trusted"
+    e.context(95); assert e.context(30) == "context compacted"        # compaction is damage, kept
+    assert e.damage == en.WEIGHTS["context_truncation"] and e.score == pytest.approx(0.05 + 0.20 + 0.0)
+    e2 = en.Entropy("claude-opus-5-5")
+    e2.rate_limited("warning"); assert e2.pressure == 0.05
+    e2.rate_limited("allowed"); assert e2.pressure == 0
+    for _ in range(40):
+        e2.turn_done()
+    assert e2.pressure == en.LONG_MAX and e2.damage == 0
 
 
 def test_backend_reports_and_trust_follows(monkeypatch):

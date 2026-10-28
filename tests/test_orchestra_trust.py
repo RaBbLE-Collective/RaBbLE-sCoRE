@@ -43,7 +43,7 @@ def test_substitution_not_standard():
 def test_profile_follows_model():
     assert trust.profile_for("claude-opus-5-5") == "trusted"
     assert trust.profile_for("claude-fable-5-1") == "trusted"
-    assert trust.profile_for("claude-sonnet-5-5") == "standard"
+    assert trust.profile_for("claude-sonnet-5-5") == "trusted"
     assert trust.profile_for("claude-haiku-5-5") == "strict"
     assert trust.profile_for("gpt-6") == "trusted"
     assert trust.profile_for(None) == "standard"

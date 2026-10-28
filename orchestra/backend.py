@@ -104,7 +104,7 @@ class ClaudeCodeBackend(_Queued):
         elif isinstance(event, ev.Usage) and event.context_pct is not None:
             reason = self.entropy.context(event.context_pct)
         elif isinstance(event, ev.RateLimited):
-            reason = self.entropy.rate_limited(event.status == "rejected")
+            reason = self.entropy.rate_limited(event.status)
         elif isinstance(event, ev.TurnDone) and event.origin == "observer":
             reason = self.entropy.turn_done()
         elif isinstance(event, ev.ModelUsed):
