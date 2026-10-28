@@ -12,6 +12,7 @@ The prototype in RaBbLE-BaBbLE/prototypes/terminal-face/ is the design reference
 below is a port of it and must stay output-identical. FaceWidget is the Textual body.
 """
 
+import functools
 import math
 import os
 import random
@@ -248,12 +249,18 @@ def _edge_y(cx, cy, rx, ry, rot, x, lower):
     return cy + math.tan(rot) * (x - cx) + (off if lower else -off)
 
 
+@functools.lru_cache(maxsize=4096)
+def _lattice(seed, i):
+    return random.Random(seed * 7919 + i).random()
+
+
 def _noise(seed, x):
-    # cheap 1D value noise: smooth enough for lightning strands
+    # cheap 1D value noise: smooth enough for lightning strands (lattice values are cached:
+    # seeding a Random per sample made the envelope most of the full face's frame time)
     i = math.floor(x)
     f = x - i
-    a = random.Random(seed * 7919 + i).random()
-    b = random.Random(seed * 7919 + i + 1).random()
+    a = _lattice(seed, i)
+    b = _lattice(seed, i + 1)
     f = f * f * (3 - 2 * f)
     return a + (b - a) * f - 0.5
 
@@ -263,7 +270,7 @@ def _noise(seed, x):
 class Face:
     """One entity instance. `frame(t)` returns a Canvas; `state`/`expr` steer it."""
 
-    def __init__(self, cols, rows, palette=None, detail="full", seed=7, spread=1.3,
+    def __init__(self, cols, rows, palette=None, detail="full", seed=7, spread=None,
                  eye_n=None, eye_h=None, eye_w=None, aura=None, rim=None, rim_tips=None):
         self.cols, self.rows = cols, rows
         self.P = palette or load_palette()
@@ -285,7 +292,7 @@ class Face:
             self.k = (h * (eye_h or 0.33)) / EYE_RY
         self.mins = {"erx": 3, "prx": 5.5, "pry": 2.6} if detail == "full" else {"erx": 3, "prx": 7, "pry": 2.4}
         # the mini mark's min eye width crowds the pair, so it spreads them a little (1.3 = a one-cell gap; 1.45 = two)
-        self.spread = 1.0 if detail == "full" else spread
+        self.spread = spread if spread is not None else (1.5 if detail == "full" else 1.3)
         # mini look knobs: eye shape exponent (2 = true oval, 3 = blunt pill), min eye half-width in px,
         # background glow strength, and how much of the eye is the coloured rim vs the white core
         # mini defaults (S278, Mark: "more oval like in the face, more distinctive, less BG"): true
@@ -300,7 +307,9 @@ class Face:
         self.lids = not full
         self.fine_eyes = True   # anti-aliased octant-resolution eyes; False = the original stepped drawing
         self.rim_w = 1.0
+        self.block = 1   # eye resolution step (sub-pixels): coarser for a less capable model
         self._eye_key, self._eye_cells = None, {}
+        self._env_colours = {}
         self._mesh = self._build_mesh() if detail == "full" else ([], [])
 
     # mesh nodes are fixed per instance; they shimmer, not move
@@ -399,10 +408,11 @@ class Face:
             lid = LIDS.get(self.expr) if self.lids else None
             # the eye cells depend only on the rig (and the glow, which follows it), and the rig
             # holds still between saccades and blinks: reuse them
-            key = (tuple(round(v, 2) for name in sorted(rig) for v in rig[name]), lid, self.rim_w)
+            key = (tuple(round(v * 3) for name in sorted(rig) for v in rig[name][:4])   # 1/3 px steps
+                   + tuple(round(rig[name][4] * 200) for name in sorted(rig)), lid, self.rim_w, self.block)
             if key != self._eye_key:
                 self._eye_cells = eyes.paint(cv, rig, self.P, _OCTANT, fine=1 if self.octant else 2, n=2.0,
-                                             lids={"L": lid, "R": lid} if lid else None, rim_w=self.rim_w)
+                                             lids={"L": lid, "R": lid} if lid else None, rim_w=self.rim_w, block=self.block)
                 self._eye_key = key
             cv.override.update(self._eye_cells)
         else:
@@ -415,13 +425,16 @@ class Face:
         for strand, (scale, w, seed) in enumerate(((1.0, 1.0, 1), (0.92, 0.8, 2), (0.84, 0.6, 3))):
             prev = {}
             steps = int(self.hw * 2 * 2)
+            colours = self._env_colours.setdefault(strand, {})
             for i in range(steps + 1):
                 x = -self.hw + 2 * self.hw * i / steps
                 jag = _noise(seed, x * 0.45 + t * 1.3) * 1.6 + _noise(seed + 9, x * 2.6 - t * 3.1) * 0.9
                 for sgn in (-1, 1):
                     y = sgn * (self._env_h(x) * scale + jag * (self._env_h(x) / max(self.hh, 1)) )
                     X, Y = self.cx + x, self.cy + y
-                    col = mix(mix(P["text"], self._side(X), 0.2 + 0.3 * strand), P["bg"], 0.15 * strand)
+                    col = colours.get(i)
+                    if col is None:
+                        col = colours[i] = mix(mix(P["text"], self._side(X), 0.2 + 0.3 * strand), P["bg"], 0.15 * strand)
                     if sgn in prev:
                         cv.line(prev[sgn][0], prev[sgn][1], X, Y, col, w)
                     prev[sgn] = (X, Y)
@@ -581,48 +594,72 @@ MOODS = {
     "denied": ("angry", 1.0),
 }
 DENIED_SECONDS = 2.0
-# entropy score (1 - general capability/100) -> glitch level, piecewise linear through these anchors
-# (tuned by eye, S287): opus (capability 85) clean, sonnet (70) a faint flicker, haiku (35) clearly
-# degraded but readable. A compacted or bloated opus lands near sonnet's flicker.
-SIGNAL_CURVE = ((0.15, 0.0), (0.30, 0.12), (0.65, 0.30), (1.0, 1.0))
+# Entropy has two inputs (Entropy Tracker v0.5) and the entity draws each its own way, tuned by eye:
+#   capability (the model, general 0-100)  -> NOISE: grain, drained colour, coarser eyes. Steady, from
+#       the first frame: a fresh haiku is grainy but holds together.
+#   stability (the session, 0-100)         -> BREAKING: tears, channel splits, dropped rows. Zero while the
+#       session is healthy, so a fresh sonnet is clean; a bloated or compacted opus tears.
+NOISE_CURVE = ((100, 0.0), (85, 0.0), (70, 0.06), (35, 0.38), (0, 1.0))     # capability -> noise
+BREAK_CURVE = ((100, 0.0), (90, 0.0), (75, 0.12), (40, 0.50), (0, 1.0))     # stability  -> breaking
 STATIC_CHARS = "░▒▓·:.'"
 
 
-def signal_level(score):
-    """Entropy score -> 0..1 signal damage along SIGNAL_CURVE."""
-    if score <= SIGNAL_CURVE[0][0]:
-        return 0.0
-    for (x0, y0), (x1, y1) in zip(SIGNAL_CURVE, SIGNAL_CURVE[1:]):
-        if score <= x1:
-            return y0 + (y1 - y0) * (score - x0) / (x1 - x0)
-    return 1.0
+def _curve(points, x):
+    """Piecewise linear through points (x descending), clamped at both ends."""
+    if x >= points[0][0]:
+        return points[0][1]
+    for (x0, y0), (x1, y1) in zip(points, points[1:]):
+        if x >= x1:
+            return y0 + (y1 - y0) * (x0 - x) / (x0 - x1)
+    return points[-1][1]
 
 
-def degrade(cells, level, pal, rng, state):
-    """The entity's signal at a given entropy level: colour drains toward grey, static eats
-    cells, bursts tear rows sideways with a magenta/cyan channel split, and at the top rows
-    drop out. `state` carries the running burst between frames. Pure: cells in, cells out."""
-    if level <= 0 or not cells:
+def noise_level(capability):
+    """The model's general capability -> 0..1 noise/resolution loss."""
+    return _curve(NOISE_CURVE, capability)
+
+
+def break_level(stability):
+    """The session's stability -> 0..1 breaking."""
+    return _curve(BREAK_CURVE, stability)
+
+
+def eye_block(noise):
+    """Noise -> the eye renderer's resolution step: 1 = fine, 2 coarse, 3 chunky."""
+    return 1 + (noise > 0.25) + (noise > 0.6)
+
+
+def degrade(cells, brk, pal, rng, state, noise=0.0):
+    """The entity's signal. `noise` (from capability) is steady: colour drains toward grey, grain eats
+    cells, colour steps coarsen. `brk` (from stability) is the breaking: bursts tear rows sideways with
+    a magenta/cyan channel split, and at the top rows drop out. `state` carries the running burst
+    between frames. Pure: cells in, cells out."""
+    if (brk <= 0 and noise <= 0) or not cells:
         return cells
     bg, text, muted = pal["bg"], pal["text"], pal["muted"]
     magenta, cyan = pal["magenta"], pal["cyan"]
     rows, cols = len(cells), len(cells[0])
     out = []
-    # 1. signal loss: drain colour toward its own luma, dim toward the void
+    # 1. signal loss: drain colour toward its own luma, dim toward the void; a noisy model also
+    #    loses colour depth (fewer steps per channel)
+    drain, dim = noise * 0.7 + brk * 0.3, noise * 0.35 + brk * 0.2
+    step = 1 + int(noise * 40)
     for row in cells:
         new = []
         for ch, fg, back in row:
             luma = round(0.3 * fg[0] + 0.59 * fg[1] + 0.11 * fg[2])
-            fg = mix(mix(fg, (luma, luma, luma), level * 0.7), bg, level * 0.35)
+            fg = mix(mix(fg, (luma, luma, luma), drain), bg, dim)
+            if step > 1:
+                fg = tuple(min(255, round(v / step) * step) for v in fg)
             new.append((ch, fg, back))
         out.append(new)
     # 2. bursts: a few rows tear sideways and split into magenta/cyan ghosts
     burst = state.get("burst")
-    if burst is None and rng.random() < level * 0.18:
-        n = 1 + int(level * 2.5)
+    if burst is None and rng.random() < brk * 0.18:
+        n = 1 + int(brk * 2.5)
         burst = {"ticks": rng.randint(2, 5), "shift": {}}
         for r in rng.sample(range(rows), min(rows, n)):
-            burst["shift"][r] = rng.choice((-1, 1)) * rng.randint(1, 2 + int(level * 4))
+            burst["shift"][r] = rng.choice((-1, 1)) * rng.randint(1, 2 + int(brk * 4))
     if burst:
         for r, k in burst["shift"].items():
             row = out[r]
@@ -632,19 +669,23 @@ def degrade(cells, level, pal, rng, state):
         burst["ticks"] -= 1
         state["burst"] = burst if burst["ticks"] > 0 else None
     # 3. dropout: from 0.6 up, a row sometimes loses signal entirely
-    if level > 0.6 and rng.random() < (level - 0.6) * 0.5:
+    if brk > 0.6 and rng.random() < (brk - 0.6) * 0.5:
         r = rng.randrange(rows)
         out[r] = [(" ", fg, back) for _, fg, back in out[r]]
-    # 4. static: noise replaces cells; denser as entropy rises
-    density = level * 0.14
-    for r in range(rows):
-        for c in range(cols):
-            if rng.random() < density:
-                ch, _, back = out[r][c]
-                grey = mix(muted, text, rng.random() * 0.5)
-                out[r][c] = (rng.choice(STATIC_CHARS), mix(grey, bg, rng.random() * 0.6), back)
+    # 4. grain: noise replaces cells; denser as the model is less capable, a little more when it breaks
+    density = noise * 0.12 + brk * 0.08
+    if density > 0:
+        for r in range(rows):
+            for c in range(cols):
+                if rng.random() < density:
+                    ch, _, back = out[r][c]
+                    grey = mix(muted, text, rng.random() * 0.5)
+                    out[r][c] = (rng.choice(STATIC_CHARS), mix(grey, bg, rng.random() * 0.6), back)
     return out
-FPS = 20
+
+
+FPS = 20       # mini mark
+FULL_FPS = 12  # the full face costs ~20 ms a frame: a slower tick leaves the app its event loop
 SPRING = 8.0  # pose ease rate per second
 
 
@@ -678,13 +719,17 @@ class FaceWidget(Widget):
         self._blend = 1.0
         self._timer = None
         self._revert = None
-        self.entropy = 0.0
+        self.noise = self.breaking = 0.0
         self._rng = random.Random(11)
         self._glitch = {}
 
-    def set_entropy(self, score):
-        self.entropy = float(score)
-        if signal_level(self.entropy) <= 0:
+    def set_signal(self, capability, stability):
+        """The two inputs: the model's general capability (noise, resolution) and the session's
+        stability (breaking), both 0-100."""
+        self.noise, self.breaking = noise_level(capability), break_level(stability)
+        if self.face is not None:
+            self.face.block = eye_block(self.noise)
+        if self.breaking <= 0:
             self._glitch = {}
 
     def _make_face(self):
@@ -696,7 +741,7 @@ class FaceWidget(Widget):
         return Face(24, 6, self._pal, detail="mini")
 
     def on_mount(self):
-        self._timer = self.set_interval(1 / FPS, self._tick)
+        self._timer = self.set_interval(1 / (FULL_FPS if self.detail == "full" else FPS), self._tick)
 
     def on_resize(self, event):
         self.face = None  # rebuilt on the next tick at the new size
@@ -733,14 +778,16 @@ class FaceWidget(Widget):
             self._blend = 1.0
         if self.face is None:
             self.face = self._make_face()
+            if self.face is not None:
+                self.face.block = eye_block(self.noise)
         if self.face is None:
             self._cells = []
             return
         blink, gaze = self.life.step(t, dt)
         self.face.pose = self._pose()
         self.face.expr = self._expr_now()
-        self._cells = degrade(self.face.frame(t, blink, gaze).cells(), signal_level(self.entropy),
-                              self._pal, self._rng, self._glitch)
+        self._cells = degrade(self.face.frame(t, blink, gaze).cells(), self.breaking,
+                              self._pal, self._rng, self._glitch, self.noise)
         self.refresh()
 
     def render_line(self, y):

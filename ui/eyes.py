@@ -164,12 +164,14 @@ def _fit(subs, octant):
     return octant[ins], ma, mb
 
 
-def paint(canvas, rig, P, octant, fine, n=2.0, lids=None, inner=None, rim_w=1.0):
+def paint(canvas, rig, P, octant, fine, n=2.0, lids=None, inner=None, rim_w=1.0, block=1):
     """Both eye/portal pairs as per-cell overrides: {(row, col): (glyph, fg, bg)}. Reads `canvas.bg`
     (the aura glow) but does not write to it, so a caller can cache the result per rig.
 
     rig: {"eL","eR","pL","pR"} -> (cx, cy, rx, ry, rot) in the face's pixel units.
     lids: {"L": (depth, slope) | None, "R": ...}; inner: {"L": +1, "R": -1}.
+    block: resolution step in sub-pixels; above 1 every sub-pixel samples its block's centre, so a model of
+    low capability is drawn coarser (and not anti-aliased).
     """
     P = dict(P)
     P.setdefault("void", tuple(max(0, round(v * 0.5)) for v in P["bg"]))
@@ -199,8 +201,13 @@ def paint(canvas, rig, P, octant, fine, n=2.0, lids=None, inner=None, rim_w=1.0)
                     col = p.sample(x, y, col)
                 return col
 
-            subs = [shade(c * 2 + i % 2 + 0.5, r * 4 + i // 2 + 0.5) for i in range(8)]
-            spread = max(abs(a[k] - b[k]) for a in subs for b in subs for k in range(3))
+            if block > 1:
+                snap = lambda v: (v // block) * block + block / 2   # noqa: E731
+                subs = [shade(snap(c * 2 + i % 2), snap(r * 4 + i // 2)) for i in range(8)]
+                spread = 0
+            else:
+                subs = [shade(c * 2 + i % 2 + 0.5, r * 4 + i // 2 + 0.5) for i in range(8)]
+                spread = max(abs(a[k] - b[k]) for a in subs for b in subs for k in range(3))
             if spread > 40:  # an edge cell: supersample each sub-pixel 2x2
                 subs = [tuple(sum(shade(c * 2 + i % 2 + ox, r * 4 + i // 2 + oy)[k] for ox, oy in
                                   ((.25, .25), (.75, .25), (.25, .75), (.75, .75))) / 4 for k in range(3))

@@ -203,6 +203,8 @@ class EntropyChanged(Event):
     capability: int = 0   # general capability, 0-100: what the session can still do
     categories: dict[str, int] = field(default_factory=dict)   # general/coding/tools/recall
     local: bool = False   # the model runs on this machine
+    base: int = 0         # the model's own general capability (what noise/resolution draws)
+    stability: int = 100  # session health 0-100: damage, pressure, bloat (what glitch/breaking draws)
 
 
 @dataclass(frozen=True, slots=True)

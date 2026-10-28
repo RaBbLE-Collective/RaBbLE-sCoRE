@@ -206,9 +206,9 @@ class RabbleApp(App):
                 await t.notice(f"{e.organ} {e.status}", error=e.status != "completed")
             case ev.EntropyChanged():
                 self.entropy = e
-                setter = getattr(self.face, "set_entropy", None)
+                setter = getattr(self.face, "set_signal", None)
                 if setter:
-                    setter(e.score)
+                    setter(e.base, e.stability)
                 self._sync_header()
                 if e.reason and e.band not in ("STABLE", "NOMINAL"):
                     await t.notice(f"entropy {e.band.lower()} ({e.score:.2f}): {e.reason}. Verify critical decisions."
@@ -322,6 +322,8 @@ class RabbleApp(App):
         elif word == "/face":
             face_cls = _optional("ui.face", "FaceWidget")
             w = face_cls("full") if face_cls else Static("RaBbLE")
+            if self.entropy and hasattr(w, "set_signal"):
+                w.set_signal(self.entropy.base, self.entropy.stability)
             t.transient.append(w)
             await t.mount(w)
         elif word == "/clear":
@@ -489,6 +491,7 @@ class RabbleApp(App):
             self.header.entropy = (self.entropy.score, self.entropy.band)
             self.header.capability, self.header.categories = self.entropy.capability, self.entropy.categories
             self.header.local = self.entropy.local
+            self.header.stability = self.entropy.stability
         else:  # before the engine reports: the model's own numbers
             base = Entropy(self._model_for_entropy())
             self.header.capability, self.header.categories, self.header.local = base.capability(), base.capabilities(), base.local
@@ -498,7 +501,7 @@ class RabbleApp(App):
         ent = ""
         if self.entropy:
             c = self.entropy.categories
-            ent = (f"{self.entropy.band.lower()} · capability {self.entropy.capability}"
+            ent = (f"{self.entropy.band.lower()} · stability {self.entropy.stability} · capability {self.entropy.capability}"
                    f" (coding {c.get('coding', '-')} tools {c.get('tools', '-')} recall {c.get('recall', '-')}"
                    f"{', local' if self.entropy.local else ''}) · ")
         return (f"model {self.header.model} · {ent}{self._bloat.summary()} · crew {'on' if self.settings.crew else 'off'} · "

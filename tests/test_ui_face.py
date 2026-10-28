@@ -24,7 +24,7 @@ def test_port_matches_prototype(detail, size, expr):
     spec = importlib.util.spec_from_file_location("proto_face", PROTO)
     proto = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(proto)
-    a, b = F.Face(*size, detail=detail), proto.Face(*size, detail=detail)
+    a, b = F.Face(*size, detail=detail, spread=1.0 if detail == "full" else None), proto.Face(*size, detail=detail)   # full spreads its eyes wider now
     a.expr = b.expr = expr
     a.fine_eyes = False   # the port still matches the prototype's stepped drawing; fine eyes are new
     assert a.frame(1.0, 0.3, (0.2, -0.1)).cells() == b.frame(1.0, 0.3, (0.2, -0.1)).cells()

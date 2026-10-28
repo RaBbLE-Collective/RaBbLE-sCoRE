@@ -25,12 +25,12 @@ def test_capabilities_and_tiers():
     assert got["mystery"].score == 0.75
     for m in ("opus", "fable", "sonnet"):   # a /model switch costs a little, never trust or a visible tear
         e = en.Entropy(f"claude-{m}-5-5"); e.turns = 1; e.switch_model("claude-opus-5-5")
-        assert e.trust == "trusted" and face.signal_level(e.score) < 0.12
-    assert face.signal_level(got["claude-opus-5-5"].score) == 0
-    sonnet = face.signal_level(got["claude-sonnet-5-5"].score)
-    haiku = face.signal_level(got["claude-haiku-5-5"].score)
-    local = face.signal_level(got["qwen3-coder:30b"].score)
-    assert 0.05 < sonnet < 0.2 and 0.2 < haiku < 0.4 and haiku < local   # faint, degraded, worse
+        assert e.trust == "trusted" and face.break_level(e.stability) == 0   # never a visible tear
+    noise = {m: face.noise_level(e.base_capability) for m, e in got.items()}
+    assert noise["claude-opus-5-5"] == 0
+    assert 0 < noise["claude-sonnet-5-5"] < 0.1                              # sonnet: faint grain, no glitch
+    assert 0.25 < noise["claude-haiku-5-5"] < noise["qwen3-coder:30b"]       # grainier, worse
+    assert all(face.break_level(e.stability) == 0 for e in got.values())     # a fresh session holds together, any model
     assert [en.band_of(x) for x in (0, 0.10, 0.25, 0.40, 0.60, 1.0)] == \
         ["STABLE", "NOMINAL", "ELEVATED", "DEGRADED", "UNSTABLE", "UNSTABLE"]
 
@@ -194,16 +194,21 @@ def test_degrade_clean_below_floor_and_worse_above():
     pal = face.load_palette()
     cells = [[("█", pal["cyan"], pal["bg"])] * 24 for _ in range(6)]
     assert face.degrade(cells, 0.0, pal, random.Random(1), {}) == cells
-    assert face.signal_level(0.05) == 0 and face.signal_level(1.0) == 1
-    assert face.signal_level(0.3) < face.signal_level(0.6) < face.signal_level(0.9)   # monotonic
+    assert face.break_level(100) == 0 and face.break_level(0) == 1
+    assert face.break_level(80) < face.break_level(50) < face.break_level(20)           # monotonic
+    assert face.noise_level(100) == 0 and face.noise_level(0) == 1
+    assert face.noise_level(70) < face.noise_level(35) < face.noise_level(10)
+    assert [face.eye_block(n) for n in (0, 0.1, 0.4, 0.9)] == [1, 1, 2, 3]
 
-    def damage(level):
+    def damage(brk, noise=0.0):
         st, rng, total = {}, random.Random(5), 0
         for _ in range(60):
-            out = face.degrade(cells, level, pal, rng, st)
+            out = face.degrade(cells, brk, pal, rng, st, noise)
             total += sum(1 for row in out for cell in row if cell[0] != "█")
         return total
     assert damage(0.2) < damage(0.6) < damage(1.0)
+    assert damage(0.0, 0.2) < damage(0.0, 0.6)                                          # noise alone is grain
+    assert damage(0.0, 0.5) > 0 and face.degrade(cells, 0.0, pal, random.Random(1), {}, 0.5) != cells
     out = face.degrade(cells, 1.0, pal, random.Random(2), {})
     assert len(out) == 6 and all(len(r) == 24 for r in out)   # shape preserved
 
@@ -304,3 +309,28 @@ def test_entropy_event_carries_capability():
     e = got[-1]
     assert e.capability == 85 and e.categories["coding"] == 88 and e.local is False
     assert ev.from_json(e.to_json()) == e                                # round-trips
+
+
+def test_stability_and_capability_are_separate_inputs():
+    """v0.5: a small local model is low capability but stable; a frontier model in a bloated,
+    compacted session is capable but unstable. Entropy (the combined score) rises with both."""
+    local = en.Entropy("qwen3-coder:30b")
+    opus = en.Entropy("claude-opus-5-5")
+    assert local.stability == opus.stability == 100 and local.base_capability < opus.base_capability
+    opus.turns = 1
+    opus.context(70); opus.context(20)           # a compaction
+    assert opus.base_capability == 85            # the model did not get worse
+    assert opus.stability < 90                   # but the session did
+    fresh = en.Entropy("claude-opus-5-5"); before = fresh.score
+    fresh.context(80)
+    assert fresh.bloat > 0.2 and fresh.stability < 60 and fresh.score > before
+    fresh.context(55)                            # shrank a little (not a compaction): bloat is live, it recovers
+    assert fresh.bloat < 0.10 and fresh.stability > 80
+
+
+def test_bloat_breaks_the_entity_before_it_costs_trust():
+    pytest.importorskip("textual")
+    from ui import face
+    e = en.Entropy("claude-opus-5-5"); e.turns = 1
+    e.context(55)
+    assert e.trust == "trusted" and face.break_level(e.stability) > 0 and e.capability("coding") >= 80

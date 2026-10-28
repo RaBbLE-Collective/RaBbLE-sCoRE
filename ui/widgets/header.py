@@ -49,6 +49,7 @@ class Header(Horizontal):
         self.capability: int | None = None
         self.categories: dict[str, int] = {}
         self.local = False
+        self.stability: int | None = None
         self.cost: float | None = None
         self.limit = "allowed"
         self.limit_until: float | None = None
@@ -95,7 +96,8 @@ class Header(Horizontal):
             score, band = self.entropy
             glyph, color = ENTROPY_GLYPH.get(band, ("◆", "cyan"))
             code = self.categories.get("coding")
-            t.append(f"{glyph} {band.lower()}" + ("" if code is None else f" code {code}"), style=self._pal.get(color, color))
+            t.append(f"{glyph} {band.lower()}" + ("" if self.stability is None else f" stab {self.stability}")
+                     + ("" if code is None else f" code {code}"), style=self._pal.get(color, color))
             t.append(" · ")
         t.append_text(self._limit_text())
         cost = "--" if self.cost is None else f"${self.cost:.4f}"

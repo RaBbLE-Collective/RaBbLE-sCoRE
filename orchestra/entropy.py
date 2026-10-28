@@ -23,6 +23,11 @@ from dataclasses import dataclass, field
 
 from . import capabilities as caps
 
+# v0.5: entropy has two inputs. Capability is the model's (per category, benchmark-derived, fixed for the
+# model); stability is the session's (damage + pressure + bloat, moves every turn, a park resets it).
+# The entity draws capability as noise and resolution, stability as glitch and breaking (ui/face.py).
+BLOAT_FROM, BLOAT_FULL, BLOAT_MAX = 40.0, 85.0, 0.30   # context fill that breaks the entity before it costs trust
+
 # health bands on capability LOST in the session (damage + pressure), not on the model's strength:
 # a fresh haiku is STABLE and strict; a compacted opus is ELEVATED and still capable
 BANDS = (("STABLE", 0.10), ("NOMINAL", 0.25), ("ELEVATED", 0.40), ("DEGRADED", 0.60), ("UNSTABLE", 1.01))
@@ -153,6 +158,26 @@ class Entropy:
 
     def capabilities(self) -> dict[str, int]:
         return {c: self.capability(c) for c in caps.CATEGORIES}
+
+    # ── the two inputs (v0.5) ───────────────────────────────────────────────
+    @property
+    def bloat(self) -> float:
+        """How full the window is, as a stability cost 0..BLOAT_MAX: starts at 40% context, full at 85%.
+        Separate from pressure: a filling window tears the entity well before it costs capability or trust."""
+        if self._ctx is None or self._ctx <= BLOAT_FROM:
+            return 0.0
+        return BLOAT_MAX * min(1.0, (self._ctx - BLOAT_FROM) / (BLOAT_FULL - BLOAT_FROM))
+
+    @property
+    def base_capability(self) -> int:
+        """What the model can do, before the session touches it (0..100, `general`)."""
+        return self.cap.general
+
+    @property
+    def stability(self) -> int:
+        """How healthy the session is, 0..100: 100 minus damage, pressure and bloat. A fresh session is
+        100 for every model, a small local one included."""
+        return round(100 * max(0.0, min(1.0, 1 - self.lost - self.bloat)))
 
     @property
     def score(self) -> float:

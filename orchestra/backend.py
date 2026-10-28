@@ -79,7 +79,7 @@ class ClaudeCodeBackend(_Queued):
         self.entropy = entropy or Entropy(model)
         self._carried = entropy is not None
         self._lead_model: str | None = None
-        self._reported: float | None = None
+        self._reported: tuple[float, int] | None = None
         self.client = None
         self._pump: asyncio.Task | None = None
         self._side: set[asyncio.Task] = set()
@@ -93,10 +93,12 @@ class ClaudeCodeBackend(_Queued):
     def _report_entropy(self, reason: str | None = None) -> None:
         """Emit when the score moved (or on the first report)."""
         score = self.entropy.score
-        if self._reported is None or score != self._reported or reason:
-            self._reported = score
+        mark = (score, self.entropy.stability)
+        if self._reported is None or mark != self._reported or reason:
+            self._reported = mark
             self.emit(ev.EntropyChanged(score, self.entropy.band, self.entropy.trust, reason or "",
-                                        self.entropy.capability(), self.entropy.capabilities(), self.entropy.local))
+                                        self.entropy.capability(), self.entropy.capabilities(), self.entropy.local,
+                                        self.entropy.base_capability, self.entropy.stability))
 
     def _observe(self, event: ev.Event) -> None:
         """Feed what the stream shows into the entropy score."""
