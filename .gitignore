@@ -38,3 +38,5 @@ CODEX.md
 GEMINI.md
 .claude/
 server/data/
+tui/target/
+tui/.cargo/
