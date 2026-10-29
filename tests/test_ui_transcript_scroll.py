@@ -102,3 +102,28 @@ def test_submit_jumps_to_bottom_after_scrolling_up():
             await p.pause(0.5)
             assert t.max_scroll_y - t.scroll_y <= 1
     _run(go())
+
+
+def test_wheel_burst_accumulates_into_one_glide():
+    from textual import events
+
+    async def go():
+        app = _App()
+        async with app.run_test(size=(80, 24)) as p:
+            await _filled(p, app)
+            t = app.t
+            top = t.scroll_y
+            for _ in range(4):
+                t.post_message(events.MouseScrollUp(t, 1, 1, 0, 0, 0, False, False, False))
+            await p.pause(0.05)
+            assert t._glide_target is not None and t._glide_target < top   # notches moved the target
+            mid = t.scroll_y
+            assert t._glide_target < mid <= top                            # the view is still gliding, not jumped
+            ys = []
+            for _ in range(20):
+                await p.pause(0.02)
+                ys.append(t.scroll_y)
+            assert all(a >= b for a, b in zip(ys, ys[1:]))                 # monotonic: no ratchet back-steps
+            await p.pause(0.5)
+            assert t._glide_target is None and t.scroll_y == top - 4 * t.WHEEL_LINES
+    _run(go())

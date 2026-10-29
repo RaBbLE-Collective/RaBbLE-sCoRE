@@ -4,6 +4,7 @@ Lead text arrives as TextDeltas and then a TextBlock of the same text; the block
 REPLACES the streamed Markdown so nothing shows twice.
 """
 
+import math
 import os
 import time
 import traceback
@@ -66,6 +67,56 @@ class Transcript(VerticalScroll):
     # a drop to the top while blurred, or just after refocus, with plenty of content is a layout
     # stranding, not the reader (nobody scrolls a window they are not in)
     REFOCUS_GRACE = 2.0
+
+    # Wheel notches arrive in bursts. Restarting an eased animation per notch begins every one at full speed, which is
+    # the ratchet. Instead notches only move a target, and ONE 120 Hz glide closes a fixed fraction of the remaining
+    # distance per frame (exponential approach): velocity is continuous across notches and settles without a hard stop.
+    WHEEL_LINES = 3
+    GLIDE_RATE = 16.0        # 1/s; time constant ~60 ms
+    GLIDE_FPS = 120          # needs TEXTUAL_FPS >= this (set in ui/__main__.py), else frames are dropped
+    GLIDE_MIN_SPEED = 45.0   # lines/s: the exponential tail would crawl a line per few frames, which reads as notches
+
+    _glide_target: float | None = None
+    _glide_timer = None
+    _glide_at = 0.0
+
+    def _wheel(self, direction: int, event) -> None:
+        if event.ctrl or event.shift or not self.allow_vertical_scroll:
+            return
+        base = self.scroll_y if self._glide_target is None else self._glide_target
+        target = min(max(base + direction * self.WHEEL_LINES, 0), self.max_scroll_y)
+        event.stop()
+        if target == base:
+            return
+        self._glide_target = target
+        if self._glide_timer is None:
+            self._glide_at = time.monotonic()
+            self._glide_timer = self.set_interval(1 / self.GLIDE_FPS, self._glide)
+
+    def _glide_stop(self) -> None:
+        self._glide_target = None
+        if self._glide_timer is not None:
+            self._glide_timer.stop()
+            self._glide_timer = None
+
+    def _glide(self) -> None:
+        now = time.monotonic()
+        dt, self._glide_at = now - self._glide_at, now
+        if self._glide_target is None:
+            return self._glide_stop()
+        target = min(self._glide_target, self.max_scroll_y)   # content may have shrunk or grown
+        gap = target - self.scroll_y
+        if abs(gap) < 0.5:
+            self.scroll_to(y=target, animate=False, force=True)
+            return self._glide_stop()
+        step = max(abs(gap) * (1 - math.exp(-dt * self.GLIDE_RATE)), self.GLIDE_MIN_SPEED * dt)
+        self.scroll_to(y=self.scroll_y + math.copysign(min(step, abs(gap)), gap), animate=False, force=True)
+
+    def _on_mouse_scroll_down(self, event) -> None:
+        self._wheel(1, event)
+
+    def _on_mouse_scroll_up(self, event) -> None:
+        self._wheel(-1, event)
 
     def _near_bottom(self) -> bool:
         return self._following or self.max_scroll_y - self.scroll_y <= self.FOLLOW_SLACK

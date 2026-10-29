@@ -1061,9 +1061,20 @@ class FaceWidget(Widget):
                 start = b
         self.refresh(*regions)
 
+    _STYLE_CAP = 20000
+
     def _style(self, key, base):
-        fg, bg = key
-        return Style(color=Color.from_rgb(*fg), bgcolor=base.bgcolor if bg == self._bg else Color.from_rgb(*bg))
+        # one Style per (fg, bg, widget background): building Style + Color per run was half the loop's time
+        cache = self.__dict__.setdefault("_style_cache", {})
+        ck = (key, base.bgcolor)
+        st = cache.get(ck)
+        if st is None:
+            if len(cache) > self._STYLE_CAP:
+                cache.clear()
+            fg, bg = key
+            st = cache[ck] = Style(color=Color.from_rgb(*fg),
+                                   bgcolor=base.bgcolor if bg == self._bg else Color.from_rgb(*bg))
+        return st
 
     def render_line(self, y):
         width = self.size.width

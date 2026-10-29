@@ -6,6 +6,8 @@ import sys
 
 
 def main(argv=None) -> int:
+    # Textual caps screen updates at 60 fps, read at import: lift it so the scroll glide can run at 120.
+    os.environ.setdefault("TEXTUAL_FPS", "120")
     p = argparse.ArgumentParser(prog="rabble-ui", description="RaBbLE's terminal face over Claude Code")
     p.add_argument("--cwd", default=os.getcwd())
     p.add_argument("--model")

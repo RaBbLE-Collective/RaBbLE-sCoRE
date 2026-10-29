@@ -67,6 +67,7 @@ def _fallback_color(slug: str) -> str:
 
 
 class RabbleApp(App):
+    PAUSE_GC_ON_SCROLL = True   # no collection pause mid-glide
     TITLE = "RaBbLE"
     CSS = """
     Screen { background: $background; color: $foreground; }
