@@ -88,7 +88,8 @@ class Rig:
 
     def __init__(self, tmp_path, factory):
         self.path = str(tmp_path / "e.sock")
-        self.server = Server(SessionManager(factory), "test-engine")
+        # the rig's principals are made-up users, so the policy stub (host user only) is swapped for allow-all
+        self.server = Server(SessionManager(factory), "test-engine", policy=lambda p, c, params: params)
         self.principals = ["local:1"]
         self.n = 0
         self.clients: list[Client] = []
@@ -316,6 +317,9 @@ async def test_replies_echo_the_request_id_and_events_do_not(tmp_path):
         a.send(type="send", session=sid, text="go", id="r4")
         said = await a.until("UserSaid")
         assert "id" not in said and said["client"] == "tui" and said["sender"] == "local:1"
+        # an event's own body id is the ask's, never the request's
+        ask = await a.until("PermissionAsk")
+        assert ask["id"] == "a1"
 
 
 async def test_late_attach_mid_turn_gets_the_transcript_tail_and_a_snapshot(tmp_path):
@@ -368,9 +372,8 @@ async def test_ring_overflow_sets_gap_and_sends_compact_state(tmp_path):
                 break
         kinds = [m["type"] for m in seen]
         assert kinds[0] == "SessionStarted" and "seq" not in seen[0]       # compact state first, unsequenced
-        assert [m["seq"] for m in seen if "seq" in m] == [m["seq"] for m in seen if "seq" in m][-3:] or True
         tail = [m for m in seen if "seq" in m]
-        assert len(tail) == 3 and tail[-1]["seq"] == att["seq"]
+        assert [m["seq"] for m in tail] == [att["seq"] - 2, att["seq"] - 1, att["seq"]]     # exactly the retained 3
         c = await rig.client()                                              # at the head: no gap
         await c.hello()
         c.send(type="attach", session=sid, since_seq=att["seq"])
@@ -464,7 +467,9 @@ async def test_create_policy_can_rewrite_or_refuse_and_default_refuses_non_local
         assert seen[1][2] == {"cwd": "/etc"}                              # unknown keys never reach the policy
     from orchestra.serve import local_policy
     assert local_policy(Principal("web:9", "web"), "create_session", {}) is None
-    assert local_policy(Principal("local:1"), "create_session", {"cwd": "/w"}) == {"cwd": "/w"}
+    assert local_policy(Principal("local:0" if os.getuid() else "local:1"), "create_session", {}) is None   # another OS user
+    me = Principal(f"local:{os.getuid()}")
+    assert local_policy(me, "create_session", {"cwd": "/w"}) == {"cwd": "/w"}
     assert sid
 
 
@@ -649,3 +654,93 @@ async def test_oversized_command_is_refused_not_buffered(tmp_path):
         await a.hello()
         a.w.write(b'{"type":"send","text":"' + b"x" * (UP_LINE_LIMIT + 10) + b'"}\n')
         assert "too large" in (await a.until("Error", timeout=5))["text"]
+
+
+async def test_organs_in_the_snapshot_come_and_go_with_real_sdk_output(tmp_path):
+    """Fed from SdkMapper, which emits OrganStarted with task_id None and learns the task id later."""
+    sdk = pytest.importorskip("claude_agent_sdk")
+    from orchestra.sdk_map import SdkMapper
+    m = SdkMapper()
+    msgs = [sdk.AssistantMessage([sdk.ToolUseBlock("A1", "Agent", {"subagent_type": "gobble", "description": "map it"})], "haiku"),
+            sdk.TaskStartedMessage("task_started", {}, "T1", "map it", "u", "s1", tool_use_id="A1"),
+            sdk.TaskProgressMessage("task_progress", {}, "T1", "map it", {"total_tokens": 9}, "u", "s1", last_tool_name="Grep"),
+            sdk.TaskNotificationMessage("task_notification", {}, "T1", "completed", "/o", "", "u", "s1")]
+    out = [e for msg in msgs for e in m.map(msg) if not isinstance(e, ev.ModelUsed)]
+    kinds = [type(e).__name__ for e in out]
+    assert kinds == ["ToolCall", "OrganStarted", "OrganProgress", "OrganDone"], kinds
+
+    class Scripted(FakeBackend):
+        done = 0
+
+        async def send(self, text):                     # releases events up to index `text`
+            for e in out[self.done:int(text)]:
+                self.emit(e)
+            self.done = int(text)
+
+    async def factory(_p):
+        return Scripted()
+
+    async with Rig(tmp_path, factory) as rig:
+        a, sid = await make_session(rig)
+        s = rig.server.manager.sessions[sid]
+        a.send(type="send", session=sid, text="2")                    # ToolCall, OrganStarted
+        await a.until("OrganStarted")
+        assert [o["organ"] for o in s.snapshot()["organs"]] == ["gobble"]
+        a.send(type="send", session=sid, text="3")                    # + OrganProgress: learns T1
+        await a.until("OrganProgress")
+        assert s.snapshot()["organs"][0]["task_id"] == "T1"
+        a.send(type="send", session=sid, text="4")                    # + OrganDone
+        await a.until("OrganDone")
+        await asyncio.sleep(0.02)
+        assert s.snapshot()["organs"] == []
+
+
+async def test_a_backend_that_ends_on_its_own_is_closed(tmp_path):
+    async with Rig(tmp_path, fake_factory) as rig:
+        a, sid = await make_session(rig)
+        backend = rig.server.manager.sessions[sid].backend
+        backend._finish()                                             # the CLI went away
+        await a.until("session_closed")
+        assert backend.closed is True
+
+
+async def test_failed_send_clears_busy(tmp_path):
+    class Hurt(FakeBackend):
+        async def send(self, text):
+            raise OSError("pipe")
+
+    async def factory(_p):
+        return Hurt()
+
+    async with Rig(tmp_path, factory) as rig:
+        a, sid = await make_session(rig)
+        a.send(type="send", session=sid, text="x")
+        assert (await a.until("Error"))["text"] == "internal error"
+        assert rig.server.manager.sessions[sid].snapshot()["busy"] is False
+
+
+async def test_listener_directory_rules(tmp_path):
+    server = Server(SessionManager(fake_factory), "t")
+    loose = tmp_path / "loose"
+    loose.mkdir(mode=0o755)
+    loose.chmod(0o755)
+    with pytest.raises(RuntimeError, match="not private"):                 # an existing dir of ours is never chmod'd for you
+        await UnixListener(loose / "engine.sock").start(server.handle)
+    assert stat.S_IMODE(loose.stat().st_mode) == 0o755
+    fresh = UnixListener(tmp_path / "new" / "engine.sock")                 # one we create is made 0700
+    await fresh.start(server.handle)
+    assert stat.S_IMODE((tmp_path / "new").stat().st_mode) == 0o700
+    await fresh.close()
+
+
+async def test_a_live_unlocked_socket_is_not_unlinked(tmp_path):
+    """An engine from before the lock existed still answers: the probe refuses to steal its path."""
+    path = tmp_path / "engine.sock"
+    old = await asyncio.start_unix_server(lambda r, w: w.close(), str(path))
+    try:
+        with pytest.raises(RuntimeError, match="already listening"):
+            await UnixListener(path).start(Server(SessionManager(fake_factory), "t").handle)
+        assert path.exists()
+    finally:
+        old.close()
+        await old.wait_closed()

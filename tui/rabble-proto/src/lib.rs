@@ -251,7 +251,13 @@ fn observer() -> TurnOrigin {
 
 /// One line from the engine: the message plus its envelope. `session` is `None` for engine-level
 /// messages; `seq` is the per-session sequence number (events and `attached`); `id` echoes the
-/// `id` of the command this answers (events a command causes carry none).
+/// `id` of the command this answers. `id` is set ONLY for server replies (`hello`, `sessions`,
+/// `session_created`, `attached`, `detached`, `session_closed`) and `Error`; for every event kind it is
+/// `None`, because ToolCall, ToolResult, PermissionAsk and PermissionResolved carry their own body
+/// field `id`, which belongs to `Down`, not to the envelope.
+///
+/// Resume bookkeeping: track `max(seq)` over the events you receive. `attached.seq` is the head and
+/// arrives before the replay, so it is not a resume point. After a `gap` replay, dedupe asks by id.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Frame {
     pub session: Option<String>,
@@ -267,7 +273,9 @@ impl Frame {
         let v: Value = serde_json::from_str(line)?;
         let session = v.get("session").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned);
         let seq = v.get("seq").and_then(Value::as_u64);
-        let id = v.get("id").and_then(Value::as_str).map(str::to_owned);
+        let is_reply = matches!(v.get("type").and_then(Value::as_str),
+            Some("hello" | "sessions" | "session_created" | "attached" | "detached" | "session_closed" | "Error"));
+        let id = v.get("id").and_then(Value::as_str).filter(|_| is_reply).map(str::to_owned);
         let (msg, malformed) = match serde_json::from_value::<Down>(v) {
             Ok(m) => (m, None),
             Err(e) => (Down::Unknown, Some(e.to_string())),
@@ -421,6 +429,15 @@ mod tests {
         let Down::Attached { gap, snapshot: Some(s), .. } = &f.msg else { panic!("{:?}", f.msg) };
         assert!(*gap && s.busy && s.organs.len() == 1);
         assert_eq!((s.turn_owner.as_deref(), s.sdk_session_id.as_deref(), s.mode.as_deref()), (Some("local:1"), Some("abc"), None));
+        // event body ids are not the envelope id
+        let tc = Frame::parse(r#"{"type":"ToolCall","session":"s1","seq":8,"organ":"rabble","id":"tu1","name":"Bash","input":{}}"#).unwrap();
+        assert_eq!(tc.id, None);
+        assert!(matches!(tc.msg, Down::ToolCall { ref id, .. } if id == "tu1"));
+        let pr = Frame::parse(r#"{"type":"PermissionResolved","session":"s1","seq":9,"id":"a1","decision":"deny","by":"x"}"#).unwrap();
+        assert_eq!(pr.id, None);
+        assert_eq!(pr.to_value()["id"], "a1");
+        let err = Frame::parse(r#"{"type":"Error","id":"r9","text":"no"}"#).unwrap();
+        assert_eq!(err.id.as_deref(), Some("r9"));
         let e = Frame::parse(r#"{"type":"TextDelta","session":"s1","seq":7,"organ":"rabble","text":"hi"}"#).unwrap();
         assert_eq!(e.seq, Some(7));
         assert_eq!(e.to_value()["seq"], 7);

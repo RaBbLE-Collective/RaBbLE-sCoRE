@@ -24,11 +24,14 @@ Sequencing: every event of a session gets `seq` (1, 2, ...) and lands in a bound
 (by count and bytes). `attach` replays the ring (all of it, or what follows `since_seq`); if the
 client's `since_seq` is older than the ring, `attached.gap` is true and a compact state
 (Capabilities, SessionStarted, EntropyChanged, merged Usage, open asks) goes before the tail.
-`attached.seq` is the last seq the replay reaches; `attached.snapshot` is the live state
+`attached.seq` is the head (the last seq the replay reaches) and arrives BEFORE the replay, so a
+client tracks its own resume point as max(seq) over the events it has received, never from
+`attached.seq`; after a `gap` replay it dedupes asks by id. `attached.snapshot` is the live state
 (busy, turn_owner, model, mode, trust, organs, sdk_session_id).
 
-Replies: an optional `id` on any command is echoed on its reply (or error). Events a command causes
-carry no id. `create_session{resume: "<sdk_session_id>"}` resumes a Claude session; the SDK id of
+Replies: an optional `id` on any command is echoed on its reply (hello, sessions, session_created,
+attached, detached) or error. Events never carry an envelope id: ToolCall, ToolResult, PermissionAsk
+and PermissionResolved have their own body field `id`, which is not the request id. `create_session{resume: "<sdk_session_id>"}` resumes a Claude session; the SDK id of
 every session is in `snapshot.sdk_session_id` and `sessions[].sdk_session`.
 
 Safety: settings (model, permission mode, trust) are owner-only; `create_session` goes through
@@ -45,6 +48,7 @@ refusing answers from the session CLI's own process tree (finding 12, deferred).
 
 import argparse
 import asyncio
+import contextlib
 import fcntl
 import json
 import os
@@ -90,10 +94,15 @@ class Principal:
 Policy = Callable[[Principal, str, dict[str, Any]], dict[str, Any] | None]
 
 
+def is_host(principal: Principal) -> bool:
+    """The OS user running this engine. Only the host is trusted with its own files and project config."""
+    return principal.kind == "local" and principal.id == f"local:{os.getuid()}"
+
+
 def local_policy(principal: Principal, command: str, params: dict[str, Any]) -> dict[str, Any] | None:
-    """The stub: local principals may do anything; every other kind is refused until a real
+    """The stub: the host user may do anything; every other principal is refused until a real
     policy (accounts, quotas, cwd confinement) is decided. Return params, or None to deny."""
-    return params if principal.kind == "local" else None
+    return params if is_host(principal) else None
 
 
 def _encode(obj: dict[str, Any]) -> str:
@@ -120,11 +129,11 @@ class Connection:
     def send(self, obj: dict[str, Any]) -> None:
         self.send_line(_encode(obj))
 
-    def send_line(self, line: str) -> None:
+    def send_line(self, line: str, force: bool = False) -> None:
         if self.dead:
             return
-        n = len(line) + 1
-        if self.queued + n > self.max_queue:
+        n = len(line.encode()) + 1
+        if not force and self.queued + n > self.max_queue:
             self._overflow()
             return
         self.queued += n
@@ -183,6 +192,7 @@ class Session:
     usage: ev.Usage | None = None
     asks: dict[str, ev.Event] = field(default_factory=dict)
     pump: asyncio.Task | None = None
+    closing: bool = False
     # sequencing + replay
     seq: int = 0
     ring: deque = field(default_factory=deque)                    # (seq, line, bytes)
@@ -235,20 +245,36 @@ class Session:
                 self.asks[e.id] = e
             case ev.PermissionResolved():
                 self.asks.pop(e.id, None)
-            case ev.OrganStarted():
-                self.organs[e.task_id or e.tool_use_id] = {"organ": e.organ, "task_id": e.task_id, "brief": e.brief}
+            case ev.OrganStarted():          # keyed by tool_use_id: the SDK learns the task id later
+                self.organs[e.tool_use_id] = {"organ": e.organ, "task_id": e.task_id, "brief": e.brief}
+            case ev.OrganProgress():
+                self._organ_key(e.organ, e.task_id, learn=True)
             case ev.OrganDone():
-                self.organs.pop(e.task_id, None)
+                if (k := self._organ_key(e.organ, e.task_id)) is not None:
+                    del self.organs[k]
             case ev.TurnDone():
                 if e.origin == "observer":
                     self.busy, self.turn_owner = False, None
+
+    def _organ_key(self, organ: str, task_id: str | None, learn: bool = False) -> str | None:
+        """The running organ an Organ* event is about: by task id, else the oldest of that name
+        still without one (OrganStarted carries no task id; OrganProgress teaches it)."""
+        for k, o in self.organs.items():
+            if task_id and o["task_id"] == task_id:
+                return k
+        for k, o in self.organs.items():
+            if o["organ"] == organ and (o["task_id"] is None or not task_id):
+                if learn and task_id:
+                    o["task_id"] = task_id
+                return k
+        return None
 
     def publish(self, e: ev.Event) -> None:
         """Observe, sequence, remember and fan out one event."""
         self.observe(e)
         self.seq += 1
         line = _encode({"session": self.id, "seq": self.seq, **e.to_dict()})
-        n = len(line) + 1
+        n = len(line.encode()) + 1
         self.ring.append((self.seq, line, n))
         self.ring_bytes += n
         while self.ring and (len(self.ring) > self.ring_events or self.ring_bytes > self.ring_cap):
@@ -287,7 +313,7 @@ class Session:
                     c.send({"session": self.id, **e.to_dict()})
         for seq, line, _n in self.ring:
             if seq > since or gap:
-                c.send_line(line)
+                c.send_line(line, force=True)       # bounded by the ring; the cap is for live fan-out
 
 
 BackendFactory = Callable[[dict[str, Any]], Awaitable[Any]]
@@ -300,7 +326,7 @@ class SessionManager:
 
     async def create(self, owner: Principal, params: dict[str, Any]) -> Session:
         """Start the backend first; only a session that started is registered (no zombies)."""
-        backend = await self.factory({**params, "principal_kind": owner.kind})
+        backend = await self.factory({**params, "principal_host": is_host(owner)})
         try:
             await backend.start()
         except BaseException:
@@ -322,6 +348,10 @@ class SessionManager:
         except Exception as e:                                  # a broken backend ends the session, not the engine
             sys.stderr.write(f"orchestra.serve: session {s.id} backend failed: {e!r}\n")
         finally:
+            if not s.closing:                                   # the backend ended on its own: do not leak its children
+                s.closing = True
+                with contextlib.suppress(Exception):
+                    await s.backend.close()
             for c in list(s.clients):
                 c.send({"session": s.id, "type": "session_closed"})
                 c.sessions.discard(s.id)
@@ -329,6 +359,7 @@ class SessionManager:
             self.sessions.pop(s.id, None)
 
     async def close(self, s: Session) -> None:
+        s.closing = True
         try:
             await s.backend.close()
         finally:
@@ -514,7 +545,11 @@ class Server:
             text = str(msg["text"])
             s.busy, s.turn_owner = True, conn.principal.id
             s.publish(ev.UserSaid(conn.principal.id, text, conn.client))
-            await b.send(text)
+            try:
+                await b.send(text)
+            except BaseException:
+                s.busy, s.turn_owner = False, None
+                raise
         elif kind == "interrupt":
             open_asks = list(s.asks)
             await b.interrupt()
@@ -581,11 +616,14 @@ class UnixListener:
 
     def _check_dir(self) -> None:
         d = self.path.parent
+        fresh = not d.exists()
         d.mkdir(parents=True, exist_ok=True, mode=0o700)
         st = d.stat()
         if st.st_uid == os.getuid():
-            if st.st_mode & 0o077:
-                d.chmod(0o700)                                   # ours: make it private
+            if fresh or d == default_socket().parent:
+                d.chmod(0o700)                                   # ours to make private: we made it, or it is the default home
+            elif st.st_mode & 0o077:
+                raise RuntimeError(f"{d} is not private (mode {stat.S_IMODE(st.st_mode):o}); chmod 700 it or choose another --socket directory")
         elif not (st.st_mode & stat.S_ISVTX):
             raise RuntimeError(f"{d} is not owned by this user; refusing to put the engine socket there")
 
@@ -607,7 +645,17 @@ class UnixListener:
         self._check_dir()
         self._lock()
         try:
-            self.path.unlink(missing_ok=True)                    # we hold the lock, so whatever is here is dead
+            if self.path.exists():                               # we hold the lock; still, an engine from before the lock may answer
+                probe = socket.socket(socket.AF_UNIX)
+                probe.settimeout(0.5)
+                try:
+                    probe.connect(str(self.path))
+                except OSError:
+                    self.path.unlink(missing_ok=True)            # nobody home: stale
+                else:
+                    raise RuntimeError(f"an engine is already listening on {self.path}")
+                finally:
+                    probe.close()
 
             async def accept(reader, writer):
                 sock = writer.get_extra_info("socket")
@@ -677,8 +725,8 @@ def claude_factory() -> BackendFactory:
         return ClaudeCodeBackend(cwd, append=lead, agents=agents, model=p.get("model"), permission_mode=p.get("mode"),
                                  resume=p.get("resume"), continue_conversation=p.get("continue") is True,
                                  trust_override=p.get("trust"),
-                                 # a project engine.json can name env and MCP commands: only a local principal's cwd is trusted with it
-                                 engine=EngineConfig.load(cwd if p.get("principal_kind") == "local" else None))
+                                 # a project engine.json can name env and MCP commands: only the host user's cwd is trusted with it
+                                 engine=EngineConfig.load(cwd if p.get("principal_host") else None))
     return make
 
 
