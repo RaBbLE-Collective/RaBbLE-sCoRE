@@ -62,3 +62,13 @@ def test_unknown_keys_dropped_unknown_type_refused():
 def test_events_are_frozen():
     with pytest.raises(AttributeError):
         ev.Error("x").text = "y"
+
+
+def test_all_events_fixture_matches_samples():
+    """tests/fixtures/orchestra/all-events.jsonl holds one line per event kind and is what the Rust
+    contract test (tui/rabble-proto) parses. Regenerate it when events.py changes:
+      python -c "import sys; sys.path[:0]=['.','tests']; from test_orchestra_events import SAMPLES; \
+open('tests/fixtures/orchestra/all-events.jsonl','w').write(''.join(e.to_json()+chr(10) for e in SAMPLES))" """
+    path = os.path.join(os.path.dirname(__file__), "fixtures", "orchestra", "all-events.jsonl")
+    assert [ev.from_json(line) for line in open(path, encoding="utf-8")] == SAMPLES
+    assert {type(e).kind for e in SAMPLES} == set(ev._KINDS)

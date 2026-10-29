@@ -13,5 +13,7 @@ name = "rabble-tui"
 path = "src/main.rs"
 
 [dependencies]
+rabble-proto = { path = "../rabble-proto" }
+serde_json.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true

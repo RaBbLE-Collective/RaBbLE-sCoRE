@@ -60,7 +60,72 @@ fn handle(ev: Event, glide: &mut Glide, max: f64) -> bool {
     false
 }
 
+const USAGE: &str = "rabble-tui                                   scroll spike (1:1 wheel feel), q quits
+rabble-tui replay FILE                       print a recorded turn file as plain text
+rabble-tui connect [--socket PATH] [--attach ID | --new [--cwd DIR]] [--say TEXT]
+                                             talk to a running `python -m orchestra.serve`";
+
+/// `replay` and `connect`: the engine seam as plain text. Returns None to fall through to the spike.
+fn seam(args: &[String]) -> Option<io::Result<()>> {
+    use rabble_proto::{Frame, Up};
+    use rabble_tui::{client::{self, Client}, plain::Printer};
+    let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+    match args.first().map(String::as_str) {
+        Some("replay") => Some((|| {
+            let file = args.get(1).ok_or_else(|| io::Error::other(USAGE))?;
+            let mut p = Printer::default();
+            for line in std::fs::read_to_string(file)?.lines().filter(|l| !l.trim().is_empty()) {
+                let f = Frame::parse(line).map_err(|e| io::Error::other(format!("{file}: {e}")))?;
+                print!("{}", p.render(&f));
+            }
+            Ok(())
+        })()),
+        Some("connect") => Some((|| {
+            let path = flag("--socket").map(Into::into).unwrap_or_else(client::default_socket);
+            let mut c = Client::connect(&path, "rabble-tui")?;
+            let mut p = Printer::default();
+            let mut session = flag("--attach");
+            if session.is_none() && args.iter().any(|a| a == "--new") {
+                c.send(&Up::CreateSession { cwd: flag("--cwd"), resume: None, continue_last: None, model: flag("--model"), mode: None, crew: None, trust: None, provider: None })?;
+            } else if let Some(s) = &session {
+                c.send(&Up::Attach { session: s.clone() })?;
+            } else {
+                c.send(&Up::ListSessions {})?;
+            }
+            let say = flag("--say");
+            let mut said = false;
+            while let Some(f) = c.next()? {
+                print!("{}", p.render(&f));
+                io::stdout().flush()?;
+                if let (Some(sid), rabble_proto::Down::SessionCreated {} | rabble_proto::Down::Attached { .. }) = (&f.session, &f.msg) {
+                    session = Some(sid.clone());
+                }
+                if let (Some(text), Some(sid), false, rabble_proto::Down::SessionStarted { .. } | rabble_proto::Down::SessionResumed { .. } | rabble_proto::Down::Attached { .. }) = (&say, &session, said, &f.msg) {
+                    said = true;
+                    c.send(&Up::Send { session: sid.clone(), text: text.clone() })?;
+                }
+                if let (rabble_proto::Down::PermissionAsk { id, .. }, Some(sid)) = (&f.msg, &session) {
+                    c.deny(sid, id)?;
+                }
+                if (say.is_some() && said && client::turn_over(&f)) || (say.is_none() && session.is_none() && matches!(f.msg, rabble_proto::Down::Sessions { .. })) {
+                    break;
+                }
+            }
+            Ok(())
+        })()),
+        Some("-h" | "--help") => {
+            println!("{USAGE}");
+            Some(Ok(()))
+        }
+        _ => None,
+    }
+}
+
 fn main() -> io::Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(r) = seam(&args) {
+        return r;
+    }
     let log = std::env::args().skip_while(|a| a != "--log").nth(1);
     let t = Transcript::synthetic(10_000);
 
