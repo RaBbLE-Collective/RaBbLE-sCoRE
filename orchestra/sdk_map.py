@@ -58,6 +58,7 @@ def _brief(tool_input: dict[str, Any]) -> str:
 
 _PATHISH = re.compile(r"(?:[\w.-]+/[\w./-]+|\b[\w-]+\.(?:md|py|js|ts|c|h|yml|yaml|json|toml|sh|html|css)\b)")
 THIN_BRIEF_CHARS = 300
+THINK_FLUSH_CHARS = 200   # summarized thinking arrives per reasoning chunk: batch it so the event ring is not flooded
 
 
 def _has_context(tool_input: dict[str, Any]) -> bool:
@@ -83,6 +84,7 @@ class SdkMapper:
         self.done: set[str] = set()               # Agent tool_use ids already ended
         self.last_text: dict[str, str] = {}       # Agent tool_use id → organ's latest text
         self.lead_thinking = False
+        self._think: list[str] = []
         self.lead_model: str | None = None
 
     def organ_for(self, parent_tool_use_id: str | None) -> str:
@@ -104,7 +106,21 @@ class SdkMapper:
         result = result or self.last_text.get(tool, "")
         return [ev.OrganDone(organ, task_id or self.task_by_tool.get(tool, ""), status, result)]
 
+    def _flush_thinking(self) -> list[ev.Event]:
+        if not self._think:
+            return []
+        text, self._think = "".join(self._think), []
+        return [ev.ThinkingText(ev.LEAD, text)]
+
     def map(self, msg: Any) -> list[ev.Event]:
+        out = self._map(msg)
+        # pending lead thinking goes out before anything that is not more thinking
+        if self._think and not (isinstance(msg, StreamEvent) and msg.parent_tool_use_id is None
+                                and (msg.event.get("delta") or {}).get("type") == "thinking_delta"):
+            return self._flush_thinking() + out
+        return out
+
+    def _map(self, msg: Any) -> list[ev.Event]:
         # Task* are SystemMessage subclasses: match them first
         if isinstance(msg, TaskStartedMessage):
             if msg.tool_use_id:
@@ -173,7 +189,9 @@ class SdkMapper:
             if delta.get("type") == "text_delta" and delta.get("text"):
                 return [ev.TextDelta(ev.LEAD, delta["text"])]
             if delta.get("type") == "thinking_delta" and delta.get("thinking"):
-                return [ev.ThinkingText(ev.LEAD, delta["thinking"])]   # only with thinking_display "summarized"
+                self._think.append(delta["thinking"])   # only with thinking_display "summarized"
+                if sum(map(len, self._think)) >= THINK_FLUSH_CHARS:
+                    return self._flush_thinking()
         return []
 
     def _assistant(self, msg: AssistantMessage) -> list[ev.Event]:

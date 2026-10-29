@@ -15,7 +15,7 @@ def test_file_tools_show_the_last_two_path_parts():
 
 
 def test_bash_is_described_by_kind_not_echoed():
-    assert narrate.tool("Bash", {"command": "cd x && pytest -q tests"}) == "Running the tests"
+    assert narrate.tool("Bash", {"command": "pytest -q tests"}) == "Running the tests"
     assert narrate.tool("Bash", {"command": "cargo test --release"}) == "Running the tests"
     assert narrate.tool("Bash", {"command": "git status"}) == "Running a git command"
     assert narrate.tool("Bash", {"command": "frobnicate --now"}) == "Running a shell command"
@@ -51,3 +51,38 @@ def test_secrets_and_huge_args_never_leak():
 
 def test_permission_wait():
     assert narrate.permission("Bash") == "Waiting for your answer on a permission"
+
+
+def test_chained_commands_are_judged_by_their_first_word_only():
+    assert narrate.tool("Bash", {"command": "echo pytest; rm -rf ~"}) == "Running a shell command"
+    assert narrate.tool("Bash", {"command": "cd x && pytest -q"}) == "Running a shell command"
+    assert narrate.tool("Bash", {"command": "git log | head"}) == "Running a git command"
+
+
+def test_more_secret_shapes_are_masked_everywhere():
+    secrets = ["gsk_abcdefghijklmnop1234", "glpat-abcdefghij1234567890", "hf_abcdefghijklmnop12", "AIzaSyA1234567890abcdefghij",
+               "sk_live_abcdefghijkl1234", "sk_test_abcdefghijkl1234", "npm_abcdefghijklmnop1234",
+               "0123456789abcdef0123456789abcdef01234567", "Zk3Jq9Xv2Lm8Np4Rt6Yw1Bc5Dg7Hs0Fa9E2"]
+    for sec in secrets:
+        for out in (narrate.tool("Read", {"file_path": f"/home/x/{sec}/a.py"}), narrate.tool("Grep", {"pattern": sec}),
+                    narrate.tool("Glob", {"pattern": f"**/{sec}*"}), narrate.tool("WebSearch", {"query": f"find {sec}"}),
+                    narrate.tool("Skill", {"skill": sec}), narrate.tool("Agent", {"subagent_type": "g", "description": f"use {sec}"})):
+            assert sec not in out and sec[:12] not in out, (sec, out)
+
+
+def test_ordinary_words_and_names_survive():
+    assert narrate.tool("Read", {"file_path": "/x/token_refresh.py"}) == "Reading `x/token_refresh.py`"
+    assert narrate.tool("Grep", {"pattern": "token"}) == "Searching the code for `token`"
+    assert narrate.tool("Agent", {"subagent_type": "g", "description": "API docs review"}) == "Asking the g organ to API docs review"
+    assert narrate.tool("Read", {"file_path": "/x/a-very-long-readable-name-with-only-letters-in-it.md"}).count("[hidden]") == 0
+
+
+def test_control_and_bidi_characters_are_stripped():
+    out = narrate.tool("Grep", {"pattern": "a\x1b[31m\u202eb\x85c"})
+    assert not any(ord(c) < 32 or 0x7f <= ord(c) <= 0x9f or c == "\u202e" for c in out)
+
+
+def test_tool_never_raises_and_mcp_edges():
+    assert narrate.tool(None, {}) == "Using a tool"
+    assert narrate.tool("mcp__a__", {}) == "Using a"
+    assert narrate.tool("Read", {"file_path": object()}).startswith("Reading")

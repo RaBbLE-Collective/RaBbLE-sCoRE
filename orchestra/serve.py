@@ -68,7 +68,7 @@ from . import events as ev
 
 PROTOCOL = 1
 MIN_PROTOCOL = 1
-FEATURES = ["seq", "attach_since", "request_id", "snapshot", "user_said_client", "owner_settings", "policy", "revoke"]
+FEATURES = ["seq", "attach_since", "request_id", "snapshot", "user_said_client", "owner_settings", "policy", "revoke", "narration", "thinking_text"]
 UP_LINE_LIMIT = 1024 * 1024            # a command is small
 LINE_LIMIT = 64 * 1024 * 1024          # what a client must accept down: one tool result can be a base64 screenshot
 MAX_QUEUE_BYTES = 32 * 1024 * 1024     # per client; past it the client is disconnected (finding 6)
