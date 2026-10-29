@@ -13,6 +13,7 @@ from orchestra import events as ev  # noqa: E402
 
 SAMPLES = [
     ev.SessionStarted("s1", "opus", "/home/x"),
+    ev.Capabilities(["compact", "endsession"], ["endsession"], [{"name": "notes", "status": "connected"}], ["p"], ["mcp x: failed"]),
     ev.SessionResumed("s1"),
     ev.TextDelta(ev.LEAD, "hel"),
     ev.TextBlock("gobble", "found it"),

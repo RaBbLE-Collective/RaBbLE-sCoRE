@@ -116,6 +116,7 @@ class RabbleApp(App):
         self.header = Header(self.face, self.palette, model=self.model_name or "", cwd=self.cwd, mode=self.mode)
         self._sync_header()
         self.transcript = Transcript(self.organ_color)
+        self.caps: ev.Capabilities | None = None
         self.prompt = Prompt(self.cwd, sorted(COMMANDS))
         yield self.header
         yield Divider()
@@ -183,6 +184,11 @@ class RabbleApp(App):
     async def _handle(self, e: ev.Event) -> None:
         t, h = self.transcript, self.header
         match e:
+            case ev.Capabilities():
+                self.caps = e
+                self.prompt.composer.commands = sorted(COMMANDS | {"/" + c.lstrip("/") for c in e.slash_commands})
+                for problem in e.problems:
+                    await t.notice(problem, error=True)
             case ev.SessionStarted():
                 self.session_id = e.session_id
                 h.model = e.model or h.model
@@ -550,7 +556,15 @@ class RabbleApp(App):
                                 for n, w in (("5h", u.five_hour), ("week", u.week)) if w)
             + (" [stale]" if u.stale else "") + " · ")
         return (f"model {self.header.model} · {ent}{use}{self._bloat.summary()} · crew {'on' if self.settings.crew else 'off'} · "
-                f"trust {self.trust_profile()}{' (set)' if self.settings.trust else ' (from entropy)'} · mode {self.mode}")
+                f"trust {self.trust_profile()}{' (set)' if self.settings.trust else ' (from entropy)'} · mode {self.mode}"
+                f"{' · ' + self.settings.engine.summary() if self.settings.engine else ''}{self._caps_line()}")
+
+    def _caps_line(self) -> str:
+        c = self.caps
+        if c is None:
+            return ""
+        up = sum(1 for m in c.mcp if m["status"] == "connected")
+        return f" · {len(c.slash_commands)} commands · {len(c.skills)} skills" + (f" · mcp {up}/{len(c.mcp)}" if c.mcp else "")
 
     async def _set_model(self, value: str | None) -> None:
         if not await self._engine("model", self.backend.set_model, value):

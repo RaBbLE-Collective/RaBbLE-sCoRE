@@ -68,6 +68,18 @@ class SessionStarted(Event):
 
 
 @dataclass(frozen=True, slots=True)
+class Capabilities(Event):
+    """What Claude Code loaded for this session, from its init message: the /commands and
+    skills it will run, MCP servers with their status, plugins, and whatever failed to load.
+    Sent just before SessionStarted/SessionResumed."""
+    slash_commands: list[str]
+    skills: list[str]
+    mcp: list[dict[str, str]]       # {"name", "status"}
+    plugins: list[str]
+    problems: list[str]             # human-readable load failures (plugin errors, MCP not connected)
+
+
+@dataclass(frozen=True, slots=True)
 class SessionResumed(Event):
     session_id: str
 

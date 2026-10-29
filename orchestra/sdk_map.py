@@ -143,9 +143,21 @@ class SdkMapper:
             return []
         data = msg.data
         self.session_id = data.get("session_id", "")
+        caps = self._capabilities(data)
         if self.resumed:
-            return [ev.SessionResumed(self.session_id)]
-        return [ev.SessionStarted(self.session_id, data.get("model", ""), data.get("cwd", ""))]
+            return [caps, ev.SessionResumed(self.session_id)]
+        return [caps, ev.SessionStarted(self.session_id, data.get("model", ""), data.get("cwd", ""))]
+
+    @staticmethod
+    def _capabilities(data: dict) -> ev.Capabilities:
+        mcp = [{"name": str(m.get("name", "")), "status": str(m.get("status", ""))} for m in data.get("mcp_servers") or []]
+        problems = [f"mcp {m['name']}: {m['status']}" for m in mcp if m["status"] not in ("connected", "pending", "")]
+        problems += [f"plugin {e.get('plugin', '?')}: {e.get('message') or e.get('type', 'failed to load')}"
+                     for e in data.get("plugin_errors") or []]
+        return ev.Capabilities(
+            slash_commands=[str(c) for c in data.get("slash_commands") or []],
+            skills=[str(c) for c in data.get("skills") or []],
+            mcp=mcp, plugins=[str(p.get("name", "")) for p in data.get("plugins") or []], problems=problems)
 
     def _stream(self, msg: StreamEvent) -> list[ev.Event]:
         if msg.parent_tool_use_id is not None:

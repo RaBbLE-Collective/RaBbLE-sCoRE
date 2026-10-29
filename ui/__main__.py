@@ -27,6 +27,11 @@ def main(argv=None) -> int:
 
     cwd = os.path.abspath(os.path.expanduser(a.cwd))
     settings = Settings.load()
+    from orchestra.config import EngineConfig
+    engine = EngineConfig.load(cwd)
+    settings.engine = engine
+    for problem in engine.problems:
+        sys.stderr.write(f"rabble-ui: engine config: {problem}\n")
     # flags win for this launch and are saved only when the Observer changes a setting in the UI
     if a.model:
         settings.model = a.model
@@ -56,7 +61,7 @@ def main(argv=None) -> int:
                 agents = build_agents(personas) if settings.crew else None
             return ClaudeCodeBackend(cwd, append=lead, agents=agents, model=settings.model,
                                      permission_mode=settings.mode, resume=resume, continue_conversation=cont,
-                                     trust_override=settings.trust, entropy=settings.carry)
+                                     trust_override=settings.trust, entropy=settings.carry, engine=engine)
 
     RabbleApp(factory, cwd=cwd, resume=a.resume, continue_=a.cont, settings=settings).run()
     return 0

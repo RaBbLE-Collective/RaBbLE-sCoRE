@@ -38,6 +38,7 @@ class Settings:
     # not saved: the running session's Entropy, handed to the next backend when the engine
     # restarts on the same session (/crew), so a restart can't reset the score
     carry: object | None = None
+    engine: object | None = None  # not saved: orchestra.config.EngineConfig, shown by /status
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Settings":

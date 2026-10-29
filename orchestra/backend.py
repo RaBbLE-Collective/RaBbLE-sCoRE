@@ -69,8 +69,10 @@ class ClaudeCodeBackend(_Queued):
     def __init__(self, cwd: str | Path, *, append: str | None = None, agents: dict[str, Any] | None = None,
                  model: str | None = None, permission_mode: str | None = None,
                  resume: str | None = None, continue_conversation: bool = False,
-                 trust_override: str | None = None, entropy: Entropy | None = None):
+                 trust_override: str | None = None, entropy: Entropy | None = None,
+                 engine: Any = None):
         super().__init__()
+        self.engine = engine  # orchestra.config.EngineConfig: the Claude Code passthroughs
         self.cwd = str(cwd)
         self.append = append
         self.agents = agents
@@ -148,7 +150,7 @@ class ClaudeCodeBackend(_Queued):
         return self._organ_by_agent.get(agent_id, "agent") if agent_id else ev.LEAD
 
     def options(self):
-        from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
+        from claude_agent_sdk import AgentDefinition, ClaudeAgentOptions, HookMatcher
 
         from .permissions import Permissions
         self.permissions = Permissions(self.emit, self.organ_of_agent, self._auto_allow)
@@ -166,9 +168,12 @@ class ClaudeCodeBackend(_Queued):
             permission_mode=self.permission_mode,
             resume=self.resume,
             continue_conversation=self.continue_conversation,
-            agents=self.agents,
+            # the SDK runs asdict() on each entry, so it needs AgentDefinitions, not the CLI's --agents dicts
+            agents={k: AgentDefinition(**v) if isinstance(v, dict) else v for k, v in self.agents.items()}
+            if self.agents else None,
             max_buffer_size=MAX_BUFFER,
             can_use_tool=self.permissions.can_use_tool,
+            **(self.engine.sdk_kwargs() if self.engine else {}),
             hooks={"SubagentStart": [HookMatcher(hooks=[self._on_subagent_start])]},
         )
 

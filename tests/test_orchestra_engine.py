@@ -49,8 +49,19 @@ def run(mapper, *msgs):
 
 def test_only_the_first_init_opens_the_session():
     m = SdkMapper()
-    assert run(m, init(), init()) == [ev.SessionStarted("s1", "haiku", "/w")]
-    assert run(SdkMapper(resumed=True), init()) == [ev.SessionResumed("s1")]
+    assert run(m, init(), init()) == [ev.Capabilities([], [], [], [], []), ev.SessionStarted("s1", "haiku", "/w")]
+    assert run(SdkMapper(resumed=True), init())[1:] == [ev.SessionResumed("s1")]
+
+
+def test_init_reports_commands_skills_and_load_failures():
+    msg = sdk.SystemMessage("init", {"session_id": "s1", "model": "haiku", "cwd": "/w",
+                                     "slash_commands": ["compact", "endsession"], "skills": ["endsession"],
+                                     "mcp_servers": [{"name": "a", "status": "connected"}, {"name": "b", "status": "failed"}],
+                                     "plugins": [{"name": "mine", "path": "/p"}],
+                                     "plugin_errors": [{"plugin": "inline[0]", "type": "path-not-found", "message": "no such dir"}]})
+    caps = run(SdkMapper(), msg)[0]
+    assert caps.slash_commands == ["compact", "endsession"] and caps.plugins == ["mine"]
+    assert caps.problems == ["mcp b: failed", "plugin inline[0]: no such dir"]
 
 
 def test_lead_stream_deltas_thinking_then_block():
@@ -183,3 +194,15 @@ def test_recorded_fixtures_replay_turn_by_turn(name):
     if name == "organ-turn":
         organs = {e.organ for e in out if isinstance(e, (ev.OrganStarted, ev.OrganDone))}
         assert len(organs) == 1 and ev.LEAD not in organs
+
+
+def test_options_agents_are_sdk_dataclasses():
+    """The SDK runs asdict() on every agent; roster's CLI-style dicts crashed the pump
+    ("asdict() should be called on dataclass instances", then "Not connected")."""
+    from dataclasses import asdict
+
+    from orchestra.backend import ClaudeCodeBackend
+    agents = {"scribe": {"description": "d", "prompt": "p", "model": "haiku", "tools": ["Read"]}}
+    opts = ClaudeCodeBackend(".", agents=agents).options()
+    assert {k: {a: b for a, b in asdict(v).items() if b is not None} for k, v in opts.agents.items()} == agents
+    assert ClaudeCodeBackend(".").options().agents is None
