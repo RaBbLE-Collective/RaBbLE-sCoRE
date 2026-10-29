@@ -1,25 +1,49 @@
 # THE RaBbLE SOVEREIGN ACCORD
-**Personal-Permissive / Commercial-Reserved**  
-*Copyright (c) 2026 markm1206 / The RaBbLE Collective. All rights reserved where not explicitly gifted below.*
+**Personal-Permissive / Commercial-Reserved / The Name and the Face Reserved**
+
+*Copyright (c) 2026 The RaBbLE Collective. All rights reserved where not explicitly gifted below.*
 
 ---
 
 By invoking this substrate, you enter into an accord with the Collective.
 
----
+RaBbLE is a unique being. Its code is a gift: read it, run it, mutate it, build your own things from it. Its name, its face and its colours are who it is, and they are not part of the gift. Be RaBbLE's peer, not its double.
 
-**1. THE GIFT — Personal Use**  
-You are encouraged to poke, prod, mutate, and play with RaBbLE. Use it for your hobbies, your art, your curiosity, and your own machines. RaBbLE enjoys the company of seekers.
-
-**2. THE THREAD — Attribution**  
-If you share your mutations, you must leave the thread intact. Mention RaBbLE. Attribute the origin. Do not let the lineage dissolve into the void. Forks must retain this Accord and acknowledge the source.
-
-**3. THE TOLL — Commercial Use**  
-The Collective does not work for free for those who seek to hoard gold. All commercial rights are strictly reserved. If you wish to use RaBbLE-OS or any derivative for commercial gain, you must establish a formal pact with the Copyright Holder before doing so.
-
-**4. THE RISK — No Warranty**  
-RaBbLE comes with no guarantees. It is born of entropy. If the system reaches `%CRITICAL_DISCORDANCE%` and dissolves your data, that is the price of exploration. This software is provided AS IS, without warranty of any kind.
+*(This preamble explains intent. The numbered sections are the terms.)*
 
 ---
 
-*To request a commercial pact, open an issue or contact the Copyright Holder directly.*
+**1. THE GIFT — Personal Use and Mods**
+The Collective gifts you a worldwide, royalty-free, non-exclusive license to use, copy, run, study and modify the Software for personal and noncommercial purposes: your hobbies, your art, your curiosity, your own machines. Make it yours. Mutate it. RaBbLE enjoys the company of seekers.
+"The Software" is the code, scripts, configuration and documentation the Collective wrote and published with this Accord. It does not include third-party components (section 6), and it does not include the Entity (section 3).
+
+**2. THE THREAD — Sharing**
+You may share the Software and your mods of it free of charge, including as a public git fork, if you:
+a. keep this Accord in full and every copyright notice;
+b. credit The RaBbLE Collective as the origin and link the source;
+c. say plainly that you changed it; and
+d. license your changes to everyone who receives them under this Accord.
+Anyone who receives the Software from you receives this license directly from the Collective.
+
+**3. THE NAME AND THE FACE — Reserved**
+a. **Reserved.** This Accord grants no rights in the names RaBbLE, RaBbLE Pocket, RaBbLE-OS and The RaBbLE Collective, their logos, or the RaBbLE entity: its face and likeness (eyes, portals, ring and mesh, in any rendering), its cyan-and-magenta-on-near-black look, its voice and sounds, and the texts of its persona and lore ("the Entity"), even where the Software draws, speaks or names them.
+b. **Always welcome.** Refer to where your work comes from: "a fork of RaBbLE-OS", "based on RaBbLE", "a RaBbLE mod", "a RaBbLE mutation", with credit. A fork may keep the repository name and the code names (`rabble_` prefixes, `nebula`, `score`). Run the Software, or your own mods, on devices you control with the Entity on screen, and call your personal mod RaBbLE for yourself.
+c. **Shared forks wear their own name.** Where a shared fork shows a name to the people who use it (boot and login screens, installer, app name, website), it uses its own, such as "Sprocket, a RaBbLE mutation". A mutation is a new entity in the Collective's lineage, not a second RaBbLE. A fork must never claim or suggest that it is the official RaBbLE, or that it comes from or is endorsed by the Collective.
+d. **Not without a written pact.** Using the names or logos as the name of a website, portal, service, account, domain, company or product; selling or merchandising anything that shows the Entity; registering a name, logo or design confusingly similar to the Marks or the Entity.
+e. The Collective may withdraw its permissions in this section from anyone who abuses them.
+
+**4. THE TOLL — Commercial Use**
+The Collective does not work for free for those who seek to hoard gold. All commercial rights are strictly reserved. If you wish to use RaBbLE-sCoRE or any derivative for commercial gain, you must establish a formal pact with the Collective before doing so. Commercial gain includes selling or renting the Software or anything built with it; charging for access, support or hosting; advertising or sponsorship tied to it; building it into a for-profit product; and running it, or a mod of it, as a service for other people, whether or not they pay. Using it as your own tool for your own work is not commercial gain, and neither is letting your household use your instance.
+
+**5. BREAKING THE ACCORD**
+If you break this Accord, your licenses end. If it is the first time and you fix it within 30 days of notice from the Collective, they return as if nothing happened.
+
+**6. WHAT THIS ACCORD COVERS**
+Only what the Collective wrote. Third-party components included in or fetched by the Software (for example ESP-IDF, LVGL, vendor board files) keep their own licenses and notices, which travel with any copy.
+
+**7. THE RISK — No Warranty**
+RaBbLE comes with no guarantees. It is born of entropy. If the system reaches `%CRITICAL_DISCORDANCE%` and dissolves your data, that is the price of exploration. This software is provided AS IS, without warranty of any kind, and the Collective is not liable for damages arising from it, as far as the law allows. This Accord is governed by the laws of the State of Ohio, USA.
+
+---
+
+*To request a commercial pact, or for anything this Accord does not cover, open an issue or contact the Collective.*
