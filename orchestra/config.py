@@ -14,6 +14,7 @@ A bad entry is dropped and named in `problems`; a bad file never stops a session
     "allowed_tools": ["Read", "Grep"], "disallowed_tools": ["WebFetch"],
     "add_dirs": ["~/RaBbLE-Collective"],
     "thinking": "adaptive" | "disabled" | 8000,      # int = token budget
+    "thinking_display": "summarized" | "omitted",   # summarized = the model's thinking comes back as text (default omitted)
     "effort": "low|medium|high|xhigh|max",
     "max_budget_usd": 5.0, "max_turns": 40, "fallback_model": "sonnet",
     "env": {"KEY": "value"}
@@ -28,7 +29,7 @@ from typing import Any
 
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 _LISTS = ("allowed_tools", "disallowed_tools", "add_dirs", "plugins")
-_KEYS = _LISTS + ("mcp_servers", "thinking", "effort", "max_budget_usd", "max_turns", "fallback_model", "env")
+_KEYS = _LISTS + ("mcp_servers", "thinking", "thinking_display", "effort", "max_budget_usd", "max_turns", "fallback_model", "env")
 
 
 def default_path() -> Path:
@@ -48,6 +49,7 @@ class EngineConfig:
     disallowed_tools: list[str] = field(default_factory=list)
     add_dirs: list[str] = field(default_factory=list)
     thinking: str | int | None = None
+    thinking_display: str | None = None
     effort: str | None = None
     max_budget_usd: float | None = None
     max_turns: int | None = None
@@ -108,6 +110,11 @@ class EngineConfig:
                 self.thinking = t
             else:
                 bad("thinking", "adaptive, disabled, or a token budget")
+        if "thinking_display" in d:
+            if d["thinking_display"] in ("summarized", "omitted"):
+                self.thinking_display = d["thinking_display"]
+            else:
+                bad("thinking_display", "summarized or omitted")
         if "effort" in d:
             if d["effort"] in EFFORTS:
                 self.effort = d["effort"]
@@ -150,14 +157,17 @@ class EngineConfig:
                 kw[k] = list(getattr(self, k)) if isinstance(getattr(self, k), list) else getattr(self, k)
         if self.env:
             kw["env"] = dict(self.env)
-        if self.thinking is not None:
-            kw["thinking"] = ({"type": self.thinking} if isinstance(self.thinking, str)
-                              else {"type": "enabled", "budget_tokens": self.thinking})
+        if self.thinking is not None or self.thinking_display:
+            t = self.thinking if self.thinking is not None else "adaptive"   # display alone implies adaptive
+            cfg: dict[str, Any] = {"type": t} if isinstance(t, str) else {"type": "enabled", "budget_tokens": t}
+            if self.thinking_display and t != "disabled":
+                cfg["display"] = self.thinking_display
+            kw["thinking"] = cfg
         return kw
 
     def summary(self) -> str:
         bits = [f"mcp {len(self.mcp_servers)}" if self.mcp_servers else "", f"plugins {len(self.plugins)}" if self.plugins else "",
-                f"effort {self.effort}" if self.effort else "", f"thinking {self.thinking}" if self.thinking is not None else "",
+                f"effort {self.effort}" if self.effort else "", f"thinking {self.thinking if self.thinking is not None else 'adaptive'}{'+' + self.thinking_display if self.thinking_display else ''}" if (self.thinking is not None or self.thinking_display) else "",
                 f"budget ${self.max_budget_usd:g}" if self.max_budget_usd else "", f"turns {self.max_turns}" if self.max_turns else "",
                 f"deny {len(self.disallowed_tools)}" if self.disallowed_tools else "",
                 f"dirs +{len(self.add_dirs)}" if self.add_dirs else "",

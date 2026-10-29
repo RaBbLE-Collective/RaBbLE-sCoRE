@@ -59,3 +59,14 @@ def test_backend_options_carry_the_config(tmp_path):
     assert o.mcp_servers == {"a": {"command": "x"}} and o.max_budget_usd == 2.0
     assert o.fallback_model == "sonnet" and o.add_dirs == ["/tmp"]
     assert ClaudeCodeBackend(".").options().mcp_servers == {}
+
+
+def test_thinking_display_alone_implies_adaptive_and_never_rides_on_disabled(tmp_path):
+    cfg = EngineConfig.load(None, write(tmp_path / "a.json", {"thinking_display": "summarized"}))
+    assert cfg.sdk_kwargs()["thinking"] == {"type": "adaptive", "display": "summarized"}
+    assert "summarized" in cfg.summary()
+    cfg = EngineConfig.load(None, write(tmp_path / "b.json", {"thinking": 4000, "thinking_display": "summarized"}))
+    assert cfg.sdk_kwargs()["thinking"] == {"type": "enabled", "budget_tokens": 4000, "display": "summarized"}
+    cfg = EngineConfig.load(None, write(tmp_path / "c.json", {"thinking": "disabled", "thinking_display": "summarized"}))
+    assert cfg.sdk_kwargs()["thinking"] == {"type": "disabled"}
+    assert EngineConfig.load(None, write(tmp_path / "d.json", {"thinking_display": "loud"})).problems
