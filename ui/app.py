@@ -25,6 +25,7 @@ from orchestra import park, trust, usage  # noqa: E402
 from orchestra.entropy import Entropy  # noqa: E402
 from ui.prefs import MODELS, MODES as PREF_MODES, Settings, resolve_model  # noqa: E402
 from ui.widgets.composer import Composer, Prompt, copy_to_system  # noqa: E402
+from ui.widgets.divider import Divider  # noqa: E402
 from ui.widgets.header import Header  # noqa: E402
 from ui.widgets.transcript import Transcript  # noqa: E402
 
@@ -34,7 +35,7 @@ FLASH = 2.5
 # dependency order; ui.app last. app-level CSS/BINDINGS and the engine (orchestra/) need a real restart.
 RELOAD_MODULES = ("ui.theme", "ui.eyes", "ui.face", "ui.prefs", "ui.widgets.models", "ui.widgets.tool_card",
                   "ui.widgets.permission", "ui.widgets.sessions", "ui.widgets.transcript", "ui.widgets.header",
-                  "ui.widgets.composer", "ui.app")
+                  "ui.widgets.composer", "ui.widgets.divider", "ui.app")
 USAGE_EVERY = 30.0   # seconds between reads of the OS tracker's cache
 HELP = {
     "/model": "pick the model (or /model opus|sonnet|haiku|fable|default|<id>)",
@@ -116,6 +117,7 @@ class RabbleApp(App):
         self.transcript = Transcript(self.organ_color)
         self.prompt = Prompt(self.cwd, sorted(COMMANDS))
         yield self.header
+        yield Divider()
         yield self.transcript
         yield self.prompt
 

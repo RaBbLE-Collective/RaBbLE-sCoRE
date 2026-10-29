@@ -188,12 +188,15 @@ class Composer(TextArea):
 
 
 def system_clipboard() -> str:
-    """Text on the desktop clipboard (Wayland, then X11); "" when there is none or no tool."""
-    for cmd in (["wl-paste", "--no-newline"], ["xclip", "-selection", "clipboard", "-o"]):
+    """Text on the desktop clipboard (Wayland, then X11); "" when there is none, no tool, or the clipboard
+    holds something that is not text (an image, say: asking for the text type finds nothing then)."""
+    for cmd in (["wl-paste", "--no-newline", "--type", "text"],
+                ["xclip", "-selection", "clipboard", "-o", "-t", "UTF8_STRING"]):
         if shutil.which(cmd[0]):
             try:
-                return subprocess.run(cmd, capture_output=True, text=True, timeout=2).stdout
-            except (OSError, subprocess.SubprocessError):
+                out = subprocess.run(cmd, capture_output=True, timeout=2).stdout
+                return out.decode("utf-8")
+            except (OSError, subprocess.SubprocessError, ValueError):   # ValueError: bytes that are not UTF-8
                 return ""
     return ""
 

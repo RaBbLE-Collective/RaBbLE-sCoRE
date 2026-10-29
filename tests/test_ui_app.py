@@ -256,3 +256,18 @@ async def test_tool_card_title_survives_bracket_runs():
             app.card.set_result(True, bad)
             await pilot.pause(0.1)
         assert app.is_running
+
+
+def test_system_clipboard_ignores_non_text(monkeypatch):
+    """An image on the clipboard (PNG bytes) made Ctrl+V raise UnicodeDecodeError and crash the app."""
+    import subprocess
+    from ui.widgets import composer
+
+    class Done:
+        stdout = b"\x89PNG\r\n\x1a\n\x00\x00"
+
+    monkeypatch.setattr(composer.shutil, "which", lambda name: "/usr/bin/" + name)
+    monkeypatch.setattr(composer.subprocess, "run", lambda *a, **k: Done())
+    assert composer.system_clipboard() == ""
+    Done.stdout = "héllo".encode()
+    assert composer.system_clipboard() == "héllo"

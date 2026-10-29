@@ -71,7 +71,10 @@ def test_full_fills_and_denied_reverts(monkeypatch):
         app = Host("full")
         async with app.run_test(size=(80, 30)) as pilot:
             w = app.query_one(F.FaceWidget)
-            await pilot.pause(0.2)
+            for _ in range(30):   # the first frame is computed off the loop and arrives a little later
+                await pilot.pause(0.1)
+                if len(w._cells) == 30:
+                    break
             assert w.size == (80, 30) and len(w._cells) == 30
             w.set_mood("denied")
             assert w._to_expr == "angry"
@@ -114,3 +117,29 @@ def test_safe_glyphs_stay_in_block_elements():
         odd = {ch for row in cells for ch, _, _ in row
                if not (ch == " " or 0x2580 <= ord(ch) <= 0x259F or 0x2800 <= ord(ch) <= 0x28FF)}
         assert not odd, odd
+
+
+def test_divider_flows_cyan_to_magenta():
+    from ui.widgets.divider import Divider
+    d = Divider()
+    cols = [d.colour(x, 100, 0.0) for x in range(100)]
+    assert cols[0] == d._a                                        # starts on the cyan pole
+    assert max(cols, key=lambda c: c[0] - c[1]) != cols[0]        # and reaches towards magenta
+    assert d.colour(40, 100, 0.0) != d.colour(40, 100, 0.25)      # the phase moves the pattern
+
+
+@pytest.mark.parametrize("size", [(100, 30), (220, 60)])
+def test_compose_matches_frame(size):
+    """The widget's layered path (cached background + eye layer) draws what frame() draws."""
+    a, b = F.Face(*size, detail="full"), F.Face(*size, detail="full")
+    for t, gaze in ((0.0, (0, 0)), (1.3, (0.6, -0.4)), (2.2, (-0.8, 0.3))):
+        ref = a.frame(t, 0.0, gaze).cells()
+        got = b.compose(t, 0.0, gaze, base=b.background(t))
+        diff = sum(1 for r in range(len(ref)) for c in range(len(ref[0])) if ref[r][c] != got[r][c])
+        assert diff <= 0.01 * len(ref) * len(ref[0]), (t, diff)
+
+
+def test_canvas_cells_fast_path_matches_cell():
+    f = F.Face(80, 24, detail="full")
+    cv = f.frame(0.7, 0.2, (0.3, 0.1))
+    assert cv.cells() == [[cv._cell(r, c) for c in range(cv.cols)] for r in range(cv.rows)]

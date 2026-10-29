@@ -14,6 +14,7 @@ units to octant sub-pixels (2 for the half-block full face, 1 for the octant min
 import math
 
 TAU = math.pi * 2
+FLAT = 5.0   # sub-pixels from any eye or portal edge beyond which a 2x4 cell holds one colour (its half-diagonal is 2.2)
 
 
 def _over(base, top, a):
@@ -202,6 +203,10 @@ def paint(canvas, rig, P, octant, fine, n=2.0, lids=None, inner=None, rim_w=1.0,
     y1 = max(p.box[3] for p in parts) + 5
     c0, c1 = max(0, int(x0 // 2)), min(canvas.cols - 1, int(x1 // 2))
     r0, r1 = max(0, int(y0 // 4)), min(canvas.rows - 1, int(y1 // 4))
+    has_lids = bool(lids and any(lids.values()))
+    big = min(p.eye.rx for p in parts) > 8   # long smooth edges: two taps are enough
+    ss_small = ((.25, .25), (.75, .25), (.25, .75), (.75, .75))
+    ss_big = ((.25, .25), (.75, .75), (.25, .75), (.75, .25)) if False else ((.25, .5), (.75, .5))
     # which parts can touch a cell: their padded boxes
     out = {}
     for r in range(r0, r1 + 1):
@@ -218,6 +223,16 @@ def paint(canvas, rig, P, octant, fine, n=2.0, lids=None, inner=None, rim_w=1.0,
                     col = p.sample(x, y, col)
                 return col
 
+            if not has_lids and block == 1:
+                # a cell well inside an eye, or well clear of every edge and rim, is one flat colour: one
+                # sample instead of eight (most of a big eye is interior)
+                mx, my = c * 2 + 1.0, r * 4 + 2.0
+                if all(abs(p.eye.sd(mx, my)) > FLAT and abs(p.portal.sd(mx, my)) > FLAT for p in near):
+                    col = shade(mx, my)
+                    col = (round(col[0]), round(col[1]), round(col[2]))
+                    if col != base:
+                        out[(r, c)] = (" ", col, col)
+                    continue
             if block > 1:
                 snap = lambda v: (v // block) * block + block / 2   # noqa: E731
                 subs = [shade(snap(c * 2 + i % 2), snap(r * 4 + i // 2)) for i in range(8)]
@@ -225,9 +240,10 @@ def paint(canvas, rig, P, octant, fine, n=2.0, lids=None, inner=None, rim_w=1.0,
             else:
                 subs = [shade(c * 2 + i % 2 + 0.5, r * 4 + i // 2 + 0.5) for i in range(8)]
                 spread = max(max(s[k] for s in subs) - min(s[k] for s in subs) for k in range(3))
-            if supersample and spread > 40:  # an edge cell: supersample each sub-pixel 2x2
-                subs = [tuple(sum(shade(c * 2 + i % 2 + ox, r * 4 + i // 2 + oy)[k] for ox, oy in
-                                  ((.25, .25), (.75, .25), (.25, .75), (.75, .75))) / 4 for k in range(3))
+            if supersample and spread > 40:  # an edge cell: supersample each sub-pixel (2x2, or two diagonal taps on big eyes)
+                taps = ss_big if big else ss_small
+                subs = [tuple(sum(shade(c * 2 + i % 2 + ox, r * 4 + i // 2 + oy)[k] for ox, oy in taps) / len(taps)
+                              for k in range(3))
                         for i in range(8)]
             ch, fg, bg = _fit(subs, octant, safe)
             if ch == " " and fg == base:
