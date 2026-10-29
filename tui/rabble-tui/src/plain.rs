@@ -51,7 +51,7 @@ impl Printer {
                 }
             }
             Down::SessionCreated {} => line(self, format!("created session {}", f.session.as_deref().unwrap_or("?"))),
-            Down::Attached { role } => line(self, format!("attached to {} as {role}", f.session.as_deref().unwrap_or("?"))),
+            Down::Attached { role, .. } => line(self, format!("attached to {} as {role}", f.session.as_deref().unwrap_or("?"))),
             Down::Detached {} => line(self, "detached".into()),
             Down::SessionClosed {} => line(self, "session closed".into()),
             Down::SessionStarted { model, cwd, .. } => line(self, format!("session started: {model} in {cwd}")),
@@ -62,7 +62,7 @@ impl Printer {
                     line(self, format!("! {p}"));
                 }
             }
-            Down::UserSaid { sender, text } => line(self, format!("{sender}> {text}")),
+            Down::UserSaid { sender, text, .. } => line(self, format!("{sender}> {text}")),
             Down::Thinking { .. } | Down::ModelUsed { .. } => {}
             Down::ToolCall { organ, name, input, .. } => {
                 let arg = input.values().find_map(|v| v.as_str()).unwrap_or("");

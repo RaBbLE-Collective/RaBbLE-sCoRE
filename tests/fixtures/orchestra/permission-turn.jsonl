@@ -1,0 +1,11 @@
+{"type":"SessionStarted","session_id":"sdk-9","model":"haiku","cwd":"/w"}
+{"type":"TextDelta","organ":"rabble","text":"Checking"}
+{"type":"ToolCall","organ":"rabble","id":"tu1","name":"Bash","input":{"command":"rm -r build"}}
+{"type":"PermissionAsk","id":"tu1","organ":"rabble","tool":"Bash","input":{"command":"rm -r build"},"title":"Run rm -r build?","display_name":null,"description":null,"blocked_path":null,"suggestions":[]}
+{"type":"PermissionResolved","id":"tu1","decision":"deny","by":"local:1000"}
+{"type":"ToolResult","organ":"rabble","id":"tu1","ok":false,"summary":"The Observer declined."}
+{"type":"OrganStarted","organ":"gobble","tool_use_id":"tu2","task_id":"t1","brief":"map the build dir","context":true}
+{"type":"OrganProgress","organ":"gobble","task_id":"t1","usage":{"tokens":40},"last_tool_name":"Grep"}
+{"type":"OrganDone","organ":"gobble","task_id":"t1","status":"failed","result":"no access"}
+{"type":"Error","text":"organ gobble failed"}
+{"type":"TurnDone","stop_reason":"end_turn","origin":"observer"}

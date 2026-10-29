@@ -88,7 +88,7 @@ fn seam(args: &[String]) -> Option<io::Result<()>> {
             if session.is_none() && args.iter().any(|a| a == "--new") {
                 c.send(&Up::CreateSession { cwd: flag("--cwd"), resume: None, continue_last: None, model: flag("--model"), mode: None, crew: None, trust: None, provider: None })?;
             } else if let Some(s) = &session {
-                c.send(&Up::Attach { session: s.clone() })?;
+                c.send(&Up::Attach { session: s.clone(), since_seq: None })?;
             } else {
                 c.send(&Up::ListSessions {})?;
             }

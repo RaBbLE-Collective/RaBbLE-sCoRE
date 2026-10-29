@@ -152,9 +152,10 @@ class PermissionResolved(Event):
 @dataclass(frozen=True, slots=True)
 class UserSaid(Event):
     """A client sent a message into the session. Sent by the server to every attached client
-    (the engine's own events never echo user text), so a second client sees what the first typed."""
-    sender: str
+    (the engine's own events never echo user text), so a second client sees what the first typed. `client` says which one typed it."""
+    sender: str                    # the principal (who is accountable)
     text: str
+    client: str = ""               # the client/device that typed it ("rabble-tui", "gui", ...)
 
 
 @dataclass(frozen=True, slots=True)

@@ -8,7 +8,7 @@
 {"type":"ToolResult","organ":"rabble","id":"tu1","ok":true,"summary":"3 files"}
 {"type":"PermissionAsk","id":"p1","organ":"rabble","tool":"Bash","input":{"command":"rm x"},"title":"Run rm?","display_name":null,"description":null,"blocked_path":null,"suggestions":[{"type":"addRules","destination":"session"}]}
 {"type":"PermissionResolved","id":"p1","decision":"allow","by":"local:1000"}
-{"type":"UserSaid","sender":"local:1000","text":"hello"}
+{"type":"UserSaid","sender":"local:1000","text":"hello","client":"rabble-tui"}
 {"type":"OrganStarted","organ":"gobble","tool_use_id":"tu2","task_id":"t1","brief":"map the beam reconnect","context":true}
 {"type":"OrganProgress","organ":"gobble","task_id":"t1","usage":{"tokens":10},"last_tool_name":"Grep"}
 {"type":"OrganDone","organ":"gobble","task_id":"t1","status":"completed","result":"it lives in beam.py"}
