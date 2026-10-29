@@ -852,3 +852,401 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theme::Glyphs;
+    use crossterm::event::{KeyEvent, KeyModifiers, MouseEvent};
+    use ratatui::{backend::TestBackend, Terminal};
+    use std::sync::mpsc::Receiver;
+
+    const CLIENT: &str = "rabble-tui-test";
+
+    fn app_with(start: Start) -> (App, Receiver<String>) {
+        let (h, rx) = Handle::detached();
+        let cfg = Config { cwd: "/w".into(), start, client: CLIENT.into() };
+        (App::new(cfg, Theme::new(None, true, Glyphs::SAFE), Settings::default(), h), rx)
+    }
+    fn live() -> (App, Receiver<String>) {
+        let (mut a, rx) = app_with(Start::New { resume: None });
+        a.session = Some("s1".into());
+        (a, rx)
+    }
+    fn feed(a: &mut App, line: &str) {
+        let f = Frame::parse(line).unwrap_or_else(|e| panic!("{e}: {line}"));
+        a.on_net(Net::Frame(f));
+    }
+    fn ev(a: &mut App, line: &str) {
+        let mut v: serde_json::Value = serde_json::from_str(line).unwrap();
+        v["session"] = "s1".into();
+        feed(a, &v.to_string());
+    }
+    fn key(c: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(c, KeyModifiers::NONE))
+    }
+    fn type_in(a: &mut App, s: &str) {
+        for c in s.chars() {
+            a.on_input(key(KeyCode::Char(c)));
+        }
+    }
+    fn say(a: &mut App, s: &str) {
+        type_in(a, s);
+        a.on_input(key(KeyCode::Enter));
+    }
+    fn sent(rx: &Receiver<String>) -> Vec<serde_json::Value> {
+        rx.try_iter().map(|l| serde_json::from_str(&l).unwrap()).collect()
+    }
+    fn screen(a: &mut App, w: u16, h: u16) -> String {
+        let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+        t.draw(|f| a.draw(f)).unwrap();
+        let b = t.backend().buffer();
+        (0..h).map(|y| (0..w).map(|x| b[(x, y)].symbol().to_owned()).collect::<String>().trim_end().to_owned()).collect::<Vec<_>>().join("\n")
+    }
+    fn ask(id: &str) -> String {
+        format!(r#"{{"type":"PermissionAsk","id":"{id}","organ":"rabble","tool":"Bash","input":{{"command":"ls"}}}}"#)
+    }
+
+    #[test]
+    fn hello_creates_a_session_with_the_saved_settings_and_attaches_on_request() {
+        let (mut a, rx) = app_with(Start::New { resume: None });
+        a.settings.model = Some("haiku".into());
+        feed(&mut a, r#"{"type":"hello","version":1,"engine":"e","user":"u","features":[]}"#);
+        let s = sent(&rx);
+        assert_eq!((s[0]["type"].as_str(), s[0]["model"].as_str(), s[0]["cwd"].as_str()), (Some("create_session"), Some("haiku"), Some("/w")));
+        assert!(s[0]["id"].is_string(), "creation is a matched request");
+        let (mut b, rx) = app_with(Start::Attach("s9".into()));
+        feed(&mut b, r#"{"type":"hello","version":1,"engine":"e","user":"u"}"#);
+        feed(&mut b, r#"{"type":"hello","version":1,"engine":"e","user":"u"}"#); // a second hello does not start twice
+        assert_eq!(sent(&rx).iter().filter(|m| m["type"] == "attach").count(), 1);
+        assert_eq!(b.session.as_deref(), Some("s9"));
+    }
+
+    #[test]
+    fn text_is_rendered_once_and_the_header_shows_the_model() {
+        let (mut a, _rx) = live();
+        ev(&mut a, r#"{"type":"SessionStarted","session_id":"abc","model":"claude-haiku","cwd":"/w"}"#);
+        ev(&mut a, r#"{"type":"TextDelta","organ":"rabble","text":"Hel"}"#);
+        ev(&mut a, r#"{"type":"TextDelta","organ":"rabble","text":"lo there"}"#);
+        ev(&mut a, r#"{"type":"TextBlock","organ":"rabble","text":"Hello there"}"#);
+        let s = screen(&mut a, 80, 20);
+        assert_eq!(s.matches("Hello there").count(), 1, "{s}");
+        assert!(s.lines().next().unwrap().contains("claude-haiku"), "{s}");
+    }
+
+    #[test]
+    fn a_tool_card_gets_its_result() {
+        let (mut a, _rx) = live();
+        ev(&mut a, r#"{"type":"ToolCall","organ":"rabble","id":"t1","name":"Bash","input":{"command":"ls"}}"#);
+        ev(&mut a, r#"{"type":"ToolResult","organ":"rabble","id":"t1","ok":true,"summary":"3 files"}"#);
+        let s = screen(&mut a, 80, 20);
+        assert!(s.contains("Bash  ls -> 3 files"), "{s}");
+    }
+
+    #[test]
+    fn organ_turns_become_notices_and_background_turns_are_named() {
+        let (mut a, _rx) = live();
+        ev(&mut a, r#"{"type":"OrganStarted","organ":"gobble","tool_use_id":"u","task_id":"k","brief":"map it"}"#);
+        ev(&mut a, r#"{"type":"OrganDone","organ":"gobble","task_id":"k","status":"failed"}"#);
+        ev(&mut a, r#"{"type":"TurnDone","stop_reason":"end_turn","origin":"background"}"#);
+        let s = screen(&mut a, 80, 20);
+        assert!(s.contains("gobble started: map it") && s.contains("gobble failed") && s.contains("background turn finished"), "{s}");
+    }
+
+    #[test]
+    fn model_and_mode_commands_reach_the_engine_and_stick() {
+        let (mut a, rx) = live();
+        a.settings.path = None;
+        say(&mut a, "/model opus");
+        say(&mut a, "/mode plan");
+        a.on_input(Event::Key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)));
+        say(&mut a, "/mode nope");
+        let s = sent(&rx);
+        assert_eq!((s[0]["type"].as_str(), s[0]["model"].as_str(), s[0]["session"].as_str()), (Some("set_model"), Some("opus"), Some("s1")));
+        assert_eq!((s[1]["type"].as_str(), s[1]["mode"].as_str()), (Some("set_permission_mode"), Some("plan")));
+        assert_eq!(s[2]["mode"], "auto", "Shift+Tab cycles to the next mode");
+        assert_eq!(s.len(), 3);
+        assert_eq!(a.settings.model.as_deref(), Some("opus"));
+        let screen = screen(&mut a, 100, 20);
+        assert!(screen.contains("usage: /mode default|acceptEdits|plan|auto") && screen.contains("model opus"), "{screen}");
+    }
+
+    #[test]
+    fn model_picker_opens_without_an_argument_and_enter_chooses() {
+        let (mut a, rx) = live();
+        say(&mut a, "/model");
+        assert!(matches!(a.overlay, Overlay::Model(_)));
+        a.on_input(key(KeyCode::Down));
+        a.on_input(key(KeyCode::Enter));
+        assert!(matches!(a.overlay, Overlay::None));
+        assert_eq!(sent(&rx)[0]["model"], "opus");
+    }
+
+    #[test]
+    fn model_trust_crew_commands() {
+        let (mut a, rx) = live();
+        say(&mut a, "/trust strict");
+        say(&mut a, "/trust auto");
+        say(&mut a, "/trust bogus");
+        say(&mut a, "/model default");
+        let s = sent(&rx);
+        assert_eq!((s[0]["type"].as_str(), s[0]["profile"].as_str()), (Some("set_trust"), Some("strict")));
+        assert!(s[1]["profile"].is_null());
+        assert_eq!(s[2]["type"], "set_model");
+        assert!(s[2]["model"].is_null());
+        assert_eq!(s.len(), 3);
+        // crew restarts on the same Claude session
+        ev(&mut a, r#"{"type":"SessionStarted","session_id":"sdk-1","model":"m","cwd":"/w"}"#);
+        say(&mut a, "/crew on");
+        let s = sent(&rx);
+        assert_eq!(s[0]["type"], "close_session");
+        assert_eq!((s[1]["type"].as_str(), s[1]["resume"].as_str(), s[1]["crew"].as_bool()), (Some("create_session"), Some("sdk-1"), Some(true)));
+        assert!(a.t.items().any(|i| matches!(i, crate::widgets::transcript::Item::Notice { text, .. } if text.starts_with("crew on"))));
+    }
+
+    #[test]
+    fn an_unknown_slash_command_goes_to_the_engine_as_typed() {
+        let (mut a, rx) = live();
+        say(&mut a, "/compact now");
+        let s = sent(&rx);
+        assert_eq!((s[0]["type"].as_str(), s[0]["text"].as_str()), (Some("send"), Some("/compact now")));
+        assert!(a.turn_open);
+    }
+
+    #[test]
+    fn ctrl_c_twice_quits_once_is_a_hint() {
+        let (mut a, _rx) = live();
+        let c = Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        a.on_input(c.clone());
+        assert!(!a.quit);
+        assert!(screen(&mut a, 80, 20).contains("press Ctrl-C again to quit"));
+        a.on_input(c);
+        assert!(a.quit);
+        let (mut b, _) = live();
+        b.on_input(Event::Key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL)));
+        assert!(b.quit);
+    }
+
+    #[test]
+    fn engine_trouble_becomes_notices_not_crashes() {
+        let (mut a, rx) = app_with(Start::New { resume: None });
+        say(&mut a, "hello"); // no session yet
+        assert!(sent(&rx).is_empty() && !a.turn_open);
+        ev(&mut a, r#"{"type":"Error","text":"boom"}"#);
+        feed(&mut a, r#"{"type":"Error","text":"boom 2"}"#);
+        a.on_net(Net::Malformed { why: "bad".into(), line: "{x".into() });
+        a.on_net(Net::Closed("eof".into()));
+        let s = screen(&mut a, 100, 30);
+        assert!(s.contains("no engine session yet") && s.contains("boom 2") && s.contains("could not read") && s.contains("connection lost") && s.contains("offline"), "{s}");
+    }
+
+    #[test]
+    fn copy_puts_the_last_reply_on_the_clipboard_effect() {
+        let (mut a, _rx) = live();
+        say(&mut a, "/copy");
+        assert!(a.effects.is_empty());
+        ev(&mut a, r#"{"type":"TextBlock","organ":"rabble","text":"the reply"}"#);
+        say(&mut a, "/copy");
+        assert_eq!(a.effects, [Effect::Copy("the reply".into())]);
+    }
+
+    #[test]
+    fn slash_completion_uses_capabilities_and_help_lists_commands() {
+        let (mut a, _rx) = live();
+        ev(&mut a, r#"{"type":"Capabilities","slash_commands":["compact","init"],"skills":["a"],"mcp":[{"name":"x","status":"connected"}],"plugins":[],"problems":["mcp x: slow"]}"#);
+        type_in(&mut a, "/com");
+        assert_eq!(a.composer.dropdown, ["/compact"]);
+        a.on_input(key(KeyCode::Tab));
+        assert_eq!(a.composer.text(), "/compact ");
+        a.composer.set_text("");
+        say(&mut a, "/help");
+        say(&mut a, "/status");
+        let s = screen(&mut a, 140, 40);
+        assert!(s.contains("/resume") && s.contains("go to Claude Code as typed") && s.contains("2 commands · 1 skills · mcp 1/1") && s.contains("mcp x: slow"), "{s}");
+    }
+
+    #[test]
+    fn permission_ask_answer_and_dismissal_by_another_client() {
+        let (mut a, rx) = live();
+        ev(&mut a, &ask("a1"));
+        ev(&mut a, &ask("a2"));
+        assert!(matches!(&a.overlay, Overlay::Permission(p) if p.ask.id == "a1"));
+        assert_eq!(a.busy_label(), "awaiting approval");
+        // someone else answered the open one: our prompt closes and the next opens
+        ev(&mut a, r#"{"type":"PermissionResolved","id":"a1","decision":"allow","by":"gui"}"#);
+        assert!(matches!(&a.overlay, Overlay::Permission(p) if p.ask.id == "a2"));
+        assert!(screen(&mut a, 100, 30).contains("permission allowed by gui"));
+        // a replay after a gap must not reopen a1
+        ev(&mut a, &ask("a1"));
+        if let Overlay::Permission(p) = &mut a.overlay {
+            p.armed_at = Instant::now() - std::time::Duration::from_secs(1);
+        }
+        a.on_input(key(KeyCode::Char('a')));
+        let s = sent(&rx);
+        assert_eq!(s.len(), 1);
+        assert_eq!((s[0]["type"].as_str(), s[0]["ask_id"].as_str(), s[0]["decision"].as_str()), (Some("answer"), Some("a2"), Some("allow_session")));
+        assert!(matches!(a.overlay, Overlay::None), "a1 was already resolved and stays closed");
+    }
+
+    #[test]
+    fn typing_during_a_fresh_prompt_does_not_answer_it() {
+        let (mut a, rx) = live();
+        ev(&mut a, &ask("a1"));
+        for c in "yyyy".chars() {
+            a.on_input(key(KeyCode::Char(c)));
+        }
+        assert!(sent(&rx).is_empty() && matches!(a.overlay, Overlay::Permission(_)));
+        a.on_input(key(KeyCode::Esc));
+        assert_eq!(sent(&rx)[0]["decision"], "deny");
+    }
+
+    #[test]
+    fn interrupt_clears_pending_asks_and_the_placeholder() {
+        let (mut a, rx) = live();
+        say(&mut a, "go");
+        a.on_input(key(KeyCode::Esc));
+        assert_eq!(sent(&rx).last().unwrap()["type"], "interrupt");
+    }
+
+    #[test]
+    fn seq_tracks_events_only_and_other_sessions_are_ignored() {
+        let (mut a, _rx) = live();
+        feed(&mut a, r#"{"type":"attached","session":"s1","seq":99,"role":"owner","snapshot":{"busy":true,"model":"opus","mode":"plan"}}"#);
+        assert_eq!(a.max_seq, 0, "attached.seq is the head, not a resume point");
+        assert!(a.turn_open && a.header.model == "opus" && a.settings.mode == "plan");
+        feed(&mut a, r#"{"type":"TextDelta","session":"s1","seq":4,"organ":"rabble","text":"x"}"#);
+        feed(&mut a, r#"{"type":"TextDelta","session":"s1","seq":3,"organ":"rabble","text":"y"}"#);
+        feed(&mut a, r#"{"type":"TextDelta","session":"other","seq":50,"organ":"rabble","text":"z"}"#);
+        assert_eq!(a.max_seq, 4);
+        assert!(a.t.last_reply().unwrap() == "xy");
+    }
+
+    #[test]
+    fn own_messages_jump_to_the_bottom_others_do_not_yank_the_reader() {
+        let (mut a, _rx) = live();
+        ev(&mut a, &format!(r#"{{"type":"TextBlock","organ":"rabble","text":"{}"}}"#, "line\\n\\n".repeat(80)));
+        screen(&mut a, 80, 20);
+        a.t.scroll_by(-40);
+        ev(&mut a, r#"{"type":"UserSaid","sender":"u","client":"gui","text":"from the phone"}"#);
+        screen(&mut a, 80, 20);
+        assert!(!a.t.follow);
+        ev(&mut a, &format!(r#"{{"type":"UserSaid","sender":"u","client":"{CLIENT}","text":"mine"}}"#));
+        screen(&mut a, 80, 20);
+        assert!(a.t.follow);
+    }
+
+    #[test]
+    fn resume_lists_live_sessions_from_the_matched_reply() {
+        let (mut a, rx) = live();
+        say(&mut a, "/resume");
+        let req = sent(&rx).into_iter().find(|m| m["type"] == "list_sessions").unwrap();
+        assert!(req["id"].is_string());
+        let f = Frame::parse(r#"{"type":"sessions","id":"r1","sessions":[{"session":"s2","role":"participant","clients":2,"cwd":"/w","busy":true}]}"#).unwrap();
+        a.on_net(Net::Reply { label: "resume-list".into(), frame: f });
+        let Overlay::Sessions(p) = &mut a.overlay else { panic!("picker") };
+        assert!(p.items[0].0.contains("s2") && p.items[0].1 == "attach:s2");
+        a.on_input(key(KeyCode::Enter));
+        let s = sent(&rx);
+        assert!(s.iter().any(|m| m["type"] == "attach" && m["session"] == "s2"));
+        assert_eq!(a.session.as_deref(), Some("s2"));
+    }
+
+    #[test]
+    fn clear_closes_the_old_session_and_starts_a_fresh_one() {
+        let (mut a, rx) = live();
+        ev(&mut a, r#"{"type":"TextBlock","organ":"rabble","text":"old"}"#);
+        say(&mut a, "/clear");
+        let s = sent(&rx);
+        assert_eq!((s[0]["type"].as_str(), s[0]["session"].as_str(), s[1]["type"].as_str()), (Some("close_session"), Some("s1"), Some("create_session")));
+        assert!(a.session.is_none() && a.t.last_reply().is_none());
+        feed(&mut a, r#"{"type":"session_created","session":"s2"}"#);
+        ev(&mut a, r#"{"type":"TextBlock","organ":"rabble","text":"stale"}"#); // old session: ignored
+        assert_eq!((a.session.as_deref(), a.t.last_reply()), (Some("s2"), None));
+    }
+
+    #[test]
+    fn park_settings_and_status() {
+        let (mut a, _rx) = live();
+        say(&mut a, "/park ask");
+        say(&mut a, "/park continue on");
+        assert_eq!((a.settings.park.as_str(), a.settings.park_continue), ("ask", true));
+        say(&mut a, "/park status");
+        say(&mut a, "/park wat");
+        let s = screen(&mut a, 140, 30);
+        assert!(s.contains("park ask at 80%") && s.contains("usage: /park"), "{s}");
+    }
+
+    #[test]
+    fn park_now_sends_the_park_prompt_then_restarts_from_the_handoff() {
+        let dir = std::env::temp_dir().join(format!("rt-parkflow-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (mut a, rx) = live();
+        a.cfg.cwd = dir.to_string_lossy().into_owned();
+        say(&mut a, "/park now");
+        let sent1 = sent(&rx);
+        let prompt = sent1.iter().find(|m| m["type"] == "send").unwrap()["text"].as_str().unwrap().to_owned();
+        let path = prompt.split("exactly this path: ").nth(1).unwrap().lines().next().unwrap().to_owned();
+        std::fs::write(&path, "x".repeat(400)).unwrap();
+        ev(&mut a, r#"{"type":"TurnDone","stop_reason":"end_turn","origin":"observer"}"#);
+        let s = sent(&rx);
+        assert_eq!((s[0]["type"].as_str(), s[1]["type"].as_str()), (Some("close_session"), Some("create_session")));
+        feed(&mut a, r#"{"type":"session_created","session":"s2"}"#);
+        ev_to(&mut a, "s2", r#"{"type":"SessionStarted","session_id":"n","model":"m","cwd":"/w"}"#);
+        let seed = sent(&rx).into_iter().find(|m| m["type"] == "send").unwrap();
+        assert!(seed["text"].as_str().unwrap().contains("fresh session parked"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn ev_to(a: &mut App, s: &str, line: &str) {
+        let mut v: serde_json::Value = serde_json::from_str(line).unwrap();
+        v["session"] = s.into();
+        feed(a, &v.to_string());
+    }
+
+    #[test]
+    fn resize_between_frames_never_panics_and_rewraps() {
+        let (mut a, _rx) = live();
+        ev(&mut a, &format!(r#"{{"type":"TextBlock","organ":"rabble","text":"{}"}}"#, "word ".repeat(300)));
+        for (w, h) in [(120, 40), (30, 10), (200, 70), (8, 7), (4, 6), (3, 3), (80, 24)] {
+            let s = screen(&mut a, w, h);
+            assert!(s.lines().count() <= h as usize);
+        }
+        assert!(a.t.follow, "still pinned after all that");
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_one_to_one_and_focus_events_repin() {
+        let (mut a, _rx) = live();
+        ev(&mut a, &format!(r#"{{"type":"TextBlock","organ":"rabble","text":"{}"}}"#, "line\\n\\n".repeat(100)));
+        screen(&mut a, 80, 20);
+        let bottom = a.t.offset;
+        let wheel = |k| Event::Mouse(MouseEvent { kind: k, column: 1, row: 1, modifiers: KeyModifiers::NONE });
+        a.on_input(wheel(MouseEventKind::ScrollUp));
+        assert_eq!(a.t.offset, bottom - 3);
+        a.on_input(Event::FocusLost);
+        a.on_input(Event::FocusGained);
+        a.on_input(wheel(MouseEventKind::ScrollDown));
+        assert!(a.t.offset >= bottom - 3);
+    }
+
+    #[test]
+    fn a_recorded_turn_replays_into_a_readable_screen() {
+        let (mut a, _rx) = live();
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/orchestra/tool-turn.jsonl");
+        for l in std::fs::read_to_string(path).unwrap().lines().filter(|l| !l.trim().is_empty()) {
+            ev(&mut a, l);
+        }
+        let s = screen(&mut a, 120, 30);
+        assert!(s.contains("Bash") && !a.turn_open, "{s}");
+    }
+
+    #[test]
+    fn nothing_the_shell_draws_needs_a_hex_literal_and_no_color_has_no_colour_cells() {
+        let (mut a, _rx) = live();
+        ev(&mut a, r#"{"type":"TextBlock","organ":"rabble","text":"**hi** `x`"}"#);
+        let mut t = Terminal::new(TestBackend::new(60, 12)).unwrap();
+        t.draw(|f| a.draw(f)).unwrap();
+        let b = t.backend().buffer();
+        assert!(b.content().iter().all(|c| c.fg == ratatui::style::Color::Reset && c.bg == ratatui::style::Color::Reset));
+    }
+}
