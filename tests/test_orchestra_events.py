@@ -22,6 +22,8 @@ SAMPLES = [
     ev.ToolResult(ev.LEAD, "tu1", True, "3 files"),
     ev.PermissionAsk("p1", ev.LEAD, "Bash", {"command": "rm x"}, title="Run rm?",
                      suggestions=[{"type": "addRules", "destination": "session"}]),
+    ev.PermissionResolved("p1", "allow", "local:1000"),
+    ev.UserSaid("local:1000", "hello"),
     ev.OrganStarted("gobble", "tu2", "t1", "map the beam reconnect"),
     ev.OrganProgress("gobble", "t1", {"tokens": 10}, "Grep"),
     ev.OrganDone("gobble", "t1", "completed", "it lives in beam.py"),

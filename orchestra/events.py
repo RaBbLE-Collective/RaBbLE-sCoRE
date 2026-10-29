@@ -141,6 +141,23 @@ class PermissionAsk(Event):
 
 
 @dataclass(frozen=True, slots=True)
+class PermissionResolved(Event):
+    """Someone answered a PermissionAsk (multi-client: the first answer wins). Lets the other
+    attached clients drop the ask from their queue."""
+    id: str
+    decision: Decision
+    by: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class UserSaid(Event):
+    """A client sent a message into the session. Sent by the server to every attached client
+    (the engine's own events never echo user text), so a second client sees what the first typed."""
+    sender: str
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
 class PermissionReply:
     """The face's answer to a PermissionAsk. Not an event: it flows face → engine."""
     decision: Decision
