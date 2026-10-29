@@ -61,6 +61,10 @@ class _Queued:
 _TEST_RUN = re.compile(r"\b(pytest|py\.test|unittest|npm\s+(run\s+)?test|pnpm\s+test|yarn\s+test|cargo\s+test|go\s+test|make\s+(test|check)|ctest|tox)\b")
 
 
+# one stream-json line carries a whole tool result; a base64 screenshot is >1 MB (the SDK default)
+MAX_BUFFER = 64 * 1024 * 1024
+
+
 class ClaudeCodeBackend(_Queued):
     def __init__(self, cwd: str | Path, *, append: str | None = None, agents: dict[str, Any] | None = None,
                  model: str | None = None, permission_mode: str | None = None,
@@ -163,6 +167,7 @@ class ClaudeCodeBackend(_Queued):
             resume=self.resume,
             continue_conversation=self.continue_conversation,
             agents=self.agents,
+            max_buffer_size=MAX_BUFFER,
             can_use_tool=self.permissions.can_use_tool,
             hooks={"SubagentStart": [HookMatcher(hooks=[self._on_subagent_start])]},
         )

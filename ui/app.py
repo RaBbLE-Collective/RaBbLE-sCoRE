@@ -21,25 +21,32 @@ for _p in (SCORE_ROOT, SCORE_ROOT / "crew"):
         sys.path.insert(0, str(_p))
 
 from orchestra import events as ev  # noqa: E402
-from orchestra import park, trust  # noqa: E402
+from orchestra import park, trust, usage  # noqa: E402
 from orchestra.entropy import Entropy  # noqa: E402
-from ui.prefs import MODELS, Settings, resolve_model  # noqa: E402
-from ui.widgets.composer import Composer, Prompt  # noqa: E402
+from ui.prefs import MODELS, MODES as PREF_MODES, Settings, resolve_model  # noqa: E402
+from ui.widgets.composer import Composer, Prompt, copy_to_system  # noqa: E402
 from ui.widgets.header import Header  # noqa: E402
 from ui.widgets.transcript import Transcript  # noqa: E402
 
-MODES = ["default", "acceptEdits", "plan"]
+MODES = list(PREF_MODES)
 QUIT_WINDOW = 2.0
 FLASH = 2.5
+# dependency order; ui.app last. app-level CSS/BINDINGS and the engine (orchestra/) need a real restart.
+RELOAD_MODULES = ("ui.theme", "ui.eyes", "ui.face", "ui.prefs", "ui.widgets.models", "ui.widgets.tool_card",
+                  "ui.widgets.permission", "ui.widgets.sessions", "ui.widgets.transcript", "ui.widgets.header",
+                  "ui.widgets.composer", "ui.app")
+USAGE_EVERY = 30.0   # seconds between reads of the OS tracker's cache
 HELP = {
     "/model": "pick the model (or /model opus|sonnet|haiku|fable|default|<id>)",
     "/crew": "organs on/off: /crew on|off (off = solo, no agents, cheapest)",
     "/trust": "auto-approve level: /trust strict|standard|trusted|auto (auto = earned from session entropy)",
-    "/mode": "permission mode: /mode default|acceptEdits|plan (Shift+Tab cycles)",
+    "/mode": "permission mode: /mode default|acceptEdits|plan|auto (Shift+Tab cycles)",
     "/status": "model, crew, trust and mode at a glance",
     "/park": "hand off to a fresh session: /park [now|continue] | auto|ask|off | continue on|off (parks itself at 80% context)",
     "/resume": "pick an earlier session",
     "/clear": "start a fresh session",
+    "/reload": "rebuild the UI from the code on disk; the agent session carries on (idle only)",
+    "/copy": "copy the last reply to the clipboard (Ctrl-C copies a mouse selection; Ctrl-V pastes)",
     "/face": "show the full face",
     "/help": "this list",
     "/quit": "leave (Ctrl-C twice also works)",
@@ -117,6 +124,8 @@ class RabbleApp(App):
         return self.prompt.composer
 
     async def on_mount(self) -> None:
+        self._poll_usage()
+        self._usage_timer = self.set_interval(USAGE_EVERY, self._poll_usage)
         self.composer.focus()
         if Path(self.cwd).resolve().is_relative_to(SCORE_ROOT):
             await self.transcript.notice(
@@ -132,7 +141,10 @@ class RabbleApp(App):
         try:
             await backend.start()
             async for event in backend.events():
-                await self._handle(event)
+                try:
+                    await self._handle(event)
+                except Exception as e:  # one event the view cannot draw must not end the session
+                    await self.transcript.notice(f"view: {type(event).__name__}: {e}", error=True)
         except Exception as e:  # the session is over; say so rather than crash the face
             await self.transcript.notice(f"engine: {e}", error=True)
 
@@ -319,6 +331,10 @@ class RabbleApp(App):
             if arg not in MODES:
                 return await t.notice("usage: /mode " + "|".join(MODES), error=True)
             await self._set_mode(arg)
+        elif word == "/reload":
+            await self._reload_ui()
+        elif word == "/copy":
+            await self._copy(self.transcript.last_reply, "last reply")
         elif word == "/face":
             face_cls = _optional("ui.face", "FaceWidget")
             w = face_cls("full") if face_cls else Static("RaBbLE")
@@ -326,6 +342,7 @@ class RabbleApp(App):
                 w.set_signal(self.entropy.base, self.entropy.stability)
             t.transient.append(w)
             await t.mount(w)
+            self._sync_face()
         elif word == "/clear":
             await self._restart(None, False, clear=True)
         elif word == "/resume":
@@ -483,6 +500,10 @@ class RabbleApp(App):
             return self.settings.trust
         return self.entropy.trust if self.entropy else trust.profile_for(self._model_for_entropy())
 
+    def _poll_usage(self) -> None:
+        self.header.usage = usage.read()
+        self.header.refresh_info()
+
     def _sync_header(self) -> None:
         self.header.mode = self.mode
         self.header.crew = self.settings.crew
@@ -495,7 +516,23 @@ class RabbleApp(App):
         else:  # before the engine reports: the model's own numbers
             base = Entropy(self._model_for_entropy())
             self.header.capability, self.header.categories, self.header.local = base.capability(), base.capabilities(), base.local
+        self._sync_face()
         self.header.refresh_info()
+
+    def _sync_face(self) -> None:
+        """The face's aura follows the model's provider."""
+        from_ui = _optional("ui.face", "provider_of")
+        if from_ui is None:
+            return
+        provider = from_ui(self._model_for_entropy(), self.header.local)
+        faces = [self.face]
+        transcript = getattr(self, "transcript", None)
+        if transcript is not None and transcript.is_attached:
+            faces += list(transcript.query("FaceWidget"))
+        for w in faces:
+            setter = getattr(w, "set_provider", None)
+            if setter:
+                setter(provider)
 
     def _status(self) -> str:
         ent = ""
@@ -504,7 +541,12 @@ class RabbleApp(App):
             ent = (f"{self.entropy.band.lower()} · stability {self.entropy.stability} · capability {self.entropy.capability}"
                    f" (coding {c.get('coding', '-')} tools {c.get('tools', '-')} recall {c.get('recall', '-')}"
                    f"{', local' if self.entropy.local else ''}) · ")
-        return (f"model {self.header.model} · {ent}{self._bloat.summary()} · crew {'on' if self.settings.crew else 'off'} · "
+        u = self.header.usage
+        use = "" if u is None or not (u.five_hour or u.week) else (
+            "usage " + " ".join(f"{n} {w.pct:.0f}% (resets {usage.fmt_remaining(w.resets_in())})"
+                                for n, w in (("5h", u.five_hour), ("week", u.week)) if w)
+            + (" [stale]" if u.stale else "") + " · ")
+        return (f"model {self.header.model} · {ent}{use}{self._bloat.summary()} · crew {'on' if self.settings.crew else 'off'} · "
                 f"trust {self.trust_profile()}{' (set)' if self.settings.trust else ' (from entropy)'} · mode {self.mode}")
 
     async def _set_model(self, value: str | None) -> None:
@@ -549,6 +591,9 @@ class RabbleApp(App):
             await self.transcript.stop_thinking()
         elif name == "cycle_mode":
             await self._set_mode(MODES[(MODES.index(self.mode) + 1) % len(MODES)])
+        elif name == "copy":
+            await self._copy(self.screen.get_selected_text() or "", "selection")
+            self.screen.clear_selection()
         elif name == "ctrl_d":
             self.exit()
         elif name == "ctrl_c":
@@ -558,6 +603,56 @@ class RabbleApp(App):
             else:
                 self._last_ctrl_c = now
                 await self.transcript.notice("press Ctrl-C again to quit")
+
+    async def _reload_ui(self) -> None:
+        """Re-import ui/*, swap this app to the new class and remount the widgets. The backend object (and so the
+        Claude Code session) is never touched; the view is rebuilt from the transcript's record."""
+        t = self.transcript
+        if self._turn_open or self._asks or self._ask_open or self._parking:
+            return await t.notice("reload when the turn is done (nothing mid-stream or awaiting approval)", error=True)
+        for path in sorted(Path(__file__).parent.rglob("*.py")):
+            try:
+                compile(path.read_text(encoding="utf-8"), str(path), "exec")
+            except SyntaxError as e:
+                return await t.notice(f"reload stopped, nothing changed: {path.name}:{e.lineno} {e.msg}", error=True)
+        try:
+            for name in RELOAD_MODULES:
+                if name in sys.modules:
+                    importlib.reload(sys.modules[name])
+        except Exception as e:
+            return await t.notice(f"reload failed in {name}: {e}. Some modules may be half-updated: restart rabble if the UI misbehaves", error=True)
+        self.__class__ = sys.modules["ui.app"].RabbleApp
+        await self._rebuild_ui()
+
+    async def _rebuild_ui(self) -> None:
+        keep = (self.header.export_state(), list(self.transcript.shown), self.composer.text, list(self.composer._history))
+        for w in (self.header, self.transcript, self.prompt):
+            await w.remove()
+        palette = _optional("ui.theme", "load_palette")
+        self.palette = palette() if palette else {}
+        self.organ_color = _optional("ui.theme", "organ_color") or _fallback_color
+        theme = _optional("ui.theme", "rabble_theme")
+        if theme:
+            self.register_theme(theme())
+        widgets = list(self.compose())
+        await self.mount(*widgets)
+        state, log, draft, history = keep
+        self.header.import_state(state)
+        self._sync_header()
+        await self.transcript.replay(log)
+        self.composer._history = history
+        self.composer.load_text(draft)
+        self._usage_timer.stop()
+        self._usage_timer = self.set_interval(USAGE_EVERY, self._poll_usage)
+        self.composer.focus()
+        await self.transcript.notice("UI reloaded; the session carries on")
+
+    async def _copy(self, text: str, what: str) -> None:
+        if not text:
+            return await self.transcript.notice(f"nothing to copy ({what})", error=True)
+        self.copy_to_clipboard(text)   # OSC 52: also reaches the local clipboard over SSH
+        copy_to_system(text)
+        await self.transcript.notice(f"copied {what} ({len(text)} chars)")
 
     def action_toggle_tools(self) -> None:
         self.transcript.toggle_cards()

@@ -11,7 +11,7 @@ def main(argv=None) -> int:
     p.add_argument("--model")
     p.add_argument("--continue", dest="cont", action="store_true")
     p.add_argument("--resume", metavar="ID")
-    p.add_argument("--permission-mode", choices=["default", "acceptEdits", "plan"])
+    p.add_argument("--permission-mode", choices=["default", "acceptEdits", "plan", "auto"])
     p.add_argument("--crew", dest="crew", action="store_true", default=None, help="organs on this launch")
     p.add_argument("--no-crew", dest="crew", action="store_false", help="organs off this launch")
     p.add_argument("--trust", choices=["strict", "standard", "trusted"], help="auto-approve level (default: earned from session entropy)")

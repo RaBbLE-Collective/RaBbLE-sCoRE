@@ -44,6 +44,9 @@ class Transcript(VerticalScroll):
         super().__init__(**kw)
         self._organ_color = organ_color
         self._live: Markdown | None = None
+        self._buf = ""                 # text of the reply being streamed
+        self.last_reply = ""           # last finished lead reply, for /copy
+        self.shown: list[tuple] = []      # what was shown, so /reload can rebuild the view
         self._thinking: Thinking | None = None
         self._cards: dict[str, ToolCard] = {}
         self.transient: list = []
@@ -129,6 +132,8 @@ class Transcript(VerticalScroll):
 
     async def clear_all(self) -> None:
         self._live = self._thinking = None
+        self._buf = self.last_reply = ""
+        self.shown.clear()
         self._following = True
         self._cards.clear()
         await self.remove_children()
@@ -139,9 +144,11 @@ class Transcript(VerticalScroll):
         self.transient.clear()
 
     async def user(self, text: str) -> None:
+        self.shown.append(("user", text))
         await self._add(Static(Text("› " + text), classes="user"), force=True)  # the Observer spoke: show it
 
     async def notice(self, text: str, error: bool = False) -> None:
+        self.shown.append(("notice", text, error))
         await self._add(Static(Text(text), classes="error" if error else "notice"))
 
     async def stop_thinking(self) -> None:
@@ -158,12 +165,16 @@ class Transcript(VerticalScroll):
         if self._live is None:
             self._live = await self._add(Markdown(""))
         follow = self._near_bottom()
+        self._buf += text
+        self.last_reply = self._buf
         await self._live.append(text)
         self._stick(follow)
 
     async def block(self, organ: str, text: str) -> None:
+        self.shown.append(("block", organ, text))
         await self.stop_thinking()
         if organ == LEAD:
+            self.last_reply, self._buf = text, ""
             if self._live is not None:
                 follow = self._near_bottom()
                 await self._live.update(text)
@@ -176,20 +187,40 @@ class Transcript(VerticalScroll):
         await self._add(Markdown(text))
 
     def end_turn(self) -> None:
+        if self._buf:   # streamed with no final block: keep what was shown
+            self.shown.append(("block", LEAD, self._buf))
         self._live = None
+        self._buf = ""
 
     async def tool_call(self, organ: str, tool_id: str, name: str, data: dict) -> None:
+        self.shown.append(("tool", organ, tool_id, name, data))
         await self.stop_thinking()
         card = ToolCard(tool_id, "" if organ == LEAD else organ, name, data)
         self._cards[tool_id] = card
         await self._add(card)
 
     def tool_result(self, tool_id: str, ok: bool, summary: str) -> None:
+        self.shown.append(("result", tool_id, ok, summary))
         card = self._cards.get(tool_id)
         if card:
             follow = self._near_bottom()
             card.set_result(ok, summary)
             self._stick(follow)
+
+    async def replay(self, entries: list[tuple]) -> None:
+        """Show again what an earlier Transcript showed (a rebuilt view after /reload)."""
+        for kind, *a in entries:
+            if kind == "user":
+                await self.user(*a)
+            elif kind == "notice":
+                await self.notice(*a)
+            elif kind == "block":
+                await self.block(*a)
+            elif kind == "tool":
+                await self.tool_call(*a)
+            elif kind == "result":
+                self.tool_result(*a)
+        self.end_turn()
 
     def toggle_cards(self) -> None:
         cards = list(self._cards.values())

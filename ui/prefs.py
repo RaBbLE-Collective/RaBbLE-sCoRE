@@ -10,7 +10,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-MODES = ("default", "acceptEdits", "plan")
+MODES = ("default", "acceptEdits", "plan", "auto")
 # picker entries: (label, value). Aliases track the newest model of a tier; None = Claude Code's default.
 MODELS = (
     ("default", None),

@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 pytest.importorskip("textual")
 pytest.importorskip("claude_agent_sdk")
 
-from textual.widgets import Markdown  # noqa: E402
+from textual.widgets import Markdown, Static  # noqa: E402
 
 import ui.app as appmod  # noqa: E402
 from orchestra.backend import ReplayBackend  # noqa: E402
@@ -179,3 +179,80 @@ async def test_engine_calls_that_raise_become_notices(tmp_path):
         errors = [str(w.render()) for w in app.transcript.query("Static.error")]
         assert sum("Not connected" in e for e in errors) == 3
         assert app.header.model != "opus"
+
+
+@pytest.mark.asyncio
+async def test_mode_auto(tmp_path):
+    app, h = make("tool-turn.jsonl", tmp_path)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await say(pilot, "/mode auto")
+        await until(pilot, lambda: ("set_permission_mode", "auto") in h["b"].calls)
+        assert "auto" in app.header.plain
+
+
+@pytest.mark.asyncio
+async def test_copy_last_reply(tmp_path, monkeypatch):
+    got = []
+    monkeypatch.setattr("ui.app.copy_to_system", got.append)
+    app, h = make("tool-turn.jsonl", tmp_path)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await say(pilot, "hi")
+        await until(pilot, lambda: app.transcript.last_reply == "8")
+        await say(pilot, "/copy")
+        await until(pilot, lambda: got)
+        assert got[0] == app.transcript.last_reply
+
+
+@pytest.mark.asyncio
+async def test_reload_keeps_session_and_transcript(tmp_path):
+    app, h = make("tool-turn.jsonl", tmp_path)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await say(pilot, "hi")
+        await until(pilot, lambda: app.header.cost is not None and md_sources(app))
+        await pilot.pause(0.2)
+        old_header, backend, shown = app.header, app.backend, md_sources(app)
+        await say(pilot, "/reload")
+        await until(pilot, lambda: "UI reloaded" in " ".join(str(w.render()) for w in app.transcript.query(Static)))
+        assert app.backend is backend and h["b"] is backend            # the session was never touched
+        assert app.header is not old_header                             # the widgets are new
+        assert md_sources(app) == shown                                 # transcript replayed
+        assert app.header.cost is not None and "claude-haiku-5-5" in app.header.plain
+        await say(pilot, "again")                                       # still talking to the same engine
+        await until(pilot, lambda: calls(h).count("send") == 2)
+
+
+@pytest.mark.asyncio
+async def test_reload_refuses_syntax_errors_and_busy(tmp_path, monkeypatch):
+    app, h = make("tool-turn.jsonl", tmp_path)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await until(pilot, lambda: app.backend is not None)
+        header = app.header
+        app._turn_open = True
+        await say(pilot, "/reload")
+        await pilot.pause(0.2)
+        assert app.header is header                                     # busy: nothing rebuilt
+        app._turn_open = False
+        import builtins
+        real = builtins.compile
+        monkeypatch.setattr(builtins, "compile", lambda *a, **k: (_ for _ in ()).throw(SyntaxError("boom")) if "ui" in str(a[1]) else real(*a, **k))
+        await say(pilot, "/reload")
+        await pilot.pause(0.2)
+        assert app.header is header
+
+
+@pytest.mark.asyncio
+async def test_tool_card_title_survives_bracket_runs():
+    from textual.app import App
+    from ui.widgets.tool_card import ToolCard
+
+    class Host(App):
+        def compose(self):
+            self.card = ToolCard("1", "", "Bash", {"command": "x"})
+            yield self.card
+
+    app = Host()
+    async with app.run_test() as pilot:
+        for bad in ("[(Size(width=118, height=26), Region(x=1, y=11, width=118, height=26))]", "[red]x[/red] [/] [", "end\\"):
+            app.card.set_result(True, bad)
+            await pilot.pause(0.1)
+        assert app.is_running

@@ -8,6 +8,8 @@ several of them and the focused widget would otherwise lose to them.
 
 import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 from textual.containers import Vertical
@@ -53,7 +55,7 @@ class Composer(TextArea):
             self.text = text
 
     class Command(Message):
-        """interrupt | cycle_mode | ctrl_c | ctrl_d"""
+        """interrupt | cycle_mode | ctrl_c | ctrl_d | copy"""
         def __init__(self, name: str):
             super().__init__()
             self.name = name
@@ -162,7 +164,14 @@ class Composer(TextArea):
         elif key == "shift+tab":
             self.post_message(self.Command("cycle_mode"))
         elif key == "ctrl+c" and not self.selected_text:
-            self.post_message(self.Command("ctrl_c"))
+            # a selection in the transcript copies; only a bare Ctrl-C counts toward quitting
+            picked = self.screen.get_selected_text()
+            self.post_message(self.Command("copy" if picked else "ctrl_c"))
+        elif key == "ctrl+v":
+            # TextArea's own paste only knows its private clipboard; Kitty's Ctrl+Shift+V already arrives as a paste event
+            text = system_clipboard()
+            if text:
+                self.insert(text)
         elif key == "ctrl+d" and not self.text:
             self.post_message(self.Command("ctrl_d"))
         elif key in ("up", "down") and self.completing:
@@ -176,6 +185,27 @@ class Composer(TextArea):
         if handled:
             event.stop()
             event.prevent_default()
+
+
+def system_clipboard() -> str:
+    """Text on the desktop clipboard (Wayland, then X11); "" when there is none or no tool."""
+    for cmd in (["wl-paste", "--no-newline"], ["xclip", "-selection", "clipboard", "-o"]):
+        if shutil.which(cmd[0]):
+            try:
+                return subprocess.run(cmd, capture_output=True, text=True, timeout=2).stdout
+            except (OSError, subprocess.SubprocessError):
+                return ""
+    return ""
+
+
+def copy_to_system(text: str) -> None:
+    for cmd in (["wl-copy"], ["xclip", "-selection", "clipboard"]):
+        if shutil.which(cmd[0]):
+            try:
+                subprocess.run(cmd, input=text, text=True, timeout=2)
+            except (OSError, subprocess.SubprocessError):
+                pass
+            return
 
 
 class Prompt(Vertical):

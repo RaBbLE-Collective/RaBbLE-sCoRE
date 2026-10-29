@@ -8,8 +8,9 @@ The face rig and expression table are ported from
 RaBbLE-NeBuLA/src/backends/alive-backend.js so both bodies share one creature.
 Colours come from RaBbLE-Grimoire/RaBbLE-Agent/RaBbLE-Palette.md at runtime (via ui.theme).
 
-The prototype in RaBbLE-BaBbLE/prototypes/terminal-face/ is the design reference: the renderer
-below is a port of it and must stay output-identical. FaceWidget is the Textual body.
+The eyes and portals follow the rig baseline in RaBbLE-NeBuLA/specs/rig/entity-rig.json (tests pin it);
+the prototype in RaBbLE-BaBbLE/prototypes/terminal-face/ is the older reference and no longer matches.
+FaceWidget is the Textual body.
 """
 
 import functools
@@ -104,6 +105,11 @@ def _octant_table():
 
 _OCTANT = _octant_table()
 
+# VS Code's terminal (xterm.js) draws Block Elements itself but has no octant glyphs, so the eyes and the mini
+# mark would show tofu there. Safe mode keeps to quadrants. RABBLE_GLYPHS=safe|octant overrides the detection.
+_glyphs = os.environ.get("RABBLE_GLYPHS", "").lower()
+SAFE_GLYPHS = _glyphs == "safe" or (_glyphs != "octant" and os.environ.get("TERM_PROGRAM") == "vscode")
+
 
 def _dist(a, b):
     return sum((x - y) ** 2 for x, y in zip(a, b))
@@ -122,9 +128,10 @@ class Canvas:
     Octant mode: pixels are (cols*2, rows*4) and lines land on the same grid as solid sub-pixels.
     Pixels are square in both."""
 
-    def __init__(self, cols, rows, bg, octant=False):
+    def __init__(self, cols, rows, bg, octant=False, safe=False):
         self.cols, self.rows = cols, rows
         self.octant = octant
+        self.safe = safe   # quadrant glyphs only
         self.w, self.h = (cols * 2, rows * 4) if octant else (cols, rows * 2)
         self.bg = [[bg] * cols for _ in range(rows)]
         self.fill = {}  # (px, py) -> rgb
@@ -196,6 +203,9 @@ class Canvas:
         # the commonest colour on each side, never an average: averages turn eye tips pastel
         fg = _mode([s for s, i in zip(subs, ins) if i])
         back = _mode([s for s, i in zip(subs, ins) if not i]) if not all(ins) else bg
+        if self.safe:   # a quadrant is on when either of its two sub-pixels is: thin lines keep their weight
+            for a in (0, 1, 4, 5):
+                ins[a] = ins[a + 2] = ins[a] or ins[a + 2]
         bits = sum(1 << i for i, on in enumerate(ins) if on)
         return _OCTANT[bits], fg, back
 
@@ -267,17 +277,55 @@ def _noise(seed, x):
 
 # ── the entity ──────────────────────────────────────────────────────────────
 
+# ── provider aura ───────────────────────────────────────────────────────────
+# The halo around the eyes takes a faint tint from the model's provider. These are the providers' own brand
+# colours (not RaBbLE palette values); each is pulled toward the palette's violet before it is drawn.
+# A tuple of colours is a ring, read clockwise from the right (Google's four).
+PROVIDER_AURA = {
+    "anthropic": ((217, 119, 87),),
+    "google": ((66, 133, 244), (52, 168, 83), (251, 188, 5), (234, 67, 53)),   # right, bottom, left, top
+    "openai": ((16, 163, 127),),
+}
+PROVIDER_MUTE = 0.35   # share of palette violet mixed into the provider colour
+
+
+def provider_of(model, local=False):
+    """Provider key for a model id, None for local models and anything unrecognised (= the RaBbLE poles).
+    No model named means Claude Code's own default."""
+    if local:
+        return None
+    m = (model or "").lower()
+    if not m or any(k in m for k in ("claude", "opus", "sonnet", "haiku", "fable")):
+        return "anthropic"
+    if any(k in m for k in ("gemini", "gemma")):
+        return "google"
+    if m.startswith(("gpt", "o1", "o3", "o4", "chatgpt", "codex")) or "gpt-" in m:
+        return "openai"
+    return None
+
+
+def _ring_colour(ring, angle):
+    """Colour at `angle` (radians, screen coords: 0 = right, pi/2 = down) around a ring of stops."""
+    n = len(ring)
+    if n == 1:
+        return ring[0]
+    pos = (angle % math.tau) / math.tau * n
+    k = int(pos) % n
+    return mix(ring[k], ring[(k + 1) % n], pos - int(pos))
+
+
 class Face:
     """One entity instance. `frame(t)` returns a Canvas; `state`/`expr` steer it."""
 
     def __init__(self, cols, rows, palette=None, detail="full", seed=7, spread=None,
-                 eye_n=None, eye_h=None, eye_w=None, aura=None, rim=None, rim_tips=None):
+                 eye_n=None, eye_h=None, eye_w=None, aura=None, rim=None, rim_tips=None, safe=None):
         self.cols, self.rows = cols, rows
         self.P = palette or load_palette()
         self.detail = detail  # "full" (orb, mesh, envelope) or "mini" (header mark)
         self.expr = "calm"
         self.pose = None  # explicit transform dict (a blend between expressions); overrides EXPR[expr]
         self.seed = seed
+        self.safe = SAFE_GLYPHS if safe is None else safe
         self.octant = detail != "full"  # the mini mark needs the finer grid; the full face reads well in half-blocks
         w, h = (cols * 2, rows * 4) if self.octant else (cols, rows * 2)
         self.cx, self.cy = w / 2, h / 2
@@ -291,8 +339,8 @@ class Face:
             self.hw = self.hh = 0
             self.k = (h * (eye_h or 0.33)) / EYE_RY
         self.mins = {"erx": 3, "prx": 5.5, "pry": 2.6} if detail == "full" else {"erx": 3, "prx": 7, "pry": 2.4}
-        # the mini mark's min eye width crowds the pair, so it spreads them a little (1.3 = a one-cell gap; 1.45 = two)
-        self.spread = spread if spread is not None else (1.5 if detail == "full" else 1.3)
+        # 1.0 = the rig baseline (centres 2.1 eye-widths apart); see rig() for how a minimum eye width scales it
+        self.spread = spread if spread is not None else 1.0
         # mini look knobs: eye shape exponent (2 = true oval, 3 = blunt pill), min eye half-width in px,
         # background glow strength, and how much of the eye is the coloured rim vs the white core
         # mini defaults (S278, Mark: "more oval like in the face, more distinctive, less BG"): true
@@ -307,10 +355,23 @@ class Face:
         self.lids = not full
         self.fine_eyes = True   # anti-aliased octant-resolution eyes; False = the original stepped drawing
         self.rim_w = 1.0
+        # mini: a tighter glow and sharper edges, so the small mark reads crisp without bleeding into the void
+        self.halo, self.edge = (1.0, 0.8) if full else (0.45, 0.55)
         self.block = 1   # eye resolution step (sub-pixels): coarser for a less capable model
         self._eye_key, self._eye_cells = None, {}
+        self._eye_rough = False
+        self._glow = None
+        self.provider = None
         self._env_colours = {}
         self._mesh = self._build_mesh() if detail == "full" else ([], [])
+
+    def set_provider(self, provider):
+        if provider != self.provider:
+            self.provider, self._glow = provider, None
+
+    def _aura_ring(self):
+        """The provider's colours, muted toward the palette violet; () when the poles stand alone."""
+        return tuple(mix(c, self.P["violet"], PROVIDER_MUTE) for c in PROVIDER_AURA.get(self.provider, ()))
 
     # mesh nodes are fixed per instance; they shimmer, not move
     def _build_mesh(self):
@@ -356,14 +417,19 @@ class Face:
         k = self.k
         gx, gy = gaze
         out = {}
+        # rig baseline: eye centres 2.1 eye-widths apart. A minimum eye width (small marks) widens the
+        # eye, so the spacing and the portals widen with it instead of crowding
+        w0 = max(EYE_RX * k, self.mins["erx"]) / (EYE_RX * k)
         for side, name in ((-1, "L"), (1, "R")):
             ep, pp = e["e" + name], e["p" + name]
-            ex = self.cx + (side * EYE_X * self.spread + ep["dx"] + gx * 10) * k
+            ex = self.cx + side * EYE_X * self.spread * k * w0 + (ep["dx"] + gx * 10) * k
             ey = self.cy + (ep["dy"] + gy * 8) * k
             erx, ery = EYE_RX * ep["sx"] * k, EYE_RY * ep["sy"] * k
             por_y = self.cy + (side * POR_OFF + pp["dy"]) * k  # left portal above, right below
-            prx, pry = POR_RX * pp["sx"] * k, max(POR_RY * pp["sy"] * k, 1.2)
-            px_ = self.cx + (side * EYE_X * self.spread + pp["dx"] + gx * 4) * k
+            # portal width and flatten follow the eye's drawn width (rig baseline: 2.7 widths, 0.3 flat)
+            prx = POR_RX * pp["sx"] * k * w0
+            pry = max(prx * (POR_RY / POR_RX) * pp["sy"] / pp["sx"], 1.2)
+            px_ = self.cx + side * EYE_X * self.spread * k * w0 + (pp["dx"] + gx * 4) * k
             # blink: the eye sinks into its portal
             b = blink * 0.93
             anchor = por_y
@@ -381,38 +447,54 @@ class Face:
 
     def frame(self, t=0.0, blink=0.0, gaze=(0.0, 0.0)):
         P = self.P
-        cv = Canvas(self.cols, self.rows, P["bg"], octant=self.octant)
+        cv = Canvas(self.cols, self.rows, P["bg"], octant=self.octant, safe=self.safe)
         cx, cy, R = self.cx, self.cy, self.R
         rig = self.rig(t, blink, gaze, snap=not self.fine_eyes)
+        # the eye cells and the glow behind them depend only on the rig (1/3 px steps), which holds
+        # still between saccades and blinks: reuse both
+        lid = LIDS.get(self.expr) if self.lids else None
+        key = (tuple(round(v * 3) for name in sorted(rig) for v in rig[name][:4])
+               + tuple(round(rig[name][4] * 200) for name in sorted(rig)), lid, self.rim_w, self.block)
+        moved = key != self._eye_key
 
-        # aura: nebula inside the orb, glow under each eye
+        # aura: a halo around each eye, starting at its edge (never inside the orb or under the eye),
+        # tinted by the model's provider; none = the RaBbLE poles
+        ring = self._aura_ring()
+
         def aura(x, y, base):
-            d = math.hypot(x - cx, (y - cy)) / R
             c = base
-            if d < 1.15:
-                c = mix(c, P["violet"], 0.22 * self.aura_k * (1 - d / 1.15) ** 1.4)
-            for name, col in (("eL", P["cyan"]), ("eR", P["magenta"])):
+            for name, pole in (("eL", P["cyan"]), ("eR", P["magenta"])):
                 ex, ey, rx, ry, _ = rig[name]
-                de = math.hypot((x - ex) / (rx * 3.2 + 1), (y - ey) / (ry * 1.6 + 1))
-                if de < 1:
-                    c = mix(c, col, 0.16 * self.aura_k * (1 - de) ** 2)
+                dx, dy = x - ex, y - ey
+                u = math.hypot(dx / rx, dy / ry)          # 1 = the eye's edge
+                if u <= 1:
+                    continue
+                v = math.hypot(dx / (rx * 3.4), dy / (ry * 1.7))
+                if v >= 1:
+                    continue
+                col = pole if not ring else mix(pole, _ring_colour(ring, math.atan2(dy, dx)), 0.75)
+                c = mix(c, col, (0.34 if ring else 0.17) * self.aura_k * (1 - v) ** 1.6 * min(1.0, (u - 1) * 3))
             return c
 
-        cv.glow(aura)
+        if moved or self._glow is None:
+            cv.glow(aura)
+            self._glow = cv.bg
+        else:
+            cv.bg = self._glow   # read-only after the glow pass
 
         if self.detail == "full":
             self._envelope(cv, t)
             self._mesh_draw(cv, t)
         self._orb(cv, t)
         if self.fine_eyes:
-            lid = LIDS.get(self.expr) if self.lids else None
-            # the eye cells depend only on the rig (and the glow, which follows it), and the rig
-            # holds still between saccades and blinks: reuse them
-            key = (tuple(round(v * 3) for name in sorted(rig) for v in rig[name][:4])   # 1/3 px steps
-                   + tuple(round(rig[name][4] * 200) for name in sorted(rig)), lid, self.rim_w, self.block)
-            if key != self._eye_key:
+            if moved or self._eye_rough:
+                # while the eyes travel, skip the 2x2 edge supersampling (it is most of the cost); the
+                # first still frame repaints them clean
+                rough = moved
                 self._eye_cells = eyes.paint(cv, rig, self.P, _OCTANT, fine=1 if self.octant else 2, n=2.0,
-                                             lids={"L": lid, "R": lid} if lid else None, rim_w=self.rim_w, block=self.block)
+                                             lids={"L": lid, "R": lid} if lid else None, rim_w=self.rim_w,
+                                             block=self.block, supersample=not rough, safe=self.safe, halo=self.halo, edge=self.edge)
+                self._eye_rough = rough
                 self._eye_key = key
             cv.override.update(self._eye_cells)
         else:
@@ -644,14 +726,22 @@ def degrade(cells, brk, pal, rng, state, noise=0.0):
     #    loses colour depth (fewer steps per channel)
     drain, dim = noise * 0.7 + brk * 0.3, noise * 0.35 + brk * 0.2
     step = 1 + int(noise * 40)
+    memo = state.get("memo")
+    if memo is None or memo[0] != (drain, dim, step):   # the same few hundred colours repeat every frame
+        memo = state["memo"] = ((drain, dim, step), {})
+    seen = memo[1]
     for row in cells:
         new = []
         for ch, fg, back in row:
-            luma = round(0.3 * fg[0] + 0.59 * fg[1] + 0.11 * fg[2])
-            fg = mix(mix(fg, (luma, luma, luma), drain), bg, dim)
-            if step > 1:
-                fg = tuple(min(255, round(v / step) * step) for v in fg)
-            new.append((ch, fg, back))
+            d = seen.get(fg)
+            if d is None:
+                luma = round(0.3 * fg[0] + 0.59 * fg[1] + 0.11 * fg[2])
+                d = mix(mix(fg, (luma, luma, luma), drain), bg, dim)
+                if step > 1:
+                    d = tuple(min(255, round(v / step) * step) for v in d)
+                if len(seen) < 4096:
+                    seen[fg] = d
+            new.append((ch, d, back))
         out.append(new)
     # 2. bursts: a few rows tear sideways and split into magenta/cyan ghosts
     burst = state.get("burst")
@@ -722,6 +812,8 @@ class FaceWidget(Widget):
         self.noise = self.breaking = 0.0
         self._rng = random.Random(11)
         self._glitch = {}
+        self._busy = False
+        self.provider = None
 
     def set_signal(self, capability, stability):
         """The two inputs: the model's general capability (noise, resolution) and the session's
@@ -732,13 +824,21 @@ class FaceWidget(Widget):
         if self.breaking <= 0:
             self._glitch = {}
 
+    def set_provider(self, provider):
+        self.provider = provider
+        if self.face is not None:
+            self.face.set_provider(provider)
+
     def _make_face(self):
         if self.detail == "full":
             cols, rows = self.size
             if cols < 4 or rows < 2:
                 return None
-            return Face(cols, rows, self._pal, detail="full")
-        return Face(24, 6, self._pal, detail="mini")
+            face = Face(cols, rows, self._pal, detail="full")
+        else:
+            face = Face(24, 6, self._pal, detail="mini")
+        face.set_provider(self.provider)
+        return face
 
     def on_mount(self):
         self._timer = self.set_interval(1 / (FULL_FPS if self.detail == "full" else FPS), self._tick)
@@ -783,12 +883,30 @@ class FaceWidget(Widget):
         if self.face is None:
             self._cells = []
             return
+        if self._busy:   # the last frame is still computing: skip this tick, never queue behind it
+            return
         blink, gaze = self.life.step(t, dt)
         self.face.pose = self._pose()
         self.face.expr = self._expr_now()
-        self._cells = degrade(self.face.frame(t, blink, gaze).cells(), self.breaking,
-                              self._pal, self._rng, self._glitch, self.noise)
-        self.refresh()
+        face, brk, noise = self.face, self.breaking, self.noise
+        self._busy = True
+        # the frame costs 10-70 ms of pure Python: off the event loop, so typing and scrolling never wait on it
+        self.run_worker(lambda: self._compute(face, t, blink, gaze, brk, noise), thread=True, exclusive=False)
+
+    def _compute(self, face, t, blink, gaze, brk, noise):
+        try:
+            cells = degrade(face.frame(t, blink, gaze).cells(), brk, self._pal, self._rng, self._glitch, noise)
+            if face is self.face:
+                self._cells = cells
+                self.app.call_from_thread(self.refresh)
+        except Exception:
+            pass   # a mid-resize frame: the next tick rebuilds
+        finally:
+            self._busy = False
+
+    def _style(self, key, base):
+        fg, bg = key
+        return Style(color=Color.from_rgb(*fg), bgcolor=base.bgcolor if bg == self._bg else Color.from_rgb(*bg))
 
     def render_line(self, y):
         width = self.size.width
@@ -800,9 +918,15 @@ class FaceWidget(Widget):
         base = self.rich_style
         if y >= len(self._cells):
             return Strip.blank(width, base)
-        segs = [
-            Segment(ch, Style(color=Color.from_rgb(*fg),
-                              bgcolor=base.bgcolor if bg == self._bg else Color.from_rgb(*bg)))
-            for ch, fg, bg in self._cells[y]
-        ]
-        return Strip(segs, len(segs)).adjust_cell_length(width)
+        # merge runs of one style into a single segment: far fewer objects to build and emit
+        segs, run, last = [], [], None
+        for ch, fg, bg in self._cells[y]:
+            sk = (fg, bg)
+            if sk != last and run:
+                segs.append(Segment("".join(run), self._style(last, base)))
+                run = []
+            run.append(ch)
+            last = sk
+        if run:
+            segs.append(Segment("".join(run), self._style(last, base)))
+        return Strip(segs).adjust_cell_length(width)

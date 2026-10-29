@@ -253,7 +253,7 @@ async def test_header_shows_capability_tier_and_park_eta(tmp_path):
             made[0].emit(ev.Usage(1, None, pct))
         await until(pilot, lambda: app.header.park_eta is not None)
         plain = app.header.plain
-        assert "trusted 85" in plain and "code 88" in plain and "park in ~4" in plain
+        assert "trusted 85" in plain and "code ▰▰▰▰▰▱ 88" in plain and "park in ~4" in plain
 
 
 @pytest.mark.asyncio

@@ -2,7 +2,6 @@
 
 import json
 
-from rich.markup import escape
 from rich.text import Text
 from textual.widgets import Collapsible, Static
 
@@ -39,7 +38,9 @@ class ToolCard(Collapsible):
 
     def _label(self) -> str:
         done = f" → {_clip(self.result, 60)}" if self.result else ""
-        return escape(f"{self.prefix}{self.tool_name}  {self.line}{done}")
+        # the title is parsed as Textual markup, and neither rich's nor textual's escape() catches every
+        # bracket run (a printed list of Regions raised MarkupError and killed the pump): escape each "["
+        return f"{self.prefix}{self.tool_name}  {self.line}{done}".replace("[", "\\[")
 
     def set_result(self, ok: bool, summary: str) -> None:
         self.result = summary or ("ok" if ok else "failed")

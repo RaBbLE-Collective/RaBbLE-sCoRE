@@ -54,12 +54,13 @@ class _Shape:
             g = math.sqrt((a ** (n - 1) / self.rx * k) ** 2 + (b ** (n - 1) / self.ry * k) ** 2)
         return (f - 1) / max(g, 1e-6)
 
-    def edge_y(self, x, lower):
-        """y of the upper/lower edge at column x, None outside (small-rotation approximation)."""
-        u = (x - self.cx) / self.rx
+    def edge_y(self, x, lower, inset=0.0):
+        """y of the upper/lower edge at column x (pulled in by `inset`), None outside (small-rotation approximation)."""
+        rx, ry = max(self.rx - inset, 0.3), max(self.ry - inset, 0.3)
+        u = (x - self.cx) / rx
         if abs(u) >= 1:
             return None
-        off = self.ry * math.sqrt(1 - u * u)
+        off = ry * math.sqrt(1 - u * u)
         t = self.s / self.c if self.c else 0.0
         return self.cy + t * (x - self.cx) + (off if lower else -off)
 
@@ -67,7 +68,7 @@ class _Shape:
 class _Part:
     """One eye + its portal, with everything the sampler needs."""
 
-    def __init__(self, eye, portal, col, P, fine, n, lid, inner, rim_w):
+    def __init__(self, eye, portal, col, P, fine, n, lid, inner, rim_w, halo=1.0, edge=0.8):
         ex, ey, erx, ery = (v * fine for v in eye[:4])
         erot = eye[4]
         px, py, prx, pry = (v * fine for v in portal[:4])
@@ -77,6 +78,7 @@ class _Part:
         self.below = py > ey
         self.col, self.P = col, P
         self.lid, self.inner = lid, inner
+        self.halo, self.edge = halo, edge   # glow strength (0 = none) and edge anti-alias width in sub-pixels
         # rim widths from the SVG ratios (6 units of an 87-wide eye), never thinner than ~1 sub-pixel
         self.eye_rim = max(0.7, erx * 2 * 0.069) * rim_w
         self.por_rim = max(0.9, pry * 2 * 0.085)
@@ -92,10 +94,10 @@ class _Part:
         front = False
         if psd < 6:
             if psd > 0:
-                c = _over(c, col, 0.12 * math.exp(-psd / 1.2))
+                c = _over(c, col, 0.12 * self.halo * math.exp(-psd / (1.2 * max(self.halo, 0.05))))
             if psd <= 0:
                 c = _over(c, P["void"], _smooth(0.5 - psd))
-            core = _smooth(1.0 - (abs(psd) - self.por_rim / 2) / 0.8) if abs(psd) < self.por_rim / 2 + 0.8 else 0.0
+            core = _smooth(1.0 - (abs(psd) - self.por_rim / 2) / self.edge) if abs(psd) < self.por_rim / 2 + self.edge else 0.0
             if core > 0:
                 if self.below and y > por.cy + por.s / (por.c or 1) * (x - por.cx):
                     front = core
@@ -109,7 +111,7 @@ class _Part:
                 edge = por.edge_y(x, True)
                 visible = (y <= edge) if edge is not None else (y <= por.cy)
             else:
-                edge = por.edge_y(x, False)
+                edge = por.edge_y(x, False, self.por_rim / 2)   # rig clip: the eye stops at the rim's inner edge
                 visible = (y >= edge) if edge is not None else (y >= por.cy)
             if visible:
                 if self.lid:
@@ -118,14 +120,14 @@ class _Part:
                         visible = False
                 if visible:
                     if esd > 0:
-                        c = _over(c, col, 0.22 * math.exp(-esd / 1.0))   # halo / outer glow
+                        c = _over(c, col, 0.22 * self.halo * math.exp(-esd / max(self.halo, 0.05)))   # halo / outer glow
                     if esd <= 0:
                         depth = min(1.0, -esd / max(eye.rx, 1.0))
                         sclera = _over(P["text"], col, 0.10 * (1 - depth) ** 2)
                         c = _over(c, sclera, _smooth(0.5 - esd))
                     half = self.eye_rim / 2
-                    if abs(esd) < half + 0.8:
-                        c = _over(c, col, _smooth(1.0 - (abs(esd) - half) / 0.8))
+                    if abs(esd) < half + self.edge:
+                        c = _over(c, col, _smooth(1.0 - (abs(esd) - half) / self.edge))
                     if self.lid:
                         d = y - (eye.cy - eye.ry + self.lid[0] * eye.ry + self.lid[1] * (x - eye.cx) * self.inner)
                         if 0 <= d < 1.5:
@@ -135,8 +137,20 @@ class _Part:
         return c
 
 
-def _fit(subs, octant):
-    """8 sub-pixel colours (row-major 2x4) -> (glyph, fg, bg): two clusters around the most distant pair."""
+def _quads(subs):
+    """Fuse each vertical pair of the 2x4 sub-pixels to its mean, so the fit lands on quadrant glyphs only."""
+    out = list(subs)
+    for a in (0, 1, 4, 5):
+        m = tuple((subs[a][k] + subs[a + 2][k]) / 2 for k in range(3))
+        out[a] = out[a + 2] = m
+    return out
+
+
+def _fit(subs, octant, safe=False):
+    """8 sub-pixel colours (row-major 2x4) -> (glyph, fg, bg): two clusters around the most distant pair.
+    `safe` limits the glyphs to Block Elements quadrants (terminals without Legacy Computing octants)."""
+    if safe:
+        subs = _quads(subs)
     best, a, b = -1.0, subs[0], subs[0]
     for i in range(8):
         for j in range(i + 1, 8):
@@ -156,6 +170,9 @@ def _fit(subs, octant):
         else:
             fb.append(s)
     mean = lambda g: tuple(round(sum(s[k] for s in g) / len(g)) for k in range(3))
+    if best < 9000 and min(len(fa), len(fb)) <= 1:   # a lone faint sub-pixel (halo fringe) is a speck, not an edge
+        m = mean(subs)
+        return " ", m, m
     # the brighter cluster draws the glyph (foreground), the darker is the cell background
     ma, mb = mean(fa), mean(fb)
     if sum(ma) < sum(mb):
@@ -164,7 +181,7 @@ def _fit(subs, octant):
     return octant[ins], ma, mb
 
 
-def paint(canvas, rig, P, octant, fine, n=2.0, lids=None, inner=None, rim_w=1.0, block=1):
+def paint(canvas, rig, P, octant, fine, n=2.0, lids=None, inner=None, rim_w=1.0, block=1, supersample=True, safe=False, halo=1.0, edge=0.8):
     """Both eye/portal pairs as per-cell overrides: {(row, col): (glyph, fg, bg)}. Reads `canvas.bg`
     (the aura glow) but does not write to it, so a caller can cache the result per rig.
 
@@ -178,7 +195,7 @@ def paint(canvas, rig, P, octant, fine, n=2.0, lids=None, inner=None, rim_w=1.0,
     parts = []
     for side, col in (("L", P["cyan"]), ("R", P["magenta"])):
         parts.append(_Part(rig["e" + side], rig["p" + side], col, P, fine, n,
-                           (lids or {}).get(side), (inner or {"L": 1, "R": -1})[side], rim_w))
+                           (lids or {}).get(side), (inner or {"L": 1, "R": -1})[side], rim_w, halo, edge))
     x0 = min(p.box[0] for p in parts) - 5
     y0 = min(p.box[1] for p in parts) - 5
     x1 = max(p.box[2] for p in parts) + 5
@@ -207,12 +224,12 @@ def paint(canvas, rig, P, octant, fine, n=2.0, lids=None, inner=None, rim_w=1.0,
                 spread = 0
             else:
                 subs = [shade(c * 2 + i % 2 + 0.5, r * 4 + i // 2 + 0.5) for i in range(8)]
-                spread = max(abs(a[k] - b[k]) for a in subs for b in subs for k in range(3))
-            if spread > 40:  # an edge cell: supersample each sub-pixel 2x2
+                spread = max(max(s[k] for s in subs) - min(s[k] for s in subs) for k in range(3))
+            if supersample and spread > 40:  # an edge cell: supersample each sub-pixel 2x2
                 subs = [tuple(sum(shade(c * 2 + i % 2 + ox, r * 4 + i // 2 + oy)[k] for ox, oy in
                                   ((.25, .25), (.75, .25), (.25, .75), (.75, .75))) / 4 for k in range(3))
                         for i in range(8)]
-            ch, fg, bg = _fit(subs, octant)
+            ch, fg, bg = _fit(subs, octant, safe)
             if ch == " " and fg == base:
                 continue
             out[(r, c)] = (ch, fg, bg)

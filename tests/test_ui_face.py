@@ -1,7 +1,4 @@
 import asyncio
-import importlib.util
-from pathlib import Path
-
 import pytest
 
 pytest.importorskip("textual")  # RaBbLE-UI venv only; the server venv skips
@@ -9,25 +6,23 @@ from textual.app import App
 
 from ui import face as F
 
-PROTO = Path(__file__).resolve().parents[2] / "RaBbLE-BaBbLE/prototypes/terminal-face/face.py"
-
 
 def test_mini_shape():
     cells = F.Face(24, 6, detail="mini").frame(1.0).cells()
     assert len(cells) == 6 and all(len(r) == 24 for r in cells)
 
 
-@pytest.mark.skipif(not PROTO.exists(), reason="no prototype")
-@pytest.mark.parametrize("detail,size,expr", [("mini", (24, 6), "calm"), ("mini", (24, 6), "angry"),
-                                              ("full", (100, 30), "calm")])
-def test_port_matches_prototype(detail, size, expr):
-    spec = importlib.util.spec_from_file_location("proto_face", PROTO)
-    proto = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(proto)
-    a, b = F.Face(*size, detail=detail, spread=1.0 if detail == "full" else None), proto.Face(*size, detail=detail)   # full spreads its eyes wider now
-    a.expr = b.expr = expr
-    a.fine_eyes = False   # the port still matches the prototype's stepped drawing; fine eyes are new
-    assert a.frame(1.0, 0.3, (0.2, -0.1)).cells() == b.frame(1.0, 0.3, (0.2, -0.1)).cells()
+@pytest.mark.parametrize("detail,size", [("mini", (24, 6)), ("full", (100, 30)), ("full", (200, 55))])
+def test_rig_baseline(detail, size):
+    """Idle proportions from RaBbLE-NeBuLA/specs/rig/entity-rig.json `baseline`, in eye widths."""
+    r = F.Face(*size, detail=detail).rig(0, snap=False)
+    w = 2 * r["eL"][2]
+    assert (r["eR"][0] - r["eL"][0]) / w == pytest.approx(2.1, abs=0.05)
+    assert 2 * r["pL"][2] / w == pytest.approx(2.7, abs=0.05)
+    assert r["pL"][3] / r["pL"][2] == pytest.approx(0.3, abs=0.03)
+    assert abs(r["pL"][1] - r["eL"][1]) / r["eL"][3] == pytest.approx(0.93, abs=0.03)
+    assert r["pL"][1] < r["eL"][1] < r["pR"][1]   # left portal above its eye, right below
+    assert r["eL"][1] == r["eR"][1] and r["eL"][2:4] == r["eR"][2:4]   # level, equal
 
 
 def test_mood_mapping():
@@ -64,7 +59,7 @@ def test_widget_renders():
             w.set_mood("error")
             await pilot.pause(0.3)
             assert w._to_expr == "sad" and w._blend > 0.5
-            assert all(len(w.render_line(y)) == 24 for y in range(6))
+            assert all(w.render_line(y).cell_length == 24 for y in range(6))
             assert any(s.text.strip() for s in w.render_line(3))
     _run(go())
 
@@ -95,3 +90,27 @@ def test_no_color(monkeypatch):
             await pilot.pause(0.1)
             assert "RaBbLE" in "".join(s.text for s in w.render_line(3))
     _run(go())
+
+
+def test_provider_of():
+    assert F.provider_of("claude-opus-5-5") == "anthropic" and F.provider_of(None) == "anthropic"
+    assert F.provider_of("gemini-3-pro") == "google" and F.provider_of("gpt-6.1") == "openai"
+    assert F.provider_of("claude-opus-5-5", local=True) is None and F.provider_of("llama-4") is None
+
+
+def test_provider_aura_tints_outside_the_eyes_only():
+    plain = F.Face(100, 30, detail="full")
+    tinted = F.Face(100, 30, detail="full")
+    tinted.set_provider("anthropic")
+    a, b = plain.frame(0.0).bg, tinted.frame(0.0).bg
+    assert a != b                                                  # the provider tints the halo
+    ex, ey, rx, ry, _ = plain.rig(0.0, snap=False)["eL"]
+    assert a[int(ey // 2)][int(ex)] == b[int(ey // 2)][int(ex)]   # the eye's own cells carry no aura
+
+
+def test_safe_glyphs_stay_in_block_elements():
+    for detail, size in (("mini", (24, 6)), ("full", (100, 30))):
+        cells = F.Face(*size, detail=detail, safe=True).frame(0.5, 0.0, (0.3, 0.1)).cells()
+        odd = {ch for row in cells for ch, _, _ in row
+               if not (ch == " " or 0x2580 <= ord(ch) <= 0x259F or 0x2800 <= ord(ch) <= 0x28FF)}
+        assert not odd, odd

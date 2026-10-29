@@ -10,6 +10,10 @@ orchestra/capabilities.json, and writes orchestra/capabilities.lock, the publish
       trusted >= 60 stay meaningful, and the lock records which reference each number was scaled against.
   absolute mode: score / benchmark max * 100, numbers stay put as the frontier saturates.
 
+  elo benchmarks (`"kind": "elo"`, arena ratings): a ratio of ratings says nothing (1400 vs 1500 is 93%), so a model
+      is scored by its expected result against the frontier, 2 / (1 + 10^(gap/400)): parity 1.0, 200 below 0.48.
+      The reference is the whole table's best rating (`"reference"` on the benchmark), not just the models listed.
+
 A category's score is the weighted mean of its benchmarks. A category with no rows is inferred from the
 model's other categories and says so (`inferred`). Models with no rows keep their estimate untouched.
 
@@ -48,7 +52,7 @@ def normalise(data: dict) -> tuple[dict[str, dict], dict]:
         if not r.get("source"):
             raise ValueError(f"result {r['model']}/{r['benchmark']} has no source: every number must be traceable")
         rows.setdefault(r["model"], []).append(r)
-    best = {}
+    best = {b: float(spec["reference"]) for b, spec in bench.items() if spec.get("reference") is not None}
     for model_rows in rows.values():
         for r in model_rows:
             best[r["benchmark"]] = max(best.get(r["benchmark"], 0.0), float(r["score"]))
@@ -56,6 +60,9 @@ def normalise(data: dict) -> tuple[dict[str, dict], dict]:
 
     def norm(r: dict) -> float:
         b = bench[r["benchmark"]]
+        if b.get("kind") == "elo":
+            gap = best[r["benchmark"]] - float(r["score"])
+            return 2 / (1 + 10 ** (gap / 400)) * (scale["frontier_at"] if scale["mode"] == "frontier" else 100)
         if scale["mode"] == "frontier":
             return float(r["score"]) / best[r["benchmark"]] * scale["frontier_at"] if best[r["benchmark"]] else 0.0
         return float(r["score"]) / float(b.get("max", 100)) * 100
@@ -71,6 +78,7 @@ def normalise(data: dict) -> tuple[dict[str, dict], dict]:
         inferred = [c for c in caps.CATEGORIES if c not in got]
         m = models[key]
         out[key] = {"key": key, "match": m.get("match", [key]), "local": bool(m.get("local", False)),
+                    **{k: m[k] for k in ("family", "version") if k in m},
                     **{c: _num(got.get(c, mean)) for c in caps.CATEGORIES},
                     "source": f"benchmarks, scale {scale['mode']} {scale['reference']}",
                     **({"inferred": inferred} if inferred else {}),

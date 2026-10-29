@@ -95,3 +95,19 @@ def test_cli_writes_registry_and_lock_and_check_writes_nothing(tmp_path, capsys)
     src.write_text(json.dumps(empty)); before = reg.read_text()
     assert ingest.main(args) == 0 and [m["key"] for m in json.loads(reg.read_text())["models"]] == \
         [m["key"] for m in json.loads(before)["models"]]
+
+
+def test_versions_are_separate_and_unlisted_falls_back(tmp_path):
+    import json
+    p = tmp_path / "c.json"
+    p.write_text(json.dumps({"models": [
+        {"key": "opus", "match": ["opus"], "general": 50, "coding": 50, "tools": 50, "recall": 50},
+        {"key": "opus-5.5", "family": "opus", "version": "5.5", "match": [], "general": 92, "coding": 95, "tools": 90, "recall": 95},
+        {"key": "opus-4.6", "family": "opus", "version": "4.6", "match": [], "general": 80, "coding": 85, "tools": 80, "recall": 85}],
+        "default": {"general": 50}}))
+    r = caps.Registry(shipped=p, user=tmp_path / "none.json")
+    new, old, other = r.lookup("claude-opus-5-5"), r.lookup("claude-opus-4-6"), r.lookup("claude-opus-4-7")
+    assert (new.general, new.exact, new.version) == (92, True, "5.5")
+    assert (old.general, old.exact) == (80, True)
+    assert (other.general, other.exact, other.version) == (50, False, "4.7")   # unlisted: the family estimate, labelled
+    assert caps.parse_model("claude-3-5-sonnet-20241022") == ("sonnet", "3.5")

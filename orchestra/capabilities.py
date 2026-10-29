@@ -10,7 +10,8 @@ Pure data: no SDK, no UI.
 
 import json
 import os
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 CATEGORIES = ("general", "coding", "tools", "recall")
@@ -18,6 +19,27 @@ TRUSTED_AT, STANDARD_AT = 60, 40   # capability -> trust tier
 STRONG_AT, MEDIUM_AT = 65, 40      # general capability -> tier (drops from one to a lower one cost entropy)
 
 _SHIPPED = Path(__file__).with_name("capabilities.json")
+
+
+_NEW = re.compile(r"(opus|sonnet|haiku|fable)-(\d{1,2})(?:[-.](\d{1,2}))?(?!\d)")        # claude-opus-5-5, claude-opus-4-5-20251101
+_OLD = re.compile(r"claude-(\d{1,2})(?:-(\d{1,2}))?-(opus|sonnet|haiku)")   # claude-3-5-sonnet-20241022
+_GPT = re.compile(r"gpt-(\d+)(?:\.(\d+))?(?![\d.])")
+
+
+def parse_model(name: str | None) -> tuple[str | None, str | None]:
+    """(family, version) from a model id: claude-opus-5-5 -> (opus, 5.5), claude-opus-4-20250514 -> (opus, 4),
+    claude-3-5-sonnet-20241022 -> (sonnet, 3.5), gpt-6.1 -> (gpt, 6.1). (None, None) when it is not a known pattern."""
+    n = (name or "").lower().replace("_", "-")
+    if m := _NEW.search(n):
+        fam, major, minor = m.groups()
+    elif m := _OLD.search(n):
+        major, minor, fam = m.groups()
+    elif m := _GPT.search(n):
+        major, minor = m.groups()
+        fam = "gpt"
+    else:
+        return None, None
+    return fam, major + (f".{minor}" if minor is not None else "")
 
 
 @dataclass(frozen=True)
@@ -29,6 +51,9 @@ class Capability:
     recall: int
     local: bool = False
     source: str = "estimate"
+    family: str | None = None
+    version: str | None = None   # "5.5"; set on a versioned entry, or on a family fallback to say which version was asked for
+    exact: bool = False          # True when this very version is in the registry; False = the family's estimate stands in
 
     def get(self, category: str) -> int:
         return getattr(self, category)
@@ -63,7 +88,8 @@ def _build(raw: dict) -> Capability:
         except (TypeError, ValueError):
             return 25
     return Capability(str(raw.get("key", "unknown")), num("general"), num("coding"), num("tools"), num("recall"),
-                      raw.get("local") is True, str(raw.get("source", "estimate")))
+                      raw.get("local") is True, str(raw.get("source", "estimate")),
+                      raw.get("family"), None if raw.get("version") is None else str(raw["version"]), raw.get("version") is not None)
 
 
 class Registry:
@@ -83,7 +109,10 @@ class Registry:
                 models.insert(0, _entry(m))
         if isinstance(extra.get("unknown"), dict):
             unknown = _entry(extra["unknown"], unknown)
-        self._models = [(tuple(str(f).lower() for f in m.get("match", [m.get("key", "")])), _build(m)) for m in models]
+        # a versioned entry (family + version) is found by parse_model, never by name fragment, so opus 5.5 can't answer for opus 4.6
+        self._exact = {(str(m["family"]).lower(), str(m["version"])): _build(m) for m in models if m.get("family") and m.get("version") is not None}
+        self._models = [(tuple(str(f).lower() for f in m.get("match", [m.get("key", "")])), _build(m))
+                        for m in models if not (m.get("family") and m.get("version") is not None)]
         self._unknown = _build(unknown)
         default = dict(base.get("default", unknown))
         if isinstance(extra.get("default"), dict):
@@ -94,9 +123,13 @@ class Registry:
         name = (model or "").lower()
         if name in ("", "default"):
             return self._default   # Claude Code's own pick: unknown until the session reports it
+        family, version = parse_model(name)
+        if (family, version) in self._exact:
+            return self._exact[(family, version)]
         for fragments, cap in self._models:
             if any(f and f in name for f in fragments):
-                return cap
+                # the family's estimate stands in for a version the registry doesn't list: say which was asked for
+                return replace(cap, version=version, exact=False) if version and cap.family is None and family == cap.key else cap
         return self._unknown
 
 
