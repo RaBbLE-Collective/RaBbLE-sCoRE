@@ -15,5 +15,7 @@ path = "src/main.rs"
 [dependencies]
 rabble-proto = { path = "../rabble-proto" }
 serde_json.workspace = true
+rabble-theme = { path = "../rabble-theme" }
+unicode-width = "0.2"
 ratatui.workspace = true
 crossterm.workspace = true

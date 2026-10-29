@@ -327,8 +327,10 @@ version = "0.0.0"
 dependencies = [
  "crossterm",
  "rabble-proto",
+ "rabble-theme",
  "ratatui",
  "serde_json",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]

@@ -1,0 +1,162 @@
+//! Styles and glyphs for the shell. Colour comes only from `rabble_theme::Palette` (no hex here);
+//! `NO_COLOR` turns every colour off and keeps the modifiers; `TERM_PROGRAM=vscode` (whose
+//! terminal draws some box and block glyphs badly) gets plain safe glyphs.
+
+use rabble_theme::{Palette, Rgb};
+use ratatui::style::{Color, Modifier, Style};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Glyphs {
+    pub rule: char,
+    pub bullet: &'static str,
+    pub prompt: &'static str,
+    pub arrow: &'static str,
+    pub ellipsis: &'static str,
+    pub open: &'static str,
+    pub shut: &'static str,
+    pub quote: &'static str,
+    pub corner: [char; 4], // tl tr bl br
+    pub vert: char,
+}
+
+impl Glyphs {
+    pub const FANCY: Glyphs = Glyphs { rule: '─', bullet: "•", prompt: "›", arrow: "→", ellipsis: "…", open: "▾", shut: "▸", quote: "▎", corner: ['╭', '╮', '╰', '╯'], vert: '│' };
+    pub const SAFE: Glyphs = Glyphs { rule: '-', bullet: "*", prompt: ">", arrow: "->", ellipsis: "...", open: "v", shut: ">", quote: "|", corner: ['+', '+', '+', '+'], vert: '|' };
+    pub fn for_env(term_program: Option<&str>) -> Glyphs {
+        if term_program == Some("vscode") { Glyphs::SAFE } else { Glyphs::FANCY }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Theme {
+    pub color: bool,
+    pub glyphs: Glyphs,
+    pub text: Style,
+    pub muted: Style,
+    pub accent: Style,    // primary identity colour
+    pub secondary: Style, // cyan
+    pub tertiary: Style,  // violet
+    pub error: Style,
+    pub ok: Style,
+    pub warn: Style,
+    pub code: Style,
+    pub user: Style,
+    pub heading: Style,
+    pub border: Style,
+    pub modal: Style,
+    pub select: Style,
+    organs: Vec<Style>,
+}
+
+fn c(r: Rgb) -> Color {
+    Color::Rgb(r.0, r.1, r.2)
+}
+
+impl Theme {
+    /// Colours from the palette, honouring NO_COLOR and TERM_PROGRAM.
+    pub fn new(p: Option<&Palette>, no_color: bool, glyphs: Glyphs) -> Theme {
+        let colour = p.is_some() && !no_color;
+        let fg = |name: &str| match p.and_then(|p| p.get(name)) {
+            Some(r) if colour => Style::new().fg(c(r)),
+            _ => Style::new(),
+        };
+        let both = |f: &str, b: &str| match (p.and_then(|p| p.get(f)), p.and_then(|p| p.get(b))) {
+            (Some(f), Some(b)) if colour => Style::new().fg(c(f)).bg(c(b)),
+            _ => Style::new(),
+        };
+        let bold = Modifier::BOLD;
+        let mut t = Theme {
+            color: colour,
+            glyphs,
+            text: fg("text"),
+            muted: fg("muted"),
+            accent: fg("magenta"),
+            secondary: fg("cyan"),
+            tertiary: fg("violet"),
+            error: fg("red").add_modifier(bold),
+            ok: fg("green"),
+            warn: fg("yellow"),
+            code: both("cyan", "surface"),
+            user: fg("pink"),
+            heading: fg("cyan").add_modifier(bold),
+            border: fg("border"),
+            modal: both("text", "raised"),
+            select: Style::new().add_modifier(Modifier::REVERSED),
+            organs: ["cyan", "violet", "pink", "green", "yellow"].iter().map(|n| fg(n)).collect(),
+        };
+        if !colour {
+            // without colour, errors and headings still need to stand apart
+            t.error = Style::new().add_modifier(bold | Modifier::UNDERLINED);
+            t.heading = Style::new().add_modifier(bold);
+            t.code = Style::new().add_modifier(Modifier::DIM);
+            t.muted = Style::new().add_modifier(Modifier::DIM);
+            t.user = Style::new().add_modifier(bold);
+        }
+        t
+    }
+
+    pub fn from_env() -> Theme {
+        let p = Palette::discover().ok();
+        let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
+        Theme::new(p.as_ref(), no_color, Glyphs::for_env(std::env::var("TERM_PROGRAM").ok().as_deref()))
+    }
+
+    /// The lead ("rabble") reads as plain text; each organ gets a stable accent from the palette.
+    pub fn organ(&self, organ: &str) -> Style {
+        if organ == "rabble" || organ.is_empty() {
+            return self.text;
+        }
+        let h = organ.bytes().fold(7usize, |a, b| a.wrapping_mul(31).wrapping_add(b as usize));
+        self.organs[h % self.organs.len()]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pal() -> Palette {
+        Palette::parse("  bg: \"#000001\"\n  surface: \"#000002\"\n  text: \"#000003\"\n  muted: \"#000004\"\n  magenta: \"#000005\"\n  cyan: \"#000006\"\n  violet: \"#000007\"\n  pink: \"#000008\"\n")
+    }
+
+    #[test]
+    fn colour_comes_from_the_palette() {
+        let t = Theme::new(Some(&pal()), false, Glyphs::FANCY);
+        assert_eq!(t.accent.fg, Some(Color::Rgb(0, 0, 5)));
+        assert!(t.color);
+    }
+
+    #[test]
+    fn no_color_drops_every_colour_but_keeps_emphasis() {
+        let t = Theme::new(Some(&pal()), true, Glyphs::FANCY);
+        for s in [t.text, t.muted, t.accent, t.secondary, t.error, t.code, t.heading, t.user, t.modal, t.organ("gobble")] {
+            assert_eq!((s.fg, s.bg), (None, None));
+        }
+        assert!(t.error.add_modifier.contains(Modifier::BOLD | Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn a_missing_palette_degrades_to_plain() {
+        let t = Theme::new(None, false, Glyphs::FANCY);
+        assert!(!t.color && t.accent.fg.is_none());
+    }
+
+    #[test]
+    fn vscode_gets_safe_glyphs() {
+        assert_eq!(Glyphs::for_env(Some("vscode")), Glyphs::SAFE);
+        assert_eq!(Glyphs::for_env(Some("kitty")), Glyphs::FANCY);
+        assert!(Glyphs::SAFE.rule.is_ascii() && Glyphs::SAFE.corner.iter().all(|c| c.is_ascii()));
+    }
+
+    #[test]
+    fn no_hex_literals_in_this_crate() {
+        let re_hex = |s: &str| s.as_bytes().windows(7).any(|w| w[0] == b'#' && w[1..].iter().all(u8::is_ascii_hexdigit));
+        for f in ["app.rs", "theme.rs", "markdown.rs", "wrap.rs", "run.rs", "widgets/transcript.rs", "widgets/composer.rs", "widgets/header.rs", "widgets/modal.rs"] {
+            let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join(f);
+            if let Ok(src) = std::fs::read_to_string(&p) {
+                let src = src.split("#[cfg(test)]").next().unwrap();
+                assert!(!re_hex(src), "{f}");
+            }
+        }
+    }
+}

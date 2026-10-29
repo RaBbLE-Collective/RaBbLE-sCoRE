@@ -1,0 +1,605 @@
+//! The conversation: user lines, replies (Markdown), tool cards, notices. Entries cache their
+//! wrapped lines per width, so a frame only re-renders what changed; painting a frame copies the
+//! visible window (a binary search over entry starts), so wheel cost does not grow with history.
+//!
+//! Scroll: 1:1 (a notch moves `WHEEL_LINES` at once, no easing). Stuck to the bottom while the
+//! reader is within `SLACK` lines of it; a reader who scrolled further up is left alone. Blur
+//! remembers the pin, refocus restores it and ignores a jump to the top for `REFOCUS_GUARD`
+//! (terminals have been seen to deliver stray scroll-to-top around a focus change).
+
+use std::time::{Duration, Instant};
+
+use ratatui::{buffer::Buffer, layout::Rect, style::Style, text::{Line, Span}, widgets::Widget};
+
+use crate::{markdown, theme::Theme, wrap::{self, str_width}};
+
+pub const WHEEL_LINES: usize = 3;
+pub const SLACK: usize = 3; // follow while the distance from the bottom is < SLACK lines
+pub const REFOCUS_GUARD: Duration = Duration::from_millis(400);
+const TITLE_MAX: usize = 100;
+const RESULT_MAX: usize = 60;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Item {
+    User(String),
+    Reply { organ: String, text: String, streaming: bool },
+    Tool { id: String, organ: String, name: String, line: String, input: String, result: Option<(bool, String)> },
+    Notice { text: String, error: bool },
+    Thinking,
+}
+
+struct Entry {
+    item: Item,
+    lines: Vec<Line<'static>>,
+    start: usize,
+    dirty: bool,
+}
+
+pub struct Transcript {
+    entries: Vec<Entry>,
+    width: u16,
+    total: usize,
+    max: usize,
+    stale: bool,
+    pub offset: usize,
+    pub follow: bool,
+    pub expanded: bool,
+    blurred: Option<bool>,
+    guard_until: Option<(Instant, bool)>,
+    pub view_h: u16,
+}
+
+pub fn one_line(data: &serde_json::Map<String, serde_json::Value>) -> String {
+    for k in ["command", "file_path", "path", "pattern", "description", "url", "query"] {
+        if let Some(v) = data.get(k) {
+            let s = match v {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            if !s.is_empty() {
+                return s.split_whitespace().collect::<Vec<_>>().join(" ");
+            }
+        }
+    }
+    if data.is_empty() {
+        return String::new();
+    }
+    serde_json::Value::Object(data.clone()).to_string().split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn clip(s: &str, n: usize, ell: &str) -> String {
+    if s.chars().count() <= n { s.to_owned() } else { format!("{}{ell}", s.chars().take(n.saturating_sub(1)).collect::<String>()) }
+}
+
+/// Cut to a display width (single line).
+fn fit(s: &str, w: usize, ell: &str) -> String {
+    if str_width(s) <= w {
+        return s.to_owned();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for c in s.chars() {
+        let cw = wrap::cw(c);
+        if used + cw + str_width(ell) > w {
+            break;
+        }
+        out.push(c);
+        used += cw;
+    }
+    out + ell
+}
+
+impl Default for Transcript {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Transcript {
+    pub fn new() -> Self {
+        Transcript { entries: Vec::new(), width: 0, total: 0, max: 0, stale: true, offset: 0, follow: true, expanded: false, blurred: None, guard_until: None, view_h: 0 }
+    }
+
+    fn push(&mut self, item: Item) {
+        self.entries.push(Entry { item, lines: Vec::new(), start: 0, dirty: true });
+        self.stale = true;
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+    pub fn items(&self) -> impl Iterator<Item = &Item> {
+        self.entries.iter().map(|e| &e.item)
+    }
+    pub fn total_lines(&self) -> usize {
+        self.total
+    }
+    pub fn max_scroll(&self) -> usize {
+        self.max
+    }
+
+    // content ------------------------------------------------------------------------------
+    pub fn user(&mut self, text: &str) {
+        self.drop_transient();
+        self.end_stream();
+        self.push(Item::User(text.to_owned()));
+        self.follow = true; // sending jumps to the bottom
+    }
+
+    pub fn end_stream(&mut self) {
+        if let Some(Entry { item: Item::Reply { streaming, .. }, dirty, .. }) = self.entries.last_mut() {
+            if *streaming {
+                *streaming = false;
+                *dirty = true;
+                self.stale = true;
+            }
+        }
+    }
+
+    pub fn delta(&mut self, organ: &str, text: &str) {
+        self.drop_transient();
+        if let Some(Entry { item: Item::Reply { organ: o, text: t, streaming: true }, dirty, .. }) = self.entries.last_mut() {
+            if o == organ {
+                t.push_str(text);
+                *dirty = true;
+                self.stale = true;
+                return;
+            }
+        }
+        self.end_stream();
+        self.push(Item::Reply { organ: organ.into(), text: text.into(), streaming: true });
+    }
+
+    /// The finished block replaces what streamed for it (text is drawn once).
+    pub fn block(&mut self, organ: &str, text: &str) {
+        self.drop_transient();
+        if let Some(Entry { item: Item::Reply { organ: o, text: t, streaming }, dirty, .. }) = self.entries.last_mut() {
+            if o == organ && *streaming {
+                *t = text.to_owned();
+                *streaming = false;
+                *dirty = true;
+                self.stale = true;
+                return;
+            }
+        }
+        self.push(Item::Reply { organ: organ.into(), text: text.into(), streaming: false });
+    }
+
+    pub fn thinking(&mut self) {
+        if !self.entries.last().is_some_and(|e| e.item == Item::Thinking) {
+            self.push(Item::Thinking);
+        }
+    }
+
+    /// Remove the "thinking" placeholder (anything transient).
+    pub fn drop_transient(&mut self) {
+        if self.entries.last().is_some_and(|e| e.item == Item::Thinking) {
+            self.entries.pop();
+            self.stale = true;
+        }
+    }
+
+    pub fn tool_call(&mut self, organ: &str, id: &str, name: &str, input: &serde_json::Map<String, serde_json::Value>) {
+        self.drop_transient();
+        self.end_stream();
+        let pretty = serde_json::to_string_pretty(input).unwrap_or_default();
+        self.push(Item::Tool { id: id.into(), organ: organ.into(), name: name.into(), line: clip(&one_line(input), TITLE_MAX, "…"), input: pretty, result: None });
+    }
+
+    pub fn tool_result(&mut self, id: &str, ok: bool, summary: &str) {
+        for e in self.entries.iter_mut().rev() {
+            if let Item::Tool { id: i, result, .. } = &mut e.item {
+                if i == id {
+                    *result = Some((ok, if summary.is_empty() { if ok { "ok".into() } else { "failed".into() } } else { summary.to_owned() }));
+                    e.dirty = true;
+                    self.stale = true;
+                    return;
+                }
+            }
+        }
+    }
+
+    pub fn notice(&mut self, text: &str, error: bool) {
+        self.drop_transient();
+        self.end_stream();
+        self.push(Item::Notice { text: text.to_owned(), error });
+    }
+
+    pub fn end_turn(&mut self) {
+        self.drop_transient();
+        self.end_stream();
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        (self.offset, self.follow, self.stale) = (0, true, true);
+    }
+
+    pub fn last_reply(&self) -> Option<&str> {
+        self.entries.iter().rev().find_map(|e| match &e.item {
+            Item::Reply { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+    }
+
+    pub fn toggle_cards(&mut self) {
+        self.expanded = !self.expanded;
+        for e in &mut self.entries {
+            if matches!(e.item, Item::Tool { .. }) {
+                e.dirty = true;
+            }
+        }
+        self.stale = true;
+    }
+
+    // scroll -------------------------------------------------------------------------------
+    fn scroll_blocked(&self, to_top: bool) -> bool {
+        if self.blurred == Some(true) {
+            return true; // blurred while pinned: nothing the reader did, keep the pin
+        }
+        to_top && self.guard_until.is_some_and(|(t, pinned)| pinned && t.elapsed() < REFOCUS_GUARD)
+    }
+
+    /// Positive = down. The result lands this call (1:1).
+    pub fn scroll_by(&mut self, lines: i64) {
+        if self.scroll_blocked(lines < 0 && self.offset <= lines.unsigned_abs() as usize) {
+            return;
+        }
+        let at = self.offset.min(self.max) as i64 + lines;
+        self.offset = at.clamp(0, self.max as i64) as usize;
+        self.follow = self.offset >= self.max;
+    }
+
+    pub fn wheel(&mut self, down: bool) {
+        self.scroll_by(if down { WHEEL_LINES as i64 } else { -(WHEEL_LINES as i64) });
+    }
+
+    pub fn page(&mut self, down: bool) {
+        let p = (self.view_h as i64 - 2).max(1);
+        self.scroll_by(if down { p } else { -p });
+    }
+
+    pub fn jump_top(&mut self) {
+        if self.scroll_blocked(true) {
+            return;
+        }
+        (self.offset, self.follow) = (0, self.max == 0);
+    }
+
+    pub fn jump_bottom(&mut self) {
+        (self.offset, self.follow) = (self.max, true);
+    }
+
+    pub fn pinned(&self) -> bool {
+        self.follow || self.max.saturating_sub(self.offset) < SLACK
+    }
+
+    pub fn blur(&mut self) {
+        self.blurred = Some(self.pinned());
+    }
+
+    pub fn refocus(&mut self) {
+        if let Some(pinned) = self.blurred.take() {
+            if pinned {
+                self.follow = true;
+            }
+            self.guard_until = Some((Instant::now(), pinned));
+        }
+    }
+
+    // layout and paint -----------------------------------------------------------------------
+    fn render_entry(item: &Item, th: &Theme, w: usize, expanded: bool) -> Vec<Line<'static>> {
+        let g = th.glyphs;
+        match item {
+            Item::User(t) => {
+                let first = [Span::styled(format!("{} ", g.prompt), th.user)];
+                let rest = [Span::raw("  ")];
+                let mut v = wrap::wrap(&markdown::inline(&t.replace('\n', " ⏎ "), th.user, th), w, &first, &rest);
+                v.push(Line::default());
+                v
+            }
+            Item::Reply { organ, text, .. } => {
+                let mut v = markdown::render(text, th, w);
+                if organ != "rabble" && !organ.is_empty() {
+                    v.insert(0, Line::from(Span::styled(format!("{organ} {}", g.bullet), th.organ(organ))));
+                }
+                if v.is_empty() {
+                    v.push(Line::default());
+                }
+                v.push(Line::default());
+                v
+            }
+            Item::Thinking => vec![Line::from(Span::styled(format!("{}{}", "thinking", g.ellipsis), th.muted))],
+            Item::Notice { text, error } => {
+                let st = if *error { th.error } else { th.muted };
+                let first = [Span::styled(format!("{} ", g.bullet), st)];
+                let rest = [Span::raw("  ")];
+                text.split('\n').flat_map(|l| wrap::wrap(&[Span::styled(l.to_owned(), st)], w, &first, &rest)).collect()
+            }
+            Item::Tool { organ, name, line, input, result, .. } => {
+                let label = if organ == "rabble" || organ.is_empty() { String::new() } else { format!("{organ}: ") };
+                let (rst, rtxt) = match result {
+                    Some((true, s)) => (th.muted, format!(" {} {}", g.arrow, clip(s, RESULT_MAX, g.ellipsis))),
+                    Some((false, s)) => (th.error, format!(" {} {}", g.arrow, clip(s, RESULT_MAX, g.ellipsis))),
+                    None => (th.muted, String::new()),
+                };
+                let mark = if expanded { g.open } else { g.shut };
+                let head = format!("  {mark} {label}{name}  {line}{rtxt}");
+                let mut v = vec![Line::from(vec![
+                    Span::styled(format!("  {mark} "), th.muted),
+                    Span::styled(label, th.organ(organ)),
+                    Span::styled(name.clone(), th.secondary),
+                    Span::styled(format!("  {line}"), th.muted),
+                    Span::styled(rtxt, rst),
+                ])];
+                if !expanded {
+                    // one row: clip to the width
+                    let cut = fit(&head, w, g.ellipsis);
+                    if cut != head {
+                        let st = v[0].spans.iter().map(|s| s.style).next().unwrap_or(Style::new());
+                        v[0] = Line::from(Span::styled(cut, st));
+                    }
+                } else {
+                    for l in input.lines() {
+                        v.extend(wrap::wrap(&[Span::styled(l.to_owned(), th.muted)], w, &[Span::raw("      ")], &[Span::raw("        ")]));
+                    }
+                    if let Some((ok, s)) = result {
+                        for l in s.lines() {
+                            v.extend(wrap::wrap(&[Span::styled(l.to_owned(), if *ok { th.text } else { th.error })], w, &[Span::raw("    ")], &[Span::raw("    ")]));
+                        }
+                    }
+                }
+                v
+            }
+        }
+    }
+
+    /// Bring cached lines up to date for this width and height; apply the follow rules.
+    pub fn layout(&mut self, th: &Theme, width: u16, height: u16) {
+        let w = width.max(1) as usize;
+        if width != self.width {
+            self.width = width;
+            self.stale = true;
+            for e in &mut self.entries {
+                e.dirty = true;
+            }
+        }
+        self.view_h = height;
+        if !self.stale && self.max == self.total.saturating_sub(height as usize) {
+            return;
+        }
+        let ex = self.expanded;
+        let mut start = 0;
+        for e in &mut self.entries {
+            if e.dirty {
+                e.lines = Self::render_entry(&e.item, th, w, ex);
+                e.dirty = false;
+            }
+            e.start = start;
+            start += e.lines.len();
+        }
+        self.total = start;
+        self.stale = false;
+        let new_max = self.total.saturating_sub(height as usize);
+        let prev_max = self.max;
+        if self.follow {
+            self.offset = new_max;
+        } else if new_max > prev_max && prev_max.saturating_sub(self.offset) < SLACK {
+            self.follow = true;
+            self.offset = new_max;
+        } else {
+            self.offset = self.offset.min(new_max);
+        }
+        self.max = new_max;
+    }
+
+    pub fn draw(&self, area: Rect, buf: &mut Buffer) {
+        if self.entries.is_empty() {
+            return;
+        }
+        let top = self.offset.min(self.max);
+        let first = self.entries.partition_point(|e| e.start <= top).saturating_sub(1);
+        let mut y = 0u16;
+        'outer: for e in &self.entries[first..] {
+            let skip = top.saturating_sub(e.start);
+            for l in e.lines.iter().skip(skip) {
+                if y >= area.height {
+                    break 'outer;
+                }
+                buf.set_line(area.x, area.y + y, l, area.width);
+                y += 1;
+            }
+        }
+    }
+}
+
+pub struct View<'a>(pub &'a Transcript);
+
+impl Widget for View<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        self.0.draw(area, buf)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theme::Glyphs;
+
+    fn th() -> Theme {
+        Theme::new(None, true, Glyphs::SAFE)
+    }
+    fn long() -> String {
+        (0..120).map(|i| format!("paragraph {i} with some `code` text")).collect::<Vec<_>>().join("\n\n")
+    }
+    fn filled() -> Transcript {
+        let mut t = Transcript::new();
+        t.user("hi");
+        t.delta("rabble", &long());
+        t.layout(&th(), 80, 24);
+        assert!(t.max_scroll() > 50 && t.offset == t.max_scroll());
+        t
+    }
+    fn at_bottom(t: &Transcript) -> bool {
+        t.max_scroll() - t.offset <= 1
+    }
+    fn paint(t: &mut Transcript, w: u16, h: u16) -> Vec<String> {
+        t.layout(&th(), w, h);
+        let mut b = Buffer::empty(Rect::new(0, 0, w, h));
+        t.draw(Rect::new(0, 0, w, h), &mut b);
+        (0..h).map(|y| (0..w).map(|x| b[(x, y)].symbol().to_owned()).collect::<String>().trim_end().to_owned()).collect()
+    }
+
+    #[test]
+    fn text_is_drawn_once_when_the_block_follows_its_deltas() {
+        let mut t = Transcript::new();
+        t.delta("rabble", "Hel");
+        t.delta("rabble", "lo");
+        t.block("rabble", "Hello");
+        assert_eq!(t.items().filter(|i| matches!(i, Item::Reply { .. })).count(), 1);
+        assert_eq!(t.last_reply(), Some("Hello"));
+        let rows = paint(&mut t, 20, 4);
+        assert_eq!(rows.iter().filter(|r| r.contains("Hello")).count(), 1);
+    }
+
+    #[test]
+    fn tool_card_title_survives_bracket_runs() {
+        let mut t = Transcript::new();
+        let input: serde_json::Map<_, _> = serde_json::from_str(r#"{"command":"print([Region(x=1), Region(y=2)])"}"#).unwrap();
+        t.tool_call("rabble", "t1", "Bash", &input);
+        t.tool_result("t1", true, "[Region(x=1), [..]]");
+        let rows = paint(&mut t, 120, 3);
+        assert!(rows[0].contains("Bash  print([Region(x=1), Region(y=2)])") && rows[0].contains("-> [Region(x=1), [..]]"), "{rows:?}");
+    }
+
+    #[test]
+    fn tool_card_expands_to_the_input() {
+        let mut t = Transcript::new();
+        let input: serde_json::Map<_, _> = serde_json::from_str(r#"{"command":"ls","description":"d"}"#).unwrap();
+        t.tool_call("gobble", "t1", "Bash", &input);
+        t.tool_result("t1", false, "boom");
+        t.toggle_cards();
+        let rows = paint(&mut t, 60, 8).join("\n");
+        assert!(rows.contains("gobble: Bash") && rows.contains("\"command\": \"ls\"") && rows.contains("boom"), "{rows}");
+    }
+
+    #[test]
+    fn follows_while_pinned_and_stays_put_when_scrolled_up() {
+        let mut t = filled();
+        t.scroll_by(-(t.max_scroll() as i64 - 10)); // to line 10
+        assert_eq!(t.offset, 10);
+        for i in 0..10 {
+            t.delta("rabble", &format!("\n\nmore {i}"));
+            t.layout(&th(), 80, 24);
+        }
+        assert_eq!(t.offset, 10);
+        assert!(!t.follow);
+    }
+
+    #[test]
+    fn nudged_two_lines_up_still_follows_but_a_notch_does_not_get_dragged_after_a_long_read() {
+        let mut t = filled();
+        t.scroll_by(-2);
+        assert!(!t.follow && t.pinned());
+        t.block("rabble", &(long() + "\n\nfinal"));
+        t.layout(&th(), 80, 24);
+        assert!(at_bottom(&t));
+    }
+
+    #[test]
+    fn submit_jumps_to_bottom_after_scrolling_up() {
+        let mut t = filled();
+        t.scroll_by(-100);
+        t.user("again");
+        t.layout(&th(), 80, 24);
+        assert!(at_bottom(&t));
+    }
+
+    #[test]
+    fn stray_jump_to_top_while_blurred_is_repinned() {
+        let mut t = filled();
+        t.blur();
+        t.jump_top();
+        t.scroll_by(-500);
+        t.layout(&th(), 80, 24);
+        assert!(at_bottom(&t));
+        for i in 0..5 {
+            t.delta("rabble", &format!("\n\nmore {i}"));
+        }
+        t.refocus();
+        t.layout(&th(), 80, 24);
+        assert!(at_bottom(&t));
+    }
+
+    #[test]
+    fn stray_jump_right_after_refocus_is_repinned() {
+        let mut t = filled();
+        t.blur();
+        t.refocus();
+        t.jump_top();
+        t.layout(&th(), 80, 24);
+        assert!(at_bottom(&t));
+        std::thread::sleep(REFOCUS_GUARD + Duration::from_millis(30));
+        t.jump_top();
+        assert_eq!(t.offset, 0, "after the guard the reader may scroll");
+    }
+
+    #[test]
+    fn a_reader_scrolled_up_stays_up_across_blur() {
+        let mut t = filled();
+        t.scroll_by(-40);
+        let at = t.offset;
+        t.blur();
+        t.refocus();
+        t.jump_top();
+        assert_eq!(t.offset, 0, "not pinned: no guard");
+        let _ = at;
+    }
+
+    #[test]
+    fn wheel_is_one_to_one_three_lines_per_notch() {
+        let mut t = filled();
+        let top = t.offset;
+        for _ in 0..4 {
+            t.wheel(false);
+        }
+        assert_eq!(t.offset, top - 4 * WHEEL_LINES);
+        t.wheel(true);
+        assert_eq!(t.offset, top - 3 * WHEEL_LINES);
+        t.jump_bottom();
+        assert!(t.follow);
+    }
+
+    #[test]
+    fn resize_rewraps_and_keeps_the_bottom() {
+        let mut t = filled();
+        let before = t.total_lines();
+        t.layout(&th(), 30, 10);
+        assert!(t.total_lines() > before && at_bottom(&t));
+        t.layout(&th(), 200, 60);
+        assert!(at_bottom(&t));
+    }
+
+    #[test]
+    fn thinking_placeholder_goes_away_on_content() {
+        let mut t = Transcript::new();
+        t.user("q");
+        t.thinking();
+        t.thinking();
+        assert_eq!(t.len(), 2);
+        t.delta("rabble", "a");
+        assert!(t.items().all(|i| *i != Item::Thinking));
+    }
+
+    #[test]
+    fn notices_and_errors_show_and_unicode_does_not_overflow() {
+        let mut t = Transcript::new();
+        t.notice("日本語日本語日本語 more", true);
+        let rows = paint(&mut t, 10, 5);
+        let all: String = rows.concat().chars().filter(|c| !c.is_whitespace()).collect();
+        assert_eq!(all, "*日本語日本語日本語more", "{rows:?}"); // nothing lost, nothing clipped at width 10
+    }
+}

@@ -1,77 +1,36 @@
-//! R0 spike: 10k-line transcript, wheel scroll, synchronized output, SGR mouse.
-//! Default feel is 1:1 like Vim / cat: an input event repaints on the same loop turn, no timer,
-//! no easing; queued input is drained first so a burst costs one paint, never a backlog.
-//! `rabble-tui [--log FILE]` writes per-paint timings on exit (input_to_paint_ms is the latency).
-//! q / Esc quits. Feel A/B: 1 = instant (default), 2 = snappy glide, 3 = S292 glide;
-//! +/- lines per notch; [ ] glide rate; , . minimum speed (glide modes only). Settings in the status bar.
+//! rabble-tui: the RaBbLE shell. `rabble-tui` opens a session on a running engine
+//! (`python -m orchestra.serve`); the other subcommands are the seam probes and benches.
 
-use std::{
-    fs::File,
-    io::{self, Write},
-    time::{Duration, Instant},
-};
+use std::{io, path::PathBuf, sync::mpsc};
 
-use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, MouseEventKind},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-};
+use rabble_proto::{Down, Frame, Up};
 use rabble_tui::{
-    glide::{Glide, GLIDE_FPS},
-    transcript::{Transcript, View},
+    app::Start,
+    client::{self, Net},
+    plain::Printer,
+    run::{self, Opts},
 };
-use ratatui::{backend::CrosstermBackend, layout::Rect, style::{Color, Style}, widgets::Paragraph, Terminal};
 
-const BSU: &[u8] = b"\x1b[?2026h";
-const ESU: &[u8] = b"\x1b[?2026l";
-
-struct Row {
-    t_ms: f64,
-    draw_ms: f64,
-    input_to_paint_ms: f64, // first unpainted input event to bytes flushed; 0 for timer frames
-    pos: f64,
-}
-
-/// Returns true to quit.
-fn handle(ev: Event, glide: &mut Glide, max: f64) -> bool {
-    match ev {
-        Event::Key(k) => match k.code {
-            KeyCode::Char('q') | KeyCode::Esc => return true,
-            KeyCode::Char(c @ ('1' | '2' | '3')) => glide.preset(c as u8 - b'0'),
-            KeyCode::Char('-') => glide.lines = (glide.lines - 1.0).max(1.0),
-            KeyCode::Char('+' | '=') => glide.lines = (glide.lines + 1.0).min(12.0),
-            KeyCode::Char('[') => glide.rate = (glide.rate * 0.8).max(4.0),
-            KeyCode::Char(']') => glide.rate = (glide.rate * 1.25).min(200.0),
-            KeyCode::Char(',') => glide.min_speed = (glide.min_speed * 0.8).max(10.0),
-            KeyCode::Char('.') => glide.min_speed = (glide.min_speed * 1.25).min(600.0),
-            KeyCode::Home => glide.jump(0.0, max),
-            KeyCode::End => glide.jump(max, max),
-            KeyCode::PageDown | KeyCode::Char(' ') => glide.wheel(1.0, max),
-            KeyCode::PageUp => glide.wheel(-1.0, max),
-            _ => {}
-        },
-        Event::Mouse(m) => match m.kind {
-            MouseEventKind::ScrollDown => glide.wheel(1.0, max),
-            MouseEventKind::ScrollUp => glide.wheel(-1.0, max),
-            _ => {}
-        },
-        _ => {}
-    }
-    false
-}
-
-const USAGE: &str = "rabble-tui                                   scroll spike (1:1 wheel feel), q quits
+const USAGE: &str = "rabble-tui [--socket PATH] [--attach ID] [--resume SDK_ID] [--cwd DIR] [--model M] [--latency-log FILE]
+                                             the shell: a new session (or attach / resume) on a running engine
 rabble-tui replay FILE                       print a recorded turn file as plain text
 rabble-tui connect [--socket PATH] [--attach ID | --new [--cwd DIR]] [--say TEXT]
-                                             talk to a running `python -m orchestra.serve`";
+                                             talk to the engine, print frames as text
+rabble-tui bench FILE [--repeat N] [--size WxH]
+                                             headless key-to-paint and wheel-to-paint on real content
+rabble-tui spike [--log FILE]                the R0 scroll spike (q quits)";
 
-/// `replay` and `connect`: the engine seam as plain text. Returns None to fall through to the spike.
-fn seam(args: &[String]) -> Option<io::Result<()>> {
-    use rabble_proto::{Frame, Up};
-    use rabble_tui::{client::{self, Client}, plain::Printer};
+fn main() -> io::Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
     let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+    let socket = || flag("--socket").map(PathBuf::from).unwrap_or_else(client::default_socket);
     match args.first().map(String::as_str) {
-        Some("replay") => Some((|| {
+        Some("-h" | "--help") => {
+            println!("{USAGE}");
+            Ok(())
+        }
+        Some("spike") => rabble_tui::spike::run(flag("--log")),
+        Some("replay") => {
             let file = args.get(1).ok_or_else(|| io::Error::other(USAGE))?;
             let mut p = Printer::default();
             for line in std::fs::read_to_string(file)?.lines().filter(|l| !l.trim().is_empty()) {
@@ -79,132 +38,69 @@ fn seam(args: &[String]) -> Option<io::Result<()>> {
                 print!("{}", p.render(&f));
             }
             Ok(())
-        })()),
-        Some("connect") => Some((|| {
-            let path = flag("--socket").map(Into::into).unwrap_or_else(client::default_socket);
-            let mut c = Client::connect(&path, "rabble-tui")?;
-            let mut p = Printer::default();
-            let mut session = flag("--attach");
-            if session.is_none() && args.iter().any(|a| a == "--new") {
-                c.send(&Up::CreateSession { cwd: flag("--cwd"), resume: None, continue_last: None, model: flag("--model"), mode: None, crew: None, trust: None, provider: None })?;
-            } else if let Some(s) = &session {
-                c.send(&Up::Attach { session: s.clone(), since_seq: None })?;
-            } else {
-                c.send(&Up::ListSessions {})?;
-            }
-            let say = flag("--say");
-            let mut said = false;
-            while let Some(f) = c.next()? {
-                print!("{}", p.render(&f));
-                io::stdout().flush()?;
-                if let (Some(sid), rabble_proto::Down::SessionCreated {} | rabble_proto::Down::Attached { .. }) = (&f.session, &f.msg) {
-                    session = Some(sid.clone());
-                }
-                if let (Some(text), Some(sid), false, rabble_proto::Down::SessionStarted { .. } | rabble_proto::Down::SessionResumed { .. } | rabble_proto::Down::Attached { .. }) = (&say, &session, said, &f.msg) {
-                    said = true;
-                    c.send(&Up::Send { session: sid.clone(), text: text.clone() })?;
-                }
-                if let (rabble_proto::Down::PermissionAsk { id, .. }, Some(sid)) = (&f.msg, &session) {
-                    c.deny(sid, id)?;
-                }
-                if (say.is_some() && said && client::turn_over(&f)) || (say.is_none() && session.is_none() && matches!(f.msg, rabble_proto::Down::Sessions { .. })) {
-                    break;
-                }
-            }
-            Ok(())
-        })()),
-        Some("-h" | "--help") => {
-            println!("{USAGE}");
-            Some(Ok(()))
         }
-        _ => None,
+        Some("bench") => {
+            let file = args.get(1).ok_or_else(|| io::Error::other(USAGE))?;
+            let repeat = flag("--repeat").and_then(|v| v.parse().ok()).unwrap_or(150);
+            let (w, h) = flag("--size").and_then(|v| v.split_once('x').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))).unwrap_or((200, 55));
+            println!("{}", run::bench(std::path::Path::new(file), repeat, w, h)?);
+            Ok(())
+        }
+        Some("connect") => connect(&args, socket()),
+        _ => run::run(Opts {
+            socket: socket(),
+            cwd: flag("--cwd").unwrap_or_else(|| std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| ".".into())),
+            start: match (flag("--attach"), flag("--resume")) {
+                (Some(id), _) => Start::Attach(id),
+                (None, resume) => Start::New { resume },
+            },
+            model: flag("--model"),
+            latency_log: flag("--latency-log").map(PathBuf::from),
+        }),
     }
 }
 
-fn main() -> io::Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if let Some(r) = seam(&args) {
-        return r;
+/// The R1 probe, now on the threaded client: print a turn as text.
+fn connect(args: &[String], path: PathBuf) -> io::Result<()> {
+    use std::io::Write;
+    let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+    let (tx, rx) = mpsc::channel::<Net>();
+    let c = client::connect(&path, "rabble-tui-probe", tx, |n| n)?;
+    let mut p = Printer::default();
+    let mut session = flag("--attach");
+    if session.is_none() && args.iter().any(|a| a == "--new") {
+        c.send(&Up::CreateSession { cwd: flag("--cwd"), resume: None, continue_last: None, model: flag("--model"), mode: None, crew: None, trust: None, provider: None });
+    } else if let Some(s) = &session {
+        c.send(&Up::Attach { session: s.clone(), since_seq: None });
+    } else {
+        c.send(&Up::ListSessions {});
     }
-    let log = std::env::args().skip_while(|a| a != "--log").nth(1);
-    let t = Transcript::synthetic(10_000);
-
-    enable_raw_mode()?;
-    execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
-    let mut term = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-
-    let frame = Duration::from_secs_f64(1.0 / GLIDE_FPS as f64);
-    let mut glide = Glide::default();
-    glide.preset(1);
-    let (mut last, mut next) = (Instant::now(), Instant::now());
-    let mut dirty = true;
-    let mut pending_input: Option<Instant> = None; // arrival of the oldest input not yet painted
-    let mut rows: Vec<Row> = Vec::new();
-    let t0 = Instant::now();
-
-    let result = (|| -> io::Result<()> {
-        loop {
-            let h = term.size()?.height;
-            let max = t.max_scroll(h.saturating_sub(1));
-            let wait = if glide.active() { next.saturating_duration_since(Instant::now()) } else { Duration::from_millis(250) };
-            if event::poll(wait)? {
-                // drain everything queued so one paint covers the whole burst
-                loop {
-                    pending_input.get_or_insert_with(Instant::now);
-                    if handle(event::read()?, &mut glide, max) {
-                        return Ok(());
-                    }
-                    dirty = true;
-                    if !event::poll(Duration::ZERO)? {
-                        break;
-                    }
-                }
+    let say = flag("--say");
+    let mut said = false;
+    for n in rx {
+        let f = match n {
+            Net::Frame(f) | Net::Reply { frame: f, .. } => f,
+            Net::Malformed { why, line } => {
+                eprintln!("malformed line ({why}): {line}");
+                continue;
             }
-            if glide.active() && Instant::now() >= next {
-                let now = Instant::now();
-                let dt = (now - last).as_secs_f64().min(0.05);
-                last = now;
-                dirty |= glide.tick(dt, max);
-                next = (next + frame).max(now); // fixed cadence, no catch-up burst
-            }
-            if dirty {
-                let start = Instant::now();
-                io::stdout().write_all(BSU)?;
-                term.draw(|f| {
-                    let a = f.area();
-                    f.render_widget(View { t: &t, pos: glide.pos }, Rect { height: a.height.saturating_sub(1), ..a });
-                    let bar = format!(
-                        " {} | {} lines/notch{} | 1 vim  2 snappy  3 glide  +/- [ ] , . ",
-                        if glide.instant { "1:1 INSTANT" } else { "glide" },
-                        glide.lines,
-                        if glide.instant { String::new() } else { format!(" | rate {:.0} | min {:.0}/s", glide.rate, glide.min_speed) });
-                    f.render_widget(Paragraph::new(bar).style(Style::new().fg(Color::Black).bg(Color::Rgb(0, 245, 255))),
-                        Rect { y: a.y + a.height.saturating_sub(1), height: 1, ..a });
-                })?;
-                io::stdout().write_all(ESU)?;
-                io::stdout().flush()?;
-                dirty = false;
-                if log.is_some() {
-                    rows.push(Row {
-                        t_ms: t0.elapsed().as_secs_f64() * 1e3,
-                        draw_ms: start.elapsed().as_secs_f64() * 1e3,
-                        input_to_paint_ms: pending_input.map_or(0.0, |i| i.elapsed().as_secs_f64() * 1e3),
-                        pos: glide.pos,
-                    });
-                }
-                pending_input = None;
-            }
+            Net::Closed(_) => break,
+        };
+        print!("{}", p.render(&f));
+        io::stdout().flush()?;
+        if let (Some(sid), Down::SessionCreated {} | Down::Attached { .. }) = (&f.session, &f.msg) {
+            session = Some(sid.clone());
         }
-    })();
-
-    disable_raw_mode()?;
-    execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen)?;
-    if let Some(path) = log {
-        let mut f = File::create(path)?;
-        writeln!(f, "t_ms,draw_ms,input_to_paint_ms,pos")?;
-        for r in rows {
-            writeln!(f, "{:.3},{:.3},{:.3},{:.2}", r.t_ms, r.draw_ms, r.input_to_paint_ms, r.pos)?;
+        if let (Some(text), Some(sid), false, Down::SessionStarted { .. } | Down::SessionResumed { .. } | Down::Attached { .. }) = (&say, &session, said, &f.msg) {
+            said = true;
+            c.send(&Up::Send { session: sid.clone(), text: text.clone() });
+        }
+        if let (Down::PermissionAsk { id, .. }, Some(sid)) = (&f.msg, &session) {
+            c.deny(sid, id);
+        }
+        if (said && client::turn_over(&f)) || (say.is_none() && session.is_none() && matches!(f.msg, Down::Sessions { .. })) {
+            break;
         }
     }
-    result
+    Ok(())
 }

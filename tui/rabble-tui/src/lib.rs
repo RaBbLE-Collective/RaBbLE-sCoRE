@@ -1,4 +1,15 @@
+pub mod app;
 pub mod client;
 pub mod glide;
+pub mod markdown;
+pub mod park;
 pub mod plain;
+pub mod prefs;
+pub mod sessions;
+pub mod run;
+pub mod spike;
+pub mod theme;
 pub mod transcript;
+pub mod util;
+pub mod widgets;
+pub mod wrap;
