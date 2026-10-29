@@ -665,7 +665,7 @@ async def test_organs_in_the_snapshot_come_and_go_with_real_sdk_output(tmp_path)
             sdk.TaskStartedMessage("task_started", {}, "T1", "map it", "u", "s1", tool_use_id="A1"),
             sdk.TaskProgressMessage("task_progress", {}, "T1", "map it", {"total_tokens": 9}, "u", "s1", last_tool_name="Grep"),
             sdk.TaskNotificationMessage("task_notification", {}, "T1", "completed", "/o", "", "u", "s1")]
-    out = [e for msg in msgs for e in m.map(msg) if not isinstance(e, ev.ModelUsed)]
+    out = [e for msg in msgs for e in m.map(msg) if not isinstance(e, (ev.ModelUsed, ev.Narration))]
     kinds = [type(e).__name__ for e in out]
     assert kinds == ["ToolCall", "OrganStarted", "OrganProgress", "OrganDone"], kinds
 

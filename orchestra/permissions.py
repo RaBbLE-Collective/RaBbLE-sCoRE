@@ -18,6 +18,7 @@ from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny, Permis
 from claude_agent_sdk.types import PermissionRuleValue
 
 from . import events as ev
+from . import narrate
 
 DENY_DEFAULT = "The Observer declined."
 
@@ -63,6 +64,7 @@ class Permissions:
             title=context.title, display_name=context.display_name, description=context.description,
             blocked_path=context.blocked_path, suggestions=[_suggestion_dict(s) for s in suggestions],
         ))
+        self._emit(ev.Narration(self._organ_of_agent(context.agent_id), narrate.permission(tool)))
         try:
             reply: ev.PermissionReply = await future
         finally:

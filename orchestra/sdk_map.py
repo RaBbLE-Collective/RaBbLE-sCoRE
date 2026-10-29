@@ -33,6 +33,7 @@ from claude_agent_sdk import TextBlock as SdkText
 from claude_agent_sdk import ThinkingBlock, ToolResultBlock, ToolUseBlock
 
 from . import events as ev
+from . import narrate
 
 AGENT_TOOLS = {"Agent", "Task"}
 SUMMARY_CHARS = 200
@@ -171,6 +172,8 @@ class SdkMapper:
             delta = e.get("delta") or {}
             if delta.get("type") == "text_delta" and delta.get("text"):
                 return [ev.TextDelta(ev.LEAD, delta["text"])]
+            if delta.get("type") == "thinking_delta" and delta.get("thinking"):
+                return [ev.ThinkingText(ev.LEAD, delta["thinking"])]   # only with thinking_display "summarized"
         return []
 
     def _assistant(self, msg: AssistantMessage) -> list[ev.Event]:
@@ -188,10 +191,13 @@ class SdkMapper:
                     if msg.parent_tool_use_id:
                         self.last_text[msg.parent_tool_use_id] = block.text
             elif isinstance(block, ThinkingBlock):
-                if organ != ev.LEAD:  # the lead's thinking already pulsed from the stream
+                if organ != ev.LEAD:  # the lead's thinking already pulsed and streamed
                     out.append(ev.Thinking(organ))
+                    if block.thinking:
+                        out.append(ev.ThinkingText(organ, block.thinking))
             elif isinstance(block, ToolUseBlock):
                 out.append(ev.ToolCall(organ, block.id, block.name, block.input))
+                out.append(ev.Narration(organ, narrate.tool(block.name, block.input), block.id))
                 if block.name in AGENT_TOOLS:
                     slug = str(block.input.get("subagent_type") or "agent")
                     self.organ_by_tool[block.id] = slug

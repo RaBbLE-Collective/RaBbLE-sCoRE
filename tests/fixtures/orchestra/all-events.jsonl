@@ -4,6 +4,8 @@
 {"type":"TextDelta","organ":"rabble","text":"hel"}
 {"type":"TextBlock","organ":"gobble","text":"found it"}
 {"type":"Thinking","organ":"rabble"}
+{"type":"ThinkingText","organ":"rabble","text":"checking the reconnect path"}
+{"type":"Narration","organ":"rabble","text":"Reading `orchestra/events.py`","id":"tu1"}
 {"type":"ToolCall","organ":"rabble","id":"tu1","name":"Bash","input":{"command":"ls"}}
 {"type":"ToolResult","organ":"rabble","id":"tu1","ok":true,"summary":"3 files"}
 {"type":"PermissionAsk","id":"p1","organ":"rabble","tool":"Bash","input":{"command":"rm x"},"title":"Run rm?","display_name":null,"description":null,"blocked_path":null,"suggestions":[{"type":"addRules","destination":"session"}]}

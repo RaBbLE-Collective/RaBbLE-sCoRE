@@ -18,6 +18,8 @@ SAMPLES = [
     ev.TextDelta(ev.LEAD, "hel"),
     ev.TextBlock("gobble", "found it"),
     ev.Thinking(ev.LEAD),
+    ev.ThinkingText(ev.LEAD, "checking the reconnect path"),
+    ev.Narration(ev.LEAD, "Reading `orchestra/events.py`", "tu1"),
     ev.ToolCall(ev.LEAD, "tu1", "Bash", {"command": "ls"}),
     ev.ToolResult(ev.LEAD, "tu1", True, "3 files"),
     ev.PermissionAsk("p1", ev.LEAD, "Bash", {"command": "rm x"}, title="Run rm?",

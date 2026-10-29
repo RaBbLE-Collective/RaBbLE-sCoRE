@@ -143,6 +143,13 @@ pub enum Down {
     TextDelta { organ: String, text: String },
     TextBlock { organ: String, text: String },
     Thinking { organ: String },
+    ThinkingText { organ: String, text: String },
+    Narration {
+        organ: String,
+        text: String,
+        #[serde(default)]
+        id: String,
+    },
     ToolCall { organ: String, id: String, name: String, input: Json },
     ToolResult { organ: String, id: String, ok: bool, summary: String },
     UserSaid {
@@ -399,7 +406,7 @@ mod tests {
         let kinds: std::collections::BTreeSet<String> = std::fs::read_to_string(path).unwrap().lines()
             .map(|l| serde_json::from_str::<Value>(l).unwrap()["type"].as_str().unwrap().to_owned()).collect();
         // Down's event variants: if this count changes, a variant was added without a fixture line
-        assert_eq!(kinds.len(), 20);
+        assert_eq!(kinds.len(), 22);
     }
 
     #[test]
@@ -415,7 +422,7 @@ mod tests {
 
     #[test]
     fn unknown_types_and_fields_are_tolerated() {
-        let f = Frame::parse(r#"{"type":"Narration","session":"s1","organ":"rabble","text":"Reading a file"}"#).unwrap();
+        let f = Frame::parse(r#"{"type":"FutureKind","session":"s1","organ":"rabble","text":"Reading a file"}"#).unwrap();
         assert_eq!((f.session.as_deref(), f.msg), (Some("s1"), Down::Unknown));
         let t = Frame::parse(r#"{"type":"TextDelta","session":"s1","organ":"rabble","text":"hi","future_field":1}"#).unwrap();
         assert_eq!(t.msg, Down::TextDelta { organ: "rabble".into(), text: "hi".into() });

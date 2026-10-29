@@ -1,0 +1,12 @@
+{"type":"Capabilities","slash_commands":[],"skills":[],"mcp":[],"plugins":[],"problems":[]}
+{"type":"SessionStarted","session_id":"s1","model":"haiku","cwd":"/w"}
+{"type":"Thinking","organ":"rabble"}
+{"type":"ThinkingText","organ":"rabble","text":"The user wants the events file. "}
+{"type":"ThinkingText","organ":"rabble","text":"Read it first."}
+{"type":"ModelUsed","model":"haiku"}
+{"type":"ToolCall","organ":"rabble","id":"tu1","name":"Read","input":{"file_path":"/w/orchestra/events.py"}}
+{"type":"Narration","organ":"rabble","text":"Reading `orchestra/events.py`","id":"tu1"}
+{"type":"ToolResult","organ":"rabble","id":"tu1","ok":true,"summary":"242 lines"}
+{"type":"TextBlock","organ":"rabble","text":"It defines the event contract."}
+{"type":"Usage","tokens":10,"cost":0.001,"context_pct":null}
+{"type":"TurnDone","stop_reason":"end_turn","origin":"observer"}

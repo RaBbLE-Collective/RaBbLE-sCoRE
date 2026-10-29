@@ -91,8 +91,10 @@ def test_organ_lifecycle_routes_by_parent_tool_use_id():
               tool_result("A1", [{"type": "text", "text": "hand-back"}]))
     assert out == [
         ev.ToolCall(ev.LEAD, "A1", "Agent", {"subagent_type": "gobble", "description": "map it"}),
+        ev.Narration(ev.LEAD, "Asking the gobble organ to map it", "A1"),
         ev.OrganStarted("gobble", "A1", None, "map it", False),
         ev.ToolCall("gobble", "B1", "Grep", {"pattern": "x"}),
+        ev.Narration("gobble", "Searching the code for `x`", "B1"),
         ev.ToolResult("gobble", "B1", True, "3 hits"),
         ev.OrganProgress("gobble", "T1", {"total_tokens": 9, "tool_uses": 1, "duration_ms": 5}, "Grep"),
         ev.TextBlock("gobble", "it is in beam.py"),
@@ -206,3 +208,33 @@ def test_options_agents_are_sdk_dataclasses():
     opts = ClaudeCodeBackend(".", agents=agents).options()
     assert {k: {a: b for a, b in asdict(v).items() if b is not None} for k, v in opts.agents.items()} == agents
     assert ClaudeCodeBackend(".").options().agents is None
+
+
+def test_thinking_text_streams_for_the_lead_and_arrives_whole_for_organs():
+    m = SdkMapper()
+    out = run(m,
+              sdk.StreamEvent("u", "s1", {"type": "content_block_start", "content_block": {"type": "thinking"}}),
+              sdk.StreamEvent("u", "s1", {"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "Check "}}),
+              sdk.StreamEvent("u", "s1", {"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "the seam."}}),
+              assistant(sdk.ThinkingBlock("Check the seam.", "sig"), sdk.TextBlock("ok")),
+              assistant(sdk.ToolUseBlock("A1", "Agent", {"subagent_type": "gobble", "description": "map it"})),
+              assistant(sdk.ThinkingBlock("Grep first.", "sig"), parent="A1"),
+              assistant(sdk.ThinkingBlock("", "sig"), parent="A1"))
+    assert [e for e in out if isinstance(e, ev.ThinkingText)] == [
+        ev.ThinkingText(ev.LEAD, "Check "), ev.ThinkingText(ev.LEAD, "the seam."), ev.ThinkingText("gobble", "Grep first.")]
+    assert out[0] == ev.Thinking(ev.LEAD)   # the pulse is still sent
+
+
+def test_every_tool_call_gets_a_narration_with_its_id():
+    out = run(SdkMapper(), assistant(sdk.ToolUseBlock("R1", "Read", {"file_path": "/home/x/orchestra/events.py"})))
+    assert out[-1] == ev.Narration(ev.LEAD, "Reading `orchestra/events.py`", "R1")
+
+
+def test_recorded_thinking_turn_fixture_is_real_mapper_output():
+    """tests/fixtures/orchestra/narration-turn.jsonl was written from SdkMapper (see the thinking test's
+    messages), so the Python UI test and the Rust plain printer replay what the engine really emits."""
+    import json
+    path = os.path.join(os.path.dirname(__file__), "fixtures", "orchestra", "narration-turn.jsonl")
+    kinds = [json.loads(line)["type"] for line in open(path, encoding="utf-8")]
+    assert kinds.count("ThinkingText") == 2 and kinds.count("Narration") == 1
+    assert kinds.index("ToolCall") + 1 == kinds.index("Narration")

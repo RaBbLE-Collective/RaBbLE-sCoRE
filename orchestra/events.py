@@ -108,6 +108,23 @@ class Thinking(Event):
 
 
 @dataclass(frozen=True, slots=True)
+class ThinkingText(Event):
+    """A chunk of the model's summarized thinking (needs thinking_display "summarized"). Lead chunks
+    stream as deltas; an organ's arrives whole. Shown dim and secondary, never as the answer."""
+    organ: str
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class Narration(Event):
+    """One plain-English sentence about what a tool call is doing (orchestra/narrate.py). `id` is the
+    tool_use id it narrates, "" when it narrates something else (a permission wait)."""
+    organ: str
+    text: str
+    id: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class ToolCall(Event):
     organ: str
     id: str

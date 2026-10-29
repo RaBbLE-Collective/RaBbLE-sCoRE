@@ -82,6 +82,16 @@ async def test_tool_card_with_result(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_narration_lines_show_in_the_transcript(tmp_path):
+    app, h = make("narration-turn.jsonl", tmp_path)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await say(pilot, "what is in events.py")
+        await until(pilot, lambda: any("event contract" in s for s in md_sources(app)))
+        texts = " ".join(str(w.render()) for w in app.transcript.query("Static.notice"))
+        assert "· Reading `orchestra/events.py`" in texts
+
+
+@pytest.mark.asyncio
 async def test_organ_turn_notices(tmp_path):
     app, h = make("organ-turn.jsonl", tmp_path)
     async with app.run_test(size=(120, 40)) as pilot:

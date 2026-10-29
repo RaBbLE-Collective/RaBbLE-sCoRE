@@ -63,7 +63,10 @@ impl Printer {
                 }
             }
             Down::UserSaid { sender, text, .. } => line(self, format!("{sender}> {text}")),
-            Down::Thinking { .. } | Down::ModelUsed { .. } => {}
+            Down::Thinking { .. } | Down::ThinkingText { .. } | Down::ModelUsed { .. } => {}
+            Down::Narration { organ, text, .. } => {
+                line(self, if organ == "rabble" { format!("  . {text}") } else { format!("  . {organ}: {text}") })
+            }
             Down::ToolCall { organ, name, input, .. } => {
                 let arg = input.values().find_map(|v| v.as_str()).unwrap_or("");
                 line(self, format!("  [{organ}] {name} {}", short(arg, 70)));
@@ -115,7 +118,24 @@ mod tests {
 
     #[test]
     fn unknown_and_quiet_events_print_nothing() {
-        assert_eq!(run(&[r#"{"type":"Narration","text":"x"}"#, r#"{"type":"Thinking","organ":"rabble"}"#]), "");
+        assert_eq!(run(&[r#"{"type":"Mystery","text":"x"}"#, r#"{"type":"Thinking","organ":"rabble"}"#,
+            r#"{"type":"ThinkingText","organ":"rabble","text":"hm"}"#]), "");
+    }
+
+    #[test]
+    fn narration_prints_as_a_quiet_line() {
+        assert_eq!(run(&[r#"{"type":"Narration","organ":"rabble","text":"Running the tests","id":"t1"}"#,
+            r#"{"type":"Narration","organ":"gobble","text":"Reading `a.py`"}"#]), "  . Running the tests\n  . gobble: Reading `a.py`\n");
+    }
+
+    #[test]
+    fn a_recorded_thinking_turn_prints_narration_but_not_thinking() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/orchestra/narration-turn.jsonl");
+        let text = std::fs::read_to_string(path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        let out = run(&lines);
+        assert!(out.contains("  . Reading `orchestra/events.py`\n"), "{out}");
+        assert!(!out.contains("The user wants"), "{out}");
     }
 
     #[test]

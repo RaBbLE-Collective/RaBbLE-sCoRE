@@ -209,6 +209,8 @@ class RabbleApp(App):
                 await t.block(e.organ, e.text)
             case ev.Thinking():
                 await t.thinking()
+            case ev.Narration():
+                await t.notice(f"· {e.text}" if e.organ == ev.LEAD else f"· {e.organ}: {e.text}")
             case ev.ToolCall():
                 self._streaming = False
                 self._busy_ids.add(e.id)
