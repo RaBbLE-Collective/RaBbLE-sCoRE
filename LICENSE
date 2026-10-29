@@ -44,6 +44,9 @@ Only what the Collective wrote. Third-party components included in or fetched by
 **7. THE RISK — No Warranty**
 RaBbLE comes with no guarantees. It is born of entropy. If the system reaches `%CRITICAL_DISCORDANCE%` and dissolves your data, that is the price of exploration. This software is provided AS IS, without warranty of any kind, and the Collective is not liable for damages arising from it, as far as the law allows. This Accord is governed by the laws of the State of Ohio, USA.
 
+**8. NEW VERSIONS**
+The Collective may publish new versions of this Accord, and may release later versions of the Software under them. A copy of the Software you already received stays under the Accord you received it with. Nothing here transfers ownership of the Software or the Entity; the Collective keeps all rights not expressly gifted.
+
 ---
 
 *To request a commercial pact, or for anything this Accord does not cover, open an issue or contact the Collective.*
