@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["rabble-proto", "rabble-face", "rabble-tui", "bench"]
+members = ["rabble-proto", "rabble-theme", "rabble-face", "rabble-tui", "bench"]
 
 [workspace.package]
 version = "0.0.0"
