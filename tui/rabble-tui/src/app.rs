@@ -264,6 +264,12 @@ impl App {
         }
     }
 
+    /// A passing note that must not split a reply that is still streaming.
+    fn brief(&mut self, text: &str, error: bool) {
+        self.t.notice_quiet(text, error);
+        self.dirty = true;
+    }
+
     pub fn notice(&mut self, text: &str, error: bool) {
         self.t.notice(text, error);
         self.dirty = true;
@@ -685,6 +691,7 @@ impl App {
             self.header.categories.clear();
             self.header.stability = None;
             self.entropy_trust = None;
+            self.sync_header();
             if let Some(f) = &mut self.face {
                 f.clear_signal();
             }
@@ -850,6 +857,10 @@ impl App {
                 had || self.t.sel.has()
             }
             Drag(MouseButton::Left) => {
+                if !self.t.sel.dragging() {
+                    return false; // the press was not in the transcript: nothing to extend or scroll
+                }
+                let (before, off) = (self.t.sel.ordered(), self.t.offset);
                 // dragging past an edge scrolls the view one line per event
                 let row = if m.row < r.y {
                     self.t.scroll_by(-1);
@@ -864,7 +875,7 @@ impl App {
                 if let Some(p) = self.t.pos_at(row, col) {
                     self.t.sel.drag(p);
                 }
-                true
+                self.t.sel.ordered() != before || self.t.offset != off
             }
             Up(MouseButton::Left) => {
                 self.t.sel.release();
@@ -912,13 +923,18 @@ impl App {
         if self.t.sel.has() {
             // Ctrl-C (and Ctrl-Shift-C) copy a selection instead of counting towards quit; any other key drops it
             let copy = matches!(k.code, KeyCode::Char('c' | 'C')) && ctrl;
-            if let Some(text) = self.t.selected_text().filter(|_| copy) {
-                self.effects.push(Effect::Copy(text));
-                self.notice("copied", false);
-            }
+            let text = self.t.selected_text();
             self.t.sel.clear();
-            if copy || k.code == KeyCode::Esc {
-                return;
+            self.dirty = true;
+            // a selection with nothing visible in it (off-screen, blank) swallows nothing
+            if text.is_some() {
+                if let Some(text) = text.filter(|_| copy) {
+                    self.effects.push(Effect::Copy(text));
+                    self.brief("copied", false);
+                }
+                if copy || k.code == KeyCode::Esc {
+                    return;
+                }
             }
         }
         match k.code {
@@ -949,7 +965,7 @@ impl App {
                         self.quit = true;
                     } else {
                         self.last_ctrl_c = Some(now);
-                        self.notice("press Ctrl-C again to quit", false);
+                        self.brief("press Ctrl-C again to quit", false);
                     }
                 }
                 Action::CtrlD => self.quit = true,
@@ -1048,7 +1064,7 @@ impl App {
                 Some(t) if !t.is_empty() => {
                     let n = t.chars().count();
                     self.effects.push(Effect::Copy(t));
-                    self.notice(&format!("copied last reply ({n} chars)"), false);
+                    self.brief(&format!("copied last reply ({n} chars)"), false);
                 }
                 _ => self.notice("nothing to copy (last reply)", true),
             },
@@ -2065,5 +2081,68 @@ mod tests {
     fn no_face_without_a_palette() {
         let (a, _rx) = live();
         assert!(a.face.is_none() && a.face_due().is_none());
+    }
+
+    #[test]
+    fn copy_mid_stream_keeps_one_reply() {
+        use crossterm::event::{MouseButton::Left, MouseEventKind::{Down, Drag, Up}};
+        let (mut a, _rx) = live();
+        say(&mut a, "hi");
+        ev(&mut a, r#"{"type":"TextDelta","organ":"rabble","text":"first half "}"#);
+        let scr = screen(&mut a, 60, 20);
+        let row = scr.lines().position(|l| l.contains("first half")).unwrap() as u16;
+        let m = |kind, column, row| Event::Mouse(MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE });
+        let c = a.tr_rect.x + scr.lines().nth(row as usize).unwrap().find("first").unwrap() as u16;
+        a.on_input(m(Down(Left), c, row));
+        a.on_input(m(Drag(Left), c + 4, row));
+        a.on_input(m(Up(Left), c + 4, row));
+        a.on_input(Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)));
+        assert_eq!(a.effects, [Effect::Copy("first".into())]);
+        ev(&mut a, r#"{"type":"TextDelta","organ":"rabble","text":"second half"}"#);
+        ev(&mut a, r#"{"type":"TextBlock","organ":"rabble","text":"first half second half"}"#);
+        let out = screen(&mut a, 60, 20);
+        assert_eq!(out.matches("first half second half").count(), 1, "{out}");
+        assert!(!out.contains("first half \n"), "{out}");
+    }
+
+    #[test]
+    fn a_drag_that_began_outside_the_transcript_does_nothing() {
+        use crossterm::event::{MouseButton::Left, MouseEventKind::{Down, Drag}};
+        let (mut a, _rx) = live();
+        for i in 0..40 {
+            ev(&mut a, &format!(r#"{{"type":"TextBlock","organ":"rabble","text":"line {i}"}}"#));
+        }
+        screen(&mut a, 60, 20);
+        let m = |kind, column, row| Event::Mouse(MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE });
+        a.t.scroll_by(-5);
+        let off = a.t.offset;
+        a.dirty = false;
+        a.on_input(m(Down(Left), 3, 19)); // the composer, below the transcript
+        a.on_input(m(Drag(Left), 5, 0));
+        a.on_input(m(Drag(Left), 5, 19));
+        assert_eq!(a.t.offset, off);
+        assert!(!a.t.sel.has() && !a.dirty, "no scroll, no selection, no repaint");
+    }
+
+    #[test]
+    fn an_empty_selection_does_not_swallow_the_first_ctrl_c_or_esc() {
+        let (mut a, _rx) = live();
+        ev(&mut a, r#"{"type":"TextBlock","organ":"rabble","text":"alpha"}"#);
+        screen(&mut a, 60, 20);
+        let far = a.t.total_lines() + 50;
+        a.t.sel.set((far, 0), (far, 3)); // off-screen / nothing there
+        a.on_input(Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)));
+        assert!(!a.t.sel.has() && a.effects.is_empty());
+        assert!(a.last_ctrl_c.is_some(), "the press counted towards quit");
+    }
+
+    #[test]
+    fn clear_resets_the_header_trust_label() {
+        let (mut a, _rx) = face_app();
+        ev(&mut a, r#"{"type":"EntropyChanged","score":0.8,"band":"DEGRADED","trust":"strict","reason":"x","capability":30,"categories":{"general":30},"local":false,"base":30,"stability":20}"#);
+        assert_eq!(a.header.trust, "strict");
+        say(&mut a, "/clear");
+        assert_eq!(a.header.trust, a.trust_profile());
+        assert_ne!(a.header.trust, "strict");
     }
 }

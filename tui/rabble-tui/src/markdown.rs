@@ -114,7 +114,9 @@ pub fn render(text: &str, th: &Theme, width: usize) -> Vec<Line<'static>> {
         if in_code {
             // code is never re-flowed: hard-wrap only
             let cells = [Span::styled(raw.to_owned(), th.code)];
-            out.extend(wrap::wrap(&cells, width.saturating_sub(2), &[Span::raw("  ")], &[Span::raw("  ")]));
+            // the indent is HIDDEN (blank either way) so a copy can tell it from the code's own spaces
+            let ind = [Span::styled("  ", Style::new().add_modifier(Modifier::HIDDEN))];
+            out.extend(wrap::wrap(&cells, width.saturating_sub(2), &ind, &ind));
             continue;
         }
         if t.is_empty() {

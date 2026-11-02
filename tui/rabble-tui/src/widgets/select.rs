@@ -31,6 +31,11 @@ impl Selection {
         self.range.is_some()
     }
 
+    /// A press anchored a drag that is still held.
+    pub fn dragging(&self) -> bool {
+        self.anchor.is_some()
+    }
+
     /// Button pressed at `p`; returns the click count (1, 2, 3) so the caller can widen to a word or line.
     pub fn press(&mut self, p: Pos, now: Instant) -> u8 {
         let n = match self.last_click {
@@ -94,8 +99,26 @@ pub fn width(l: &Line) -> usize {
 
 /// The text of columns `[from, to)`, a wide character included whole if it overlaps; trailing blanks dropped.
 pub fn slice(l: &Line, from: usize, to: usize) -> String {
-    let s: String = cells(l).into_iter().filter(|&(_, c, w)| w > 0 && c < to && c + w > from).map(|(ch, ..)| ch).collect();
+    let mut s = String::new();
+    let mut kept = false;
+    for (ch, c, w) in cells(l) {
+        if w > 0 {
+            kept = c < to && c + w > from;
+        }
+        // zero-width marks (combining, ZWJ, VS16) stay with the cell before them
+        if kept {
+            s.push(ch);
+        }
+    }
     s.trim_end().to_owned()
+}
+
+/// Width of the hidden indent that marks a code line (see `markdown::render`); 0 for any other line.
+pub fn code_indent(l: &Line) -> usize {
+    match l.spans.first() {
+        Some(s) if s.style.add_modifier.contains(ratatui::style::Modifier::HIDDEN) => crate::wrap::str_width(&s.content),
+        _ => 0,
+    }
 }
 
 /// The start and end column (inclusive) of the run of non-blank characters under `col`, or the cell itself
@@ -130,6 +153,9 @@ mod tests {
         assert_eq!(slice(&l("日本語 ok"), 2, 6), "本語");
         assert_eq!(slice(&l("日本語"), 1, 2), "日", "a column inside a wide char takes the whole char");
         assert_eq!(slice(&l("ab   "), 0, 99), "ab", "padding is not copied");
+        assert_eq!(slice(&l("e\u{301}x"), 0, 2), "e\u{301}x", "a combining mark stays with its base");
+        assert_eq!(slice(&l("a\u{200d}b"), 1, 2), "b", "a mark follows only a kept cell");
+        assert_eq!(slice(&l("a\u{fe0f}b"), 0, 1), "a\u{fe0f}");
     }
 
     #[test]

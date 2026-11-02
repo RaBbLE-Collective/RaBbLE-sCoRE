@@ -54,6 +54,8 @@ pub struct Transcript {
     pub view_h: u16,
     face_rows: usize,
     pub sel: Selection,
+    /// Where the entry holding the selection starts; if it moves, the selection no longer points at its text.
+    sel_start: Option<usize>,
 }
 
 pub fn one_line(data: &serde_json::Map<String, serde_json::Value>) -> String {
@@ -104,7 +106,7 @@ impl Default for Transcript {
 
 impl Transcript {
     pub fn new() -> Self {
-        Transcript { entries: Vec::new(), width: 0, total: 0, max: 0, stale: true, offset: 0, follow: true, expanded: false, blurred: None, guard_until: None, view_h: 0, face_rows: FACE_MIN_ROWS, sel: Selection::default() }
+        Transcript { entries: Vec::new(), width: 0, total: 0, max: 0, stale: true, offset: 0, follow: true, expanded: false, blurred: None, guard_until: None, view_h: 0, face_rows: FACE_MIN_ROWS, sel: Selection::default(), sel_start: None }
     }
 
     fn push(&mut self, item: Item) {
@@ -255,6 +257,20 @@ impl Transcript {
         self.push(Item::Notice { text: clean(text), error });
     }
 
+    /// A passing note (copy confirmation, quit hint). Never ends or splits a streaming reply: it goes in
+    /// above the reply, which stays last so the next delta keeps appending to it.
+    pub fn notice_quiet(&mut self, text: &str, error: bool) {
+        self.drop_transient();
+        let item = Item::Notice { text: clean(text), error };
+        if matches!(self.entries.last(), Some(Entry { item: Item::Reply { streaming: true, .. }, .. })) {
+            let at = self.entries.len() - 1;
+            self.entries.insert(at, Entry { item, lines: Vec::new(), start: 0, dirty: true });
+            self.stale = true;
+        } else {
+            self.push(item);
+        }
+    }
+
     pub fn end_turn(&mut self) {
         self.drop_transient();
         self.end_stream();
@@ -322,7 +338,8 @@ impl Transcript {
         let out: Vec<String> = (l0..=l1.min(self.total.saturating_sub(1)))
             .filter_map(|i| {
                 let (f, t) = self.sel.cols(i)?;
-                self.line_at(i).map(|l| select::slice(l, f, t))
+                // code lines lose the display indent
+                self.line_at(i).map(|l| select::slice(l, f.max(select::code_indent(l)), t))
             })
             .collect();
         let s = out.join("\n");
@@ -453,6 +470,25 @@ impl Transcript {
         }
     }
 
+    /// Lines above the selection changed height (card toggled, result arrived, face resized): it drifted.
+    fn guard_selection(&mut self) {
+        if self.sel.has() {
+            let at = self.sel.ordered().map_or(0, |(a, _)| a.0);
+            let k = self.entries.partition_point(|e| e.start <= at).saturating_sub(1);
+            let now = self.entries.get(k).map(|e| e.start);
+            match self.sel_start {
+                Some(was) if Some(was) != now => {
+                    self.sel.clear();
+                    self.sel_start = None;
+                }
+                None => self.sel_start = now,
+                _ => {}
+            }
+        } else {
+            self.sel_start = None;
+        }
+    }
+
     /// Bring cached lines up to date for this width and height; apply the follow rules.
     pub fn layout(&mut self, th: &Theme, width: u16, height: u16) {
         let w = width.max(1) as usize;
@@ -476,6 +512,7 @@ impl Transcript {
             }
         }
         if !self.stale && self.max == self.total.saturating_sub(height as usize) {
+            self.guard_selection();
             return;
         }
         let ex = self.expanded;
@@ -501,6 +538,7 @@ impl Transcript {
             self.offset = self.offset.min(new_max);
         }
         self.max = new_max;
+        self.guard_selection();
     }
 
     pub fn draw(&self, area: Rect, buf: &mut Buffer) {
@@ -732,5 +770,62 @@ mod tests {
         let b: String = rows.concat();
         assert!(!b.chars().any(char::is_control) && !b.contains('\u{202e}'), "{rows:?}");
         assert!(b.contains("d    e"), "tabs are expanded before wrapping");
+    }
+
+    fn select_all(t: &mut Transcript) {
+        t.sel.set((0, 0), (t.total_lines() - 1, select::EOL));
+    }
+
+    #[test]
+    fn a_quiet_notice_does_not_split_a_streaming_reply() {
+        let mut t = Transcript::new();
+        t.delta("rabble", "first half ");
+        t.notice_quiet("copied", false);
+        t.delta("rabble", "second half");
+        t.block("rabble", "first half second half");
+        t.layout(&th(), 80, 24);
+        let replies: Vec<_> = t.items().filter_map(|i| if let Item::Reply { text, .. } = i { Some(text.clone()) } else { None }).collect();
+        assert_eq!(replies, ["first half second half"], "one reply, text once");
+        assert!(t.items().any(|i| matches!(i, Item::Notice { text, .. } if text == "copied")));
+    }
+
+    #[test]
+    fn copying_code_drops_the_display_indent_but_keeps_its_own() {
+        let mut t = Transcript::new();
+        t.block("rabble", "```\nfn a() {\n    b();\n}\n```");
+        t.layout(&th(), 80, 24);
+        select_all(&mut t);
+        assert_eq!(t.selected_text().as_deref(), Some("fn a() {\n    b();\n}"));
+    }
+
+    #[test]
+    fn a_selection_is_dropped_when_lines_above_it_change_height() {
+        let mut t = Transcript::new();
+        t.tool_call("rabble", "t1", "Bash", &serde_json::Map::new());
+        t.block("rabble", "alpha");
+        t.layout(&th(), 80, 24);
+        let row = t.total_lines() - 2;
+        t.sel.set((row, 0), (row, 4));
+        t.layout(&th(), 80, 24);
+        assert!(t.sel.has(), "a steady layout keeps it");
+        t.tool_result("t1", true, "x");
+        t.expanded = true;
+        t.toggle_cards();
+        t.sel.set((row, 0), (row, 4));
+        t.layout(&th(), 80, 24);
+        t.tool_call("rabble", "t0", "Bash", &serde_json::Map::new());
+        // growth below does not matter
+        t.layout(&th(), 80, 24);
+        assert!(t.sel.has());
+        t.toggle_cards(); // clears directly, then a new selection must survive until lines above move
+        t.layout(&th(), 80, 24);
+        let row = t.total_lines() - 3;
+        t.sel.set((row, 0), (row, 2));
+        t.layout(&th(), 80, 24);
+        t.tool_result("t0", true, "a\nb\nc");
+        t.toggle_cards();
+        t.toggle_cards();
+        t.layout(&th(), 80, 24);
+        assert!(!t.sel.has());
     }
 }
