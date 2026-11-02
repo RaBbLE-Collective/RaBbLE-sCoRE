@@ -288,10 +288,10 @@ async def test_clear_forgets_the_old_sessions_entropy(tmp_path):
     from orchestra import events as ev
     app, h = make("tool-turn.jsonl", tmp_path)
     async with app.run_test(size=(100, 40)) as pilot:
-        app.entropy = ev.EntropyChanged(0.8, "DEGRADED", "strict", "x", 30, {"general": 30}, False, 30, 20)
-        app._sync_header()
+        await app._handle(ev.EntropyChanged(0.8, "DEGRADED", "strict", "x", 30, {"general": 30}, False, 30, 20))
         assert app.header.entropy and app.header.stability == 20
+        assert app.face.noise > 0 and app.face.breaking > 0, "the face took the signal, so the reset below is real"
         await say(pilot, "/clear")
         await until(pilot, lambda: app.entropy is None and app.header.entropy is None)
         assert app.header.stability is None
-        assert getattr(app.face, "noise", 0) == 0 and getattr(app.face, "breaking", 0) == 0
+        assert app.face.noise == 0 and app.face.breaking == 0
