@@ -6,3 +6,7 @@ license-file.workspace = true
 publish.workspace = true
 
 [dependencies]
+rabble-theme = { path = "../rabble-theme" }
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -308,6 +308,10 @@ dependencies = [
 [[package]]
 name = "rabble-face"
 version = "0.0.0"
+dependencies = [
+ "rabble-theme",
+ "serde_json",
+]
 
 [[package]]
 name = "rabble-proto"
