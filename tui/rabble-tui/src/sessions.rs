@@ -26,6 +26,11 @@ fn title_of(v: &Value) -> Option<String> {
     (!t.is_empty() && !t.starts_with('<') && !t.starts_with("Caveat")).then_some(t)
 }
 
+/// The first user message among the first 200 lines (lines too long to be a title are skipped unparsed).
+pub fn head_title(r: impl std::io::BufRead) -> Option<String> {
+    r.lines().take(200).map_while(Result::ok).filter(|l| l.len() < 1 << 20).filter_map(|l| serde_json::from_str::<Value>(&l).ok()).find_map(|v| title_of(&v))
+}
+
 pub fn project_dir(home: &Path, cwd: &Path) -> std::path::PathBuf {
     let enc: String = cwd.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
     home.join(".claude/projects").join(enc)
@@ -45,8 +50,11 @@ pub fn recent(home: &Path, cwd: &Path, limit: usize) -> Vec<Row> {
     rows.sort_by(|a, b| b.updated.cmp(&a.updated));
     rows.truncate(limit);
     for r in &mut rows {
-        let text = std::fs::read_to_string(project_dir(home, cwd).join(format!("{}.jsonl", r.id))).unwrap_or_default();
-        let t = text.lines().take(200).filter_map(|l| serde_json::from_str::<Value>(l).ok()).find_map(|v| title_of(&v)).unwrap_or_else(|| "(untitled)".into());
+        // a session file can be tens of MB: read only the head, a line at a time
+        let t = std::fs::File::open(project_dir(home, cwd).join(format!("{}.jsonl", r.id)))
+            .ok()
+            .and_then(|f| head_title(std::io::BufReader::new(std::io::Read::take(f, 4 << 20))))
+            .unwrap_or_else(|| "(untitled)".into());
         r.title = if t.chars().count() > 70 { format!("{}...", t.chars().take(67).collect::<String>()) } else { t };
     }
     rows
@@ -80,6 +88,22 @@ mod tests {
         assert_eq!(rows.iter().map(|r| (r.id.as_str(), r.title.as_str())).collect::<Vec<_>>(), [("new", "newest work"), ("old", "fix the build")]);
         assert!(recent(&home, Path::new("/none"), 10).is_empty());
         std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn only_the_head_of_a_huge_file_is_read() {
+        struct Endless(u64);
+        impl std::io::Read for Endless {
+            fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
+                self.0 += b.len() as u64;
+                assert!(self.0 < 8 << 20, "read far past the head");
+                b.fill(b'\n');
+                Ok(b.len())
+            }
+        }
+        assert_eq!(head_title(std::io::BufReader::new(Endless(0))), None);
+        let text = format!("{}{{\"type\":\"user\",\"message\":{{\"content\":\"late\"}}}}\n", "{\"type\":\"x\"}\n".repeat(200));
+        assert_eq!(head_title(std::io::Cursor::new(text)), None, "a title after line 200 is not found");
     }
 
     #[test]

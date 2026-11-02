@@ -20,7 +20,14 @@ rabble-tui bench FILE [--repeat N] [--size WxH]
                                              headless key-to-paint and wheel-to-paint on real content
 rabble-tui spike [--log FILE]                the R0 scroll spike (q quits)";
 
-fn main() -> io::Result<()> {
+fn main() {
+    if let Err(e) = real_main() {
+        eprintln!("rabble-tui: {e}");
+        std::process::exit(1);
+    }
+}
+
+fn real_main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     let socket = || flag("--socket").map(PathBuf::from).unwrap_or_else(client::default_socket);
@@ -64,8 +71,8 @@ fn main() -> io::Result<()> {
 fn connect(args: &[String], path: PathBuf) -> io::Result<()> {
     use std::io::Write;
     let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
-    let (tx, rx) = mpsc::channel::<Net>();
-    let c = client::connect(&path, "rabble-tui-probe", tx, |n| n)?;
+    let (tx, rx) = mpsc::sync_channel::<Net>(run::NET_QUEUE);
+    let c = client::connect(&path, "rabble-tui-probe", tx, std::sync::Arc::new(|| {}))?;
     let mut p = Printer::default();
     let mut session = flag("--attach");
     if session.is_none() && args.iter().any(|a| a == "--new") {

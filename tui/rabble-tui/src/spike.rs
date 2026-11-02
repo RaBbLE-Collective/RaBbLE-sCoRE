@@ -20,7 +20,7 @@ use crate::{
     glide::{Glide, GLIDE_FPS},
     transcript::{Transcript, View},
 };
-use ratatui::{backend::CrosstermBackend, layout::Rect, style::{Color, Style}, widgets::Paragraph, Terminal};
+use ratatui::{backend::CrosstermBackend, layout::Rect, widgets::Paragraph, Terminal};
 
 const BSU: &[u8] = b"\x1b[?2026h";
 const ESU: &[u8] = b"\x1b[?2026l";
@@ -61,7 +61,8 @@ fn handle(ev: Event, glide: &mut Glide, max: f64) -> bool {
 }
 
 pub fn run(log: Option<String>) -> io::Result<()> {
-    let t = Transcript::synthetic(10_000);
+    let th = crate::theme::Theme::from_env();
+    let t = Transcript::synthetic_with(10_000, &th);
 
     enable_raw_mode()?;
     execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
@@ -112,7 +113,7 @@ pub fn run(log: Option<String>) -> io::Result<()> {
                         if glide.instant { "1:1 INSTANT" } else { "glide" },
                         glide.lines,
                         if glide.instant { String::new() } else { format!(" | rate {:.0} | min {:.0}/s", glide.rate, glide.min_speed) });
-                    f.render_widget(Paragraph::new(bar).style(Style::new().fg(Color::Black).bg(Color::Rgb(0, 245, 255))),
+                    f.render_widget(Paragraph::new(bar).style(th.select),
                         Rect { y: a.y + a.height.saturating_sub(1), height: 1, ..a });
                 })?;
                 io::stdout().write_all(ESU)?;

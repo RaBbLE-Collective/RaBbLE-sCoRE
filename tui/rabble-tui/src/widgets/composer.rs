@@ -26,15 +26,23 @@ pub enum Action {
     Paste, // the app should fetch the system clipboard and call `insert_str`
 }
 
+/// Walk `root` (breadth of the project, not symlinks: a link to `/` must not be followed) and
+/// stop the moment `cap` entries are collected. Run it on a worker thread, never on the UI's.
 pub fn scan_files(root: &Path, cap: usize) -> Vec<String> {
     let mut out = Vec::new();
     let mut stack = vec![(root.to_path_buf(), 0usize)];
     while let Some((dir, depth)) = stack.pop() {
         let Ok(rd) = std::fs::read_dir(&dir) else { continue };
-        let mut names: Vec<(String, bool)> = rd.filter_map(|e| e.ok()).map(|e| (e.file_name().to_string_lossy().into_owned(), e.path().is_dir())).collect();
+        let mut names: Vec<(String, bool)> = rd
+            .filter_map(|e| e.ok())
+            .map(|e| (e.file_name().to_string_lossy().into_owned(), e.file_type().is_ok_and(|t| t.is_dir()))) // file_type does not follow symlinks
+            .collect();
         names.sort();
         let mut subdirs = Vec::new();
         for (n, is_dir) in names {
+            if out.len() >= cap {
+                return out;
+            }
             let rel = dir.strip_prefix(root).unwrap_or(&dir).join(&n).to_string_lossy().into_owned();
             if is_dir {
                 if SKIP.contains(&n.as_str()) || (n.starts_with('.') && n != ".claude") {
@@ -49,11 +57,7 @@ pub fn scan_files(root: &Path, cap: usize) -> Vec<String> {
             }
         }
         stack.extend(subdirs.into_iter().rev());
-        if out.len() >= cap {
-            break;
-        }
     }
-    out.truncate(cap);
     out
 }
 
@@ -74,6 +78,8 @@ pub struct Composer {
     pub commands: Vec<String>,
     cwd: String,
     files: Option<Vec<String>>,
+    scan_wanted: bool,
+    scanning: bool,
     pub dropdown: Vec<String>,
     pub sel: usize,
     slash: bool,
@@ -82,7 +88,7 @@ pub struct Composer {
 
 impl Composer {
     pub fn new(cwd: &str, commands: Vec<String>) -> Self {
-        Composer { buf: Vec::new(), cur: 0, history: Vec::new(), pos: None, draft: String::new(), commands, cwd: cwd.into(), files: None, dropdown: Vec::new(), sel: 0, slash: false, frag_len: 0 }
+        Composer { buf: Vec::new(), cur: 0, history: Vec::new(), pos: None, draft: String::new(), commands, cwd: cwd.into(), files: None, scan_wanted: false, scanning: false, dropdown: Vec::new(), sel: 0, slash: false, frag_len: 0 }
     }
 
     pub fn text(&self) -> String {
@@ -116,7 +122,7 @@ impl Composer {
     }
 
     pub fn insert_str(&mut self, s: &str) {
-        let s = s.replace("\r\n", "\n").replace('\r', "\n");
+        let s = crate::wrap::clean(&s.replace("\r\n", "\n").replace('\r', "\n"));
         for c in s.chars() {
             self.buf.insert(self.cur, c);
             self.cur += 1;
@@ -152,11 +158,28 @@ impl Composer {
         let word = &before[frag_start..];
         if let Some(frag) = word.strip_prefix('@') {
             if !frag.contains('@') {
-                let files = self.files.get_or_insert_with(|| scan_files(Path::new(&self.cwd), SCAN_CAP));
                 self.frag_len = frag.chars().count();
-                self.dropdown = match_files(files, frag, SHOW);
+                match &self.files {
+                    Some(files) => self.dropdown = match_files(files, frag, SHOW),
+                    None => self.scan_wanted = !self.scanning, // the app scans on a worker and calls set_files
+                }
             }
         }
+    }
+
+    /// The directory to scan, once, if an `@` completion is waiting for the file list.
+    pub fn take_scan_request(&mut self) -> Option<(String, usize)> {
+        if std::mem::take(&mut self.scan_wanted) {
+            self.scanning = true;
+            return Some((self.cwd.clone(), SCAN_CAP));
+        }
+        None
+    }
+
+    pub fn set_files(&mut self, files: Vec<String>) {
+        self.files = Some(files);
+        self.scanning = false;
+        self.update_completion();
     }
 
     fn accept(&mut self) {
@@ -222,6 +245,7 @@ impl Composer {
                 self.buf.clear();
                 self.cur = 0;
                 self.pos = None;
+                self.files = None; // the project changes while we work: rescan next time
                 return Action::Submit(text);
             }
             KeyCode::Tab if self.completing() => {
@@ -489,11 +513,44 @@ mod tests {
         std::fs::create_dir_all(dir.join("node_modules/x")).unwrap();
         let mut c = Composer::new(dir.to_str().unwrap(), vec![]);
         typ(&mut c, "see @not");
+        assert!(c.dropdown.is_empty(), "the scan is not done on the typing thread");
+        let (root, cap) = c.take_scan_request().expect("the app is asked to scan");
+        assert_eq!(c.take_scan_request(), None, "asked once while scanning");
+        c.set_files(scan_files(Path::new(&root), cap));
         assert_eq!(c.dropdown, ["sub/notes.md"]);
         c.key(k(KeyCode::Tab));
         assert_eq!(c.text(), "see @sub/notes.md ");
         assert!(scan_files(&dir, 100).iter().all(|f| !f.contains("node_modules")));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_scan_stops_at_the_cap_during_the_walk_and_never_follows_symlinks() {
+        let dir = std::env::temp_dir().join(format!("rt-scan-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("real")).unwrap();
+        for i in 0..50 {
+            std::fs::write(dir.join(format!("f{i:02}")), "x").unwrap();
+        }
+        std::fs::write(dir.join("real/inside.txt"), "x").unwrap();
+        std::os::unix::fs::symlink("/", dir.join("loop")).unwrap();
+        let all = scan_files(&dir, 5000);
+        assert!(all.iter().any(|f| f == "real/inside.txt"));
+        assert!(all.iter().all(|f| !f.starts_with("loop/")), "a symlinked dir is not entered: {all:?}");
+        assert_eq!(scan_files(&dir, 7).len(), 7, "capped inside one directory, not after it");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn submit_drops_the_file_cache_and_paste_strips_escapes() {
+        let mut c = comp();
+        c.set_files(vec!["a".into()]);
+        typ(&mut c, "x");
+        c.key(k(KeyCode::Enter));
+        typ(&mut c, "@a");
+        assert!(c.take_scan_request().is_some(), "the next @ rescans");
+        let mut c = comp();
+        c.insert_str("a\x1b[2Jb\tc");
+        assert_eq!(c.text(), "a[2Jb    c");
     }
 
     #[test]

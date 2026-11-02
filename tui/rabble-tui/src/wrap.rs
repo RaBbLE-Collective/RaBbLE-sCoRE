@@ -16,6 +16,23 @@ pub fn spans_width(spans: &[Span]) -> usize {
     spans.iter().map(|s| str_width(&s.content)).sum()
 }
 
+/// Text from outside (the model, a tool, a file name) made safe to put in a terminal cell:
+/// control characters (so no escape sequence reaches the terminal), C1 controls, DEL and bidi
+/// overrides are dropped; tabs become four spaces; newlines are kept for the caller to split.
+pub fn clean(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\n' => out.push('\n'),
+            '\t' => out.push_str("    "),
+            c if c.is_control() => {}
+            '\u{200e}' | '\u{200f}' | '\u{061c}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 type Cell = (char, Style);
 
 fn flatten(spans: &[Span<'_>]) -> Vec<Cell> {
@@ -100,6 +117,11 @@ mod tests {
 
     fn w(s: &str, width: usize) -> Vec<String> {
         wrap(&[Span::raw(s.to_owned())], width, &[], &[]).iter().map(text).collect()
+    }
+
+    #[test]
+    fn clean_drops_controls_and_bidi_and_expands_tabs() {
+        assert_eq!(clean("a\x1b]52;c;QQ==\x07b\x1b[2Jc\u{202e}d\x7f\u{9b}\te\nf"), "a]52;c;QQ==b[2Jcd    e\nf");
     }
 
     #[test]

@@ -59,7 +59,11 @@ impl Settings {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let _ = std::fs::write(path, serde_json::to_string_pretty(&body).unwrap_or_default() + "\n");
+        // temp + rename: a crash mid-write must not leave half a file for the Python UI to choke on
+        let tmp = path.with_extension(format!("json.tmp{}", std::process::id()));
+        if std::fs::write(&tmp, serde_json::to_string_pretty(&body).unwrap_or_default() + "\n").is_ok() && std::fs::rename(&tmp, path).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
 }
 
@@ -93,6 +97,8 @@ mod tests {
         s.park_continue = true;
         s.save();
         assert_eq!(Settings::load(&p), s);
+        let leftovers = std::fs::read_dir(p.parent().unwrap()).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().contains("tmp")).count();
+        assert_eq!(leftovers, 0, "the temp file is renamed away");
         std::fs::write(&p, "{not json").unwrap();
         assert_eq!(Settings::load(&p).mode, "default");
         std::fs::write(&p, r#"{"model":"","crew":"yes","mode":"bogus","trust":"nope","park":"x"}"#).unwrap();

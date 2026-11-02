@@ -330,6 +330,7 @@ dependencies = [
  "rabble-theme",
  "ratatui",
  "serde_json",
+ "signal-hook",
  "unicode-width 0.2.2",
 ]
 

@@ -35,11 +35,38 @@ pub fn copy_to_system(text: &str) {
     }
 }
 
-/// Text on the desktop clipboard (Wayland, then X11); "" when there is none or it is not text.
+/// Run a command and collect its stdout, killing it after `limit`.
+pub fn output_within(cmd: &[&str], limit: std::time::Duration) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut c = Command::new(cmd[0]).args(&cmd[1..]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let mut out = c.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut v = Vec::new();
+        let _ = out.read_to_end(&mut v);
+        v
+    });
+    let start = std::time::Instant::now();
+    loop {
+        match c.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if start.elapsed() < limit => std::thread::sleep(std::time::Duration::from_millis(10)),
+            _ => {
+                let _ = c.kill();
+                let _ = c.wait();
+                break;
+            }
+        }
+    }
+    reader.join().ok()
+}
+
+/// Text on the desktop clipboard (Wayland, then X11); "" when there is none, it is not text, or
+/// the tool hangs (2 s). Blocking: call it from a worker thread.
 pub fn system_clipboard() -> String {
+    let lim = std::time::Duration::from_secs(2);
     for cmd in [vec!["wl-paste", "--no-newline", "--type", "text"], vec!["xclip", "-selection", "clipboard", "-o", "-t", "UTF8_STRING"]] {
-        if let Ok(o) = Command::new(cmd[0]).args(&cmd[1..]).stdin(Stdio::null()).stderr(Stdio::null()).output() {
-            return String::from_utf8(o.stdout).unwrap_or_default();
+        if let Some(o) = output_within(&cmd, lim) {
+            return String::from_utf8(o).unwrap_or_default();
         }
     }
     String::new()
@@ -48,6 +75,14 @@ pub fn system_clipboard() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hung_command_is_killed_at_the_limit() {
+        let t = std::time::Instant::now();
+        let out = output_within(&["sleep", "30"], std::time::Duration::from_millis(150));
+        assert!(t.elapsed() < std::time::Duration::from_secs(5) && out.is_some_and(|o| o.is_empty()));
+        assert_eq!(output_within(&["echo", "hi"], std::time::Duration::from_secs(5)), Some(b"hi\n".to_vec()));
+    }
 
     #[test]
     fn base64_matches_the_rfc_vectors() {

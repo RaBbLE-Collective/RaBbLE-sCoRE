@@ -148,15 +148,32 @@ mod tests {
         assert!(Glyphs::SAFE.rule.is_ascii() && Glyphs::SAFE.corner.iter().all(|c| c.is_ascii()));
     }
 
-    #[test]
-    fn no_hex_literals_in_this_crate() {
-        let re_hex = |s: &str| s.as_bytes().windows(7).any(|w| w[0] == b'#' && w[1..].iter().all(u8::is_ascii_hexdigit));
-        for f in ["app.rs", "theme.rs", "markdown.rs", "wrap.rs", "run.rs", "widgets/transcript.rs", "widgets/composer.rs", "widgets/header.rs", "widgets/modal.rs"] {
-            let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join(f);
-            if let Ok(src) = std::fs::read_to_string(&p) {
-                let src = src.split("#[cfg(test)]").next().unwrap();
-                assert!(!re_hex(src), "{f}");
+    fn rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for e in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                rs_files(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(p);
             }
+        }
+    }
+
+    /// Every file under src/ (a missing one fails the walk): no `#rrggbb` anywhere in non-test
+    /// code, and `Color::Rgb(` only in theme.rs, which converts palette entries.
+    #[test]
+    fn no_hex_or_rgb_literals_anywhere_in_src() {
+        let re_hex = |s: &str| s.as_bytes().windows(7).any(|w| w[0] == b'#' && w[1..].iter().all(u8::is_ascii_hexdigit));
+        let mut files = Vec::new();
+        rs_files(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
+        assert!(files.len() >= 15, "walked {} files", files.len());
+        for p in files {
+            let src = std::fs::read_to_string(&p).unwrap();
+            let src = src.split("#[cfg(test)]").next().unwrap();
+            let name = p.file_name().unwrap().to_string_lossy().into_owned();
+            assert!(!re_hex(src), "hex literal in {name}");
+            assert!(name == "theme.rs" || !src.contains("Color::Rgb("), "Color::Rgb( in {name}");
+            assert!(name == "theme.rs" || !src.contains("Color::Indexed("), "Color::Indexed( in {name}");
         }
     }
 }

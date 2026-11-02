@@ -9,7 +9,8 @@
 use std::{
     collections::{HashSet, VecDeque},
     path::PathBuf,
-    time::{Instant, SystemTime},
+    sync::{mpsc::Sender, Arc},
+    time::{Duration, Instant, SystemTime},
 };
 
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
@@ -47,10 +48,22 @@ pub const HELP: [(&str, &str); 13] = [
     ("Ctrl-O", "expand or collapse tool cards"),
 ];
 
-#[derive(Debug)]
+/// Makes a fresh engine connection (used to reconnect); `None` in tests and benches.
+pub type Connector = Arc<dyn Fn() -> std::io::Result<Handle> + Send + Sync>;
+
+/// Everything the run loop hands the app besides engine frames (those come on their own bounded
+/// queue and are fed to `on_net`). Workers (file scan, session list, clipboard, reconnect) post
+/// their results back as messages, so nothing slow ever runs on the render thread.
 pub enum Msg {
     Input(Event, Instant),
-    Net(Net),
+    /// Engine frames are waiting on the net queue.
+    Wake,
+    /// Leave (signal, or the input thread died).
+    Quit(String),
+    Sessions(Vec<sessions::Row>),
+    Files(Vec<String>),
+    Clipboard(String),
+    Reconnected(Handle),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -109,6 +122,13 @@ pub struct App {
     entropy_trust: Option<String>,
     pub caps_line: String,
     pub focused: bool,
+    /// Where workers post their results (set by the run loop).
+    pub post: Option<Sender<Msg>>,
+    pub connector: Option<Connector>,
+    pub quit_reason: Option<String>,
+    create_id: Option<String>,
+    reconnecting: bool,
+    reconnect_running: bool,
 }
 
 fn base_commands() -> Vec<String> {
@@ -126,6 +146,7 @@ impl App {
             session: None, max_seq: 0, turn_open: false, engine_ok: true, cfg, out, asks: VecDeque::new(), seen_asks: HashSet::new(), last_ctrl_c: None,
             sdk_session: None, started: false, live: vec![], parking: None, park_pending: false, park_warned: false, park_blocked: false, seed: None,
             continue_once: false, entropy_trust: None, caps_line: String::new(), focused: true,
+            post: None, connector: None, quit_reason: None, create_id: None, reconnecting: false, reconnect_running: false,
         }
     }
 
@@ -153,13 +174,13 @@ impl App {
     }
 
     fn create(&mut self, resume: Option<String>, crew: bool) {
-        self.out.request(
+        self.create_id = Some(self.out.request(
             &Up::CreateSession {
                 cwd: Some(self.cfg.cwd.clone()), resume, continue_last: None, model: self.settings.model.clone(),
                 mode: Some(self.settings.mode.clone()), crew: Some(crew), trust: self.settings.trust.clone(), provider: None,
             },
             "create",
-        );
+        ));
     }
 
     pub fn trust_profile(&self) -> String {
@@ -180,7 +201,13 @@ impl App {
             Net::Reply { label, frame } => match (label.as_str(), &frame.msg) {
                 ("resume-list", Down::Sessions { sessions }) => {
                     self.live = sessions.clone();
-                    self.open_session_picker();
+                    self.spawn_sessions();
+                }
+                // a creation we have since replaced (two quick /clear): close what it made, adopt nothing
+                ("create", Down::SessionCreated {}) if frame.id != self.create_id => {
+                    if let Some(s) = &frame.session {
+                        self.out.send(&Up::CloseSession { session: s.clone() });
+                    }
                 }
                 _ => self.on_frame(frame),
             },
@@ -195,7 +222,9 @@ impl App {
                 self.header.connected = false;
                 self.turn_open = false;
                 self.t.end_turn();
-                self.notice(&format!("engine connection lost: {why}. Restart rabble to reconnect; the session keeps running in the engine"), true);
+                let again = if self.connector.is_some() { "reconnecting" } else { "restart rabble to reconnect" };
+                self.notice(&format!("engine connection lost: {why}; {again} (the session keeps running in the engine)"), true);
+                self.start_reconnect();
             }
         }
     }
@@ -219,6 +248,14 @@ impl App {
                             self.out.request(&Up::Attach { session: id, since_seq: None }, "attach");
                         }
                     }
+                } else if std::mem::take(&mut self.reconnecting) {
+                    // back after a drop: ask only for what we have not seen (max seq of events)
+                    match self.session.clone() {
+                        Some(session) => {
+                            self.out.request(&Up::Attach { session, since_seq: Some(self.max_seq) }, "attach");
+                        }
+                        None => self.create(None, self.settings.crew),
+                    }
                 }
                 return;
             }
@@ -226,6 +263,7 @@ impl App {
                 self.live = sessions.clone();
                 return;
             }
+            (Down::Error { .. }, Some(s)) if self.session.as_deref() != Some(s.as_str()) => return, // another session's trouble
             (Down::Error { text }, _) => {
                 self.t.end_turn();
                 self.notice(text, true);
@@ -500,8 +538,91 @@ impl App {
     pub fn on_msg(&mut self, m: Msg) {
         match m {
             Msg::Input(e, _) => self.on_input(e),
-            Msg::Net(n) => self.on_net(n),
+            Msg::Wake => {}
+            Msg::Quit(why) => {
+                self.quit_reason = Some(why);
+                self.quit = true;
+            }
+            Msg::Sessions(rows) => {
+                self.dirty = true;
+                if matches!(self.overlay, Overlay::None) {
+                    self.open_session_picker(rows);
+                } else {
+                    // never replace a prompt that is waiting for an answer
+                    self.notice("session list is ready: run /resume again when the open prompt is closed", false);
+                }
+            }
+            Msg::Files(v) => {
+                self.dirty = true;
+                self.composer.set_files(v);
+            }
+            Msg::Clipboard(t) => {
+                self.dirty = true;
+                if !t.is_empty() && matches!(self.overlay, Overlay::None) {
+                    self.composer.insert_str(&t);
+                    self.pump_composer();
+                }
+            }
+            Msg::Reconnected(h) => {
+                self.dirty = true;
+                self.out = h;
+                self.engine_ok = true;
+                self.header.connected = true;
+                self.reconnecting = true;
+                self.reconnect_running = false;
+                self.notice("reconnected", false);
+            }
         }
+    }
+
+    fn spawn_sessions(&mut self) {
+        let Some(post) = self.post.clone() else { return self.notice("/resume: no worker channel", true) };
+        let (cwd, home) = (self.cfg.cwd.clone(), PathBuf::from(std::env::var_os("HOME").unwrap_or_default()));
+        std::thread::spawn(move || {
+            let _ = post.send(Msg::Sessions(sessions::recent(&home, std::path::Path::new(&cwd), 20)));
+        });
+    }
+
+    /// Start the file scan an `@` completion is waiting for, off the render thread.
+    fn pump_composer(&mut self) {
+        if let Some((cwd, cap)) = self.composer.take_scan_request() {
+            match self.post.clone() {
+                Some(post) => {
+                    std::thread::spawn(move || {
+                        let _ = post.send(Msg::Files(crate::widgets::composer::scan_files(std::path::Path::new(&cwd), cap)));
+                    });
+                }
+                None => self.composer.set_files(vec![]),
+            }
+        }
+    }
+
+    fn start_reconnect(&mut self) {
+        let (Some(conn), Some(post)) = (self.connector.clone(), self.post.clone()) else { return };
+        if std::mem::replace(&mut self.reconnect_running, true) {
+            return;
+        }
+        std::thread::spawn(move || {
+            let mut delay = Duration::from_millis(250);
+            loop {
+                match conn() {
+                    Ok(h) => {
+                        let _ = post.send(Msg::Reconnected(h));
+                        return;
+                    }
+                    Err(_) => {
+                        std::thread::sleep(delay);
+                        delay = (delay * 2).min(Duration::from_secs(5));
+                    }
+                }
+            }
+        });
+    }
+
+    /// Close the overlay and let the next queued permission ask take the screen.
+    fn close_overlay(&mut self) {
+        self.overlay = Overlay::None;
+        self.next_ask();
     }
 
     pub fn on_input(&mut self, e: Event) {
@@ -522,7 +643,10 @@ impl App {
                         r.push_str(&s.replace(['\r', '\n'], " "));
                     }
                 }
-                Overlay::None => self.composer.insert_str(&s),
+                Overlay::None => {
+                    self.composer.insert_str(&s);
+                    self.pump_composer();
+                }
                 _ => {}
             },
             Event::Mouse(m) => {
@@ -534,9 +658,11 @@ impl App {
                     }
                 }
             }
-            Event::Key(k) if k.kind != KeyEventKind::Release => self.on_key(k),
+            // a held key must never answer a permission prompt, so repeats are ignored there
+            Event::Key(k) if k.kind == KeyEventKind::Press || (k.kind == KeyEventKind::Repeat && !matches!(self.overlay, Overlay::Permission(_))) => self.on_key(k),
             _ => {}
         }
+        self.pump_composer();
     }
 
     fn on_key(&mut self, k: crossterm::event::KeyEvent) {
@@ -549,10 +675,11 @@ impl App {
             }
             Overlay::Model(p) => {
                 match p.key(k) {
-                    Picked::Close => self.overlay = Overlay::None,
+                    Picked::Close => self.close_overlay(),
                     Picked::Choose(v) => {
                         self.overlay = Overlay::None;
                         self.set_model(if v.is_empty() { None } else { Some(v) });
+                        self.next_ask();
                     }
                     Picked::None => {}
                 }
@@ -560,10 +687,11 @@ impl App {
             }
             Overlay::Sessions(p) => {
                 match p.key(k) {
-                    Picked::Close => self.overlay = Overlay::None,
+                    Picked::Close => self.close_overlay(),
                     Picked::Choose(v) => {
                         self.overlay = Overlay::None;
                         self.resume_choice(&v);
+                        self.next_ask();
                     }
                     Picked::None => {}
                 }
@@ -605,9 +733,11 @@ impl App {
                 }
                 Action::CtrlD => self.quit = true,
                 Action::Paste => {
-                    let t = crate::util::system_clipboard();
-                    if !t.is_empty() {
-                        self.composer.insert_str(&t);
+                    // wl-paste/xclip can hang: ask on a worker, the text arrives as Msg::Clipboard
+                    if let Some(post) = self.post.clone() {
+                        std::thread::spawn(move || {
+                            let _ = post.send(Msg::Clipboard(crate::util::system_clipboard()));
+                        });
                     }
                 }
             },
@@ -709,8 +839,7 @@ impl App {
         }
     }
 
-    fn open_session_picker(&mut self) {
-        let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    fn open_session_picker(&mut self, recent: Vec<sessions::Row>) {
         let now = SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
         let mut items: Vec<(String, String)> = self
             .live
@@ -720,12 +849,13 @@ impl App {
             .collect();
         let running: HashSet<_> = self.live.iter().filter_map(|s| s.sdk_session.clone()).collect();
         items.extend(
-            sessions::recent(&home, std::path::Path::new(&self.cfg.cwd), 20).into_iter().filter(|r| !running.contains(&r.id)).map(|r| (format!("{:<70} {}", r.title, sessions::ago(r.updated, now)), format!("resume:{}", r.id))),
+            recent.into_iter().filter(|r| !running.contains(&r.id)).map(|r| (format!("{:<70} {}", r.title, sessions::ago(r.updated, now)), format!("resume:{}", r.id))),
         );
         self.overlay = Overlay::Sessions(Picker::new("Resume a session", items, true, "No earlier sessions here", None));
     }
 
     fn resume_choice(&mut self, v: &str) {
+        self.asks.clear(); // asks belong to the session we are leaving: never answer them against another
         if let Some(id) = v.strip_prefix("attach:") {
             if let Some(old) = self.session.take() {
                 self.out.send(&Up::Detach { session: old });
@@ -1142,7 +1272,12 @@ mod tests {
         let req = sent(&rx).into_iter().find(|m| m["type"] == "list_sessions").unwrap();
         assert!(req["id"].is_string());
         let f = Frame::parse(r#"{"type":"sessions","id":"r1","sessions":[{"session":"s2","role":"participant","clients":2,"cwd":"/w","busy":true}]}"#).unwrap();
+        let (ptx, prx) = std::sync::mpsc::channel();
+        a.post = Some(ptx);
         a.on_net(Net::Reply { label: "resume-list".into(), frame: f });
+        // the history scan runs on a worker and arrives as a message
+        let m = prx.recv_timeout(std::time::Duration::from_secs(5)).expect("worker result");
+        a.on_msg(m);
         let Overlay::Sessions(p) = &mut a.overlay else { panic!("picker") };
         assert!(p.items[0].0.contains("s2") && p.items[0].1 == "attach:s2");
         a.on_input(key(KeyCode::Enter));
@@ -1248,5 +1383,155 @@ mod tests {
         t.draw(|f| a.draw(f)).unwrap();
         let b = t.backend().buffer();
         assert!(b.content().iter().all(|c| c.fg == ratatui::style::Color::Reset && c.bg == ratatui::style::Color::Reset));
+    }
+
+    fn with_post(a: &mut App) -> std::sync::mpsc::Receiver<Msg> {
+        let (ptx, prx) = std::sync::mpsc::channel();
+        a.post = Some(ptx);
+        prx
+    }
+    fn arm(a: &mut App) {
+        if let Overlay::Permission(p) = &mut a.overlay {
+            p.armed_at = Instant::now() - Duration::from_secs(1);
+        }
+    }
+
+    #[test]
+    fn held_keys_cannot_answer_a_prompt_but_still_repeat_in_the_composer() {
+        let (mut a, rx) = live();
+        ev(&mut a, &ask("a1"));
+        arm(&mut a);
+        let mut k = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
+        k.kind = KeyEventKind::Repeat;
+        a.on_input(Event::Key(k));
+        assert!(sent(&rx).is_empty() && matches!(a.overlay, Overlay::Permission(_)));
+        let (mut b, _) = live();
+        b.on_input(Event::Key(k));
+        b.on_input(Event::Key(k));
+        assert_eq!(b.composer.text(), "yy");
+    }
+
+    #[test]
+    fn typing_at_60ms_past_the_window_does_not_answer_through_the_app() {
+        let (mut a, rx) = live();
+        ev(&mut a, &ask("a1"));
+        // the app path uses the real clock: shove the deadline into the past, then type with the
+        // virtual clock directly on the prompt (the unit test for the timing is in modal.rs)
+        if let Overlay::Permission(p) = &mut a.overlay {
+            let t0 = Instant::now();
+            for i in 0..12u64 {
+                assert_eq!(p.key_at(key_ev('y'), t0 + Duration::from_millis(60 * i)), None);
+            }
+        }
+        assert!(sent(&rx).is_empty());
+    }
+    fn key_ev(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn an_ask_that_arrives_while_a_picker_is_open_appears_when_it_closes() {
+        let (mut a, _rx) = live();
+        say(&mut a, "/model");
+        ev(&mut a, &ask("a1"));
+        assert!(matches!(a.overlay, Overlay::Model(_)), "the picker keeps the screen");
+        assert_eq!(a.busy_label(), "awaiting approval");
+        a.on_input(key(KeyCode::Esc));
+        assert!(matches!(&a.overlay, Overlay::Permission(p) if p.ask.id == "a1"));
+        // and the same after choosing from it
+        let (mut b, _rx) = live();
+        say(&mut b, "/model");
+        ev(&mut b, &ask("a2"));
+        b.on_input(key(KeyCode::Enter));
+        assert!(matches!(&b.overlay, Overlay::Permission(p) if p.ask.id == "a2"));
+    }
+
+    #[test]
+    fn a_late_session_list_never_replaces_a_prompt_and_switching_clears_queued_asks() {
+        let (mut a, rx) = live();
+        ev(&mut a, &ask("a1"));
+        a.on_msg(Msg::Sessions(vec![]));
+        assert!(matches!(&a.overlay, Overlay::Permission(p) if p.ask.id == "a1"), "prompt kept");
+        assert!(screen(&mut a, 100, 30).contains("run /resume again"));
+        // queued ask from the old session is dropped when the reader moves to another session
+        let (mut b, rx2) = live();
+        say(&mut b, "/model");
+        ev(&mut b, &ask("old"));
+        b.overlay = Overlay::Sessions(Picker::new("R", vec![("x".into(), "attach:s2".into())], true, "", None));
+        b.on_input(key(KeyCode::Enter));
+        assert!(matches!(b.overlay, Overlay::None), "the old session's ask must not open against s2");
+        assert_eq!(b.session.as_deref(), Some("s2"));
+        assert!(sent(&rx2).iter().all(|m| m["type"] != "answer"));
+        let _ = rx;
+    }
+
+    #[test]
+    fn a_replaced_creation_is_closed_not_adopted() {
+        let (mut a, rx) = app_with(Start::New { resume: None });
+        feed(&mut a, r#"{"type":"hello","version":1,"engine":"e","user":"u"}"#);
+        let first = sent(&rx)[0]["id"].as_str().unwrap().to_owned();
+        say(&mut a, "/clear");
+        let second = sent(&rx).iter().find(|m| m["type"] == "create_session").unwrap()["id"].as_str().unwrap().to_owned();
+        let reply = |id: &str, s: &str| Net::Reply { label: "create".into(), frame: Frame::parse(&format!(r#"{{"type":"session_created","session":"{s}","id":"{id}"}}"#)).unwrap() };
+        a.on_net(reply(&first, "stale"));
+        assert!(a.session.is_none());
+        assert!(sent(&rx).iter().any(|m| m["type"] == "close_session" && m["session"] == "stale"));
+        a.on_net(reply(&second, "fresh"));
+        assert_eq!(a.session.as_deref(), Some("fresh"));
+    }
+
+    #[test]
+    fn an_error_from_another_session_is_not_shown() {
+        let (mut a, _rx) = live();
+        feed(&mut a, r#"{"type":"Error","session":"zzz","text":"not yours"}"#);
+        feed(&mut a, r#"{"type":"Error","text":"engine level"}"#);
+        let s = screen(&mut a, 100, 20);
+        assert!(!s.contains("not yours") && s.contains("engine level"), "{s}");
+    }
+
+    #[test]
+    fn workers_post_back_files_clipboard_and_quit() {
+        let dir = std::env::temp_dir().join(format!("rt-appfiles-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("notes.md"), "x").unwrap();
+        let (mut a, _rx) = live();
+        a.composer = Composer::new(dir.to_str().unwrap(), vec![]);
+        let prx = with_post(&mut a);
+        type_in(&mut a, "see @not");
+        assert!(a.composer.dropdown.is_empty());
+        let m = prx.recv_timeout(Duration::from_secs(5)).expect("scan result");
+        assert!(matches!(m, Msg::Files(_)));
+        a.on_msg(m);
+        assert_eq!(a.composer.dropdown, ["notes.md"]);
+        a.on_msg(Msg::Clipboard("pasted".into()));
+        assert!(a.composer.text().ends_with("pasted"));
+        a.on_msg(Msg::Quit("terminated (signal 15)".into()));
+        assert!(a.quit && a.quit_reason.as_deref() == Some("terminated (signal 15)"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_dropped_connection_reconnects_and_reattaches_from_the_last_seq() {
+        let (mut a, _rx) = live();
+        let prx = with_post(&mut a);
+        a.started = true; // the first hello already created the session
+        let (h2, rx2) = Handle::detached();
+        let h2cell = std::sync::Mutex::new(Some(h2));
+        a.connector = Some(Arc::new(move || Ok(h2cell.lock().unwrap().take().expect("one reconnect"))));
+        ev(&mut a, r#"{"type":"TextDelta","seq":41,"organ":"rabble","text":"x"}"#);
+        feed(&mut a, r#"{"type":"TextDelta","session":"s1","seq":42,"organ":"rabble","text":"y"}"#);
+        a.on_net(Net::Closed("eof".into()));
+        assert!(!a.engine_ok && screen(&mut a, 100, 20).contains("reconnecting"));
+        let m = prx.recv_timeout(Duration::from_secs(5)).expect("reconnected");
+        assert!(matches!(m, Msg::Reconnected(_)));
+        a.on_msg(m);
+        assert!(a.engine_ok && a.header.connected);
+        feed(&mut a, r#"{"type":"hello","version":1,"engine":"e","user":"u"}"#);
+        let s = sent(&rx2);
+        let at = s.iter().find(|m| m["type"] == "attach").expect("attach");
+        assert_eq!((at["session"].as_str(), at["since_seq"].as_u64()), (Some("s1"), Some(42)));
+        // a second hello does not attach again
+        feed(&mut a, r#"{"type":"hello","version":1,"engine":"e","user":"u"}"#);
+        assert!(sent(&rx2).iter().all(|m| m["type"] != "attach"));
     }
 }

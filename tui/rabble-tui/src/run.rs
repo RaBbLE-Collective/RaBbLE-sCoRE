@@ -6,9 +6,13 @@
 
 use std::{
     fs::File,
-    io::{self, BufWriter, Stdout, Write},
+    io::{self, Write},
     path::PathBuf,
-    sync::mpsc::{self, RecvTimeoutError},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, RecvTimeoutError},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -17,11 +21,11 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use ratatui::{backend::{Backend, CrosstermBackend}, Terminal};
+use ratatui::{backend::CrosstermBackend, Terminal};
 
 use crate::{
-    app::{App, Config, Effect, Msg, Start},
-    client,
+    app::{App, Config, Connector, Effect, Msg, Start},
+    client::{self, Net},
     prefs::{self, Settings},
     theme::Theme,
     util,
@@ -29,7 +33,8 @@ use crate::{
 
 pub const BSU: &[u8] = b"\x1b[?2026h";
 pub const ESU: &[u8] = b"\x1b[?2026l";
-const DRAIN_CAP: usize = 4096;
+/// Engine frames waiting for the loop; a reader that gets ahead blocks (the socket backs up).
+pub const NET_QUEUE: usize = 1024;
 
 pub struct Opts {
     pub socket: PathBuf,
@@ -39,9 +44,25 @@ pub struct Opts {
     pub latency_log: Option<PathBuf>,
 }
 
-type Out = BufWriter<Stdout>;
+/// The terminal's output buffer. One paint is one `flush`; if the process panics mid-frame the
+/// half-built frame is DROPPED (a `BufWriter` would flush it to the main screen on unwind).
+pub struct FrameBuf<W: Write>(Vec<u8>, W);
 
-fn paint(term: &mut Terminal<CrosstermBackend<Out>>, app: &mut App) -> io::Result<()> {
+impl<W: Write> Write for FrameBuf<W> {
+    fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+        self.0.extend_from_slice(b);
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.1.write_all(&self.0)?;
+        self.0.clear();
+        self.1.flush()
+    }
+}
+
+type Term = Terminal<CrosstermBackend<FrameBuf<io::Stdout>>>;
+
+fn paint(term: &mut Term, app: &mut App) -> io::Result<()> {
     term.backend_mut().write_all(BSU)?;
     term.autoresize()?; // a resize that landed mid-frame is picked up here, before drawing
     term.draw(|f| app.draw(f))?;
@@ -49,7 +70,7 @@ fn paint(term: &mut Terminal<CrosstermBackend<Out>>, app: &mut App) -> io::Resul
     Write::flush(term.backend_mut())
 }
 
-fn apply_effects(app: &mut App, term: &mut Terminal<CrosstermBackend<Out>>) -> io::Result<()> {
+fn apply_effects(app: &mut App, term: &mut Term) -> io::Result<()> {
     for e in app.effects.drain(..) {
         match e {
             Effect::Copy(t) => {
@@ -69,6 +90,20 @@ pub fn pct(v: &mut [f64], p: f64) -> f64 {
     v[((v.len() - 1) as f64 * p) as usize]
 }
 
+/// Undo every terminal mode we set, in the order that cannot leave a half frame on screen:
+/// end synchronized output first (a terminal holding a frame would swallow the rest).
+pub fn restore() -> io::Result<()> {
+    let mut out = io::stdout();
+    restore_modes(&mut out)?;
+    disable_raw_mode()
+}
+
+pub fn restore_modes(out: &mut impl Write) -> io::Result<()> {
+    out.write_all(ESU)?;
+    execute!(out, DisableFocusChange, DisableBracketedPaste, DisableMouseCapture, LeaveAlternateScreen)?;
+    out.flush()
+}
+
 pub fn run(o: Opts) -> io::Result<()> {
     let th = Theme::from_env();
     let mut settings = Settings::load(&prefs::default_path());
@@ -76,11 +111,27 @@ pub fn run(o: Opts) -> io::Result<()> {
         settings.model = o.model.clone();
     }
     let (tx, rx) = mpsc::channel::<Msg>();
+    let (net_tx, net_rx) = mpsc::sync_channel::<Net>(NET_QUEUE);
+    let wake_flag = Arc::new(AtomicBool::new(false));
+    let wake: Arc<dyn Fn() + Send + Sync> = {
+        let (flag, tx) = (wake_flag.clone(), tx.clone());
+        Arc::new(move || {
+            if !flag.swap(true, Ordering::AcqRel) {
+                let _ = tx.send(Msg::Wake);
+            }
+        })
+    };
     let name = format!("rabble-tui-{}", std::process::id());
-    let handle = client::connect(&o.socket, &name, tx.clone(), Msg::Net).map_err(|e| {
+    let connector: Connector = {
+        let (sock, name, net_tx, wake) = (o.socket.clone(), name.clone(), net_tx.clone(), wake.clone());
+        Arc::new(move || client::connect(&sock, &name, net_tx.clone(), wake.clone()))
+    };
+    let handle = connector().map_err(|e| {
         io::Error::new(e.kind(), format!("no engine at {}: {e}\nstart one with: python -m orchestra.serve --socket {}", o.socket.display(), o.socket.display()))
     })?;
     let mut app = App::new(Config { cwd: o.cwd, start: o.start, client: name }, th, settings, handle);
+    app.post = Some(tx.clone());
+    app.connector = Some(connector);
 
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |i| {
@@ -89,13 +140,31 @@ pub fn run(o: Opts) -> io::Result<()> {
     }));
     enable_raw_mode()?;
     execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste, EnableFocusChange)?;
-    let mut term = Terminal::new(CrosstermBackend::new(BufWriter::with_capacity(1 << 16, io::stdout())))?;
+    let mut term = Terminal::new(CrosstermBackend::new(FrameBuf(Vec::with_capacity(1 << 16), io::stdout())))?;
 
+    // SIGTERM / SIGHUP (a closed terminal window, a kill) leave through the normal path so the
+    // terminal modes are restored
+    if let Ok(mut sigs) = signal_hook::iterator::Signals::new([signal_hook::consts::SIGTERM, signal_hook::consts::SIGHUP]) {
+        let stx = tx.clone();
+        std::thread::Builder::new().name("signals".into()).spawn(move || {
+            if let Some(sig) = sigs.forever().next() {
+                let _ = stx.send(Msg::Quit(format!("terminated (signal {sig})")));
+            }
+        })?;
+    }
     let itx = tx.clone();
     std::thread::Builder::new().name("input".into()).spawn(move || {
-        while let Ok(ev) = event::read() {
-            if itx.send(Msg::Input(ev, Instant::now())).is_err() {
-                break;
+        loop {
+            match event::read() {
+                Ok(ev) => {
+                    if itx.send(Msg::Input(ev, Instant::now())).is_err() {
+                        return;
+                    }
+                }
+                Err(e) => {
+                    let _ = itx.send(Msg::Quit(format!("terminal input failed: {e}")));
+                    return;
+                }
             }
         }
     })?;
@@ -119,19 +188,22 @@ pub fn run(o: Opts) -> io::Result<()> {
                 Ok(m) => {
                     note(&m, &mut first_input);
                     app.on_msg(m);
-                    // everything already queued belongs to this paint
-                    for _ in 0..DRAIN_CAP {
-                        match rx.try_recv() {
-                            Ok(m) => {
-                                note(&m, &mut first_input);
-                                app.on_msg(m)
-                            }
-                            Err(_) => break,
-                        }
+                    // all input and worker results first, so typing is never queued behind a replay
+                    while let Ok(m) = rx.try_recv() {
+                        note(&m, &mut first_input);
+                        app.on_msg(m);
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => app.dirty |= app.needs_tick(),
                 Err(RecvTimeoutError::Disconnected) => return Ok(()),
+            }
+            // then the engine's frames, at most one queue's worth per paint
+            wake_flag.store(false, Ordering::Release);
+            for _ in 0..NET_QUEUE {
+                match net_rx.try_recv() {
+                    Ok(n) => app.on_net(n),
+                    Err(_) => break,
+                }
             }
             if app.quit {
                 return Ok(());
@@ -147,6 +219,9 @@ pub fn run(o: Opts) -> io::Result<()> {
         }
     })();
     let _ = restore();
+    if let Some(why) = &app.quit_reason {
+        eprintln!("rabble-tui: {why}");
+    }
     if let Some(p) = &o.latency_log {
         let mut f = File::create(p)?;
         writeln!(f, "kind,n,p50_ms,p99_ms")?;
@@ -155,11 +230,6 @@ pub fn run(o: Opts) -> io::Result<()> {
         }
     }
     result
-}
-
-fn restore() -> io::Result<()> {
-    disable_raw_mode()?;
-    execute!(io::stdout(), DisableFocusChange, DisableBracketedPaste, DisableMouseCapture, LeaveAlternateScreen)
 }
 
 /// Headless T1 / wheel measurement on real content: replay a recorded turn `repeat` times into an
@@ -211,10 +281,51 @@ pub fn bench(file: &std::path::Path, repeat: usize, w: u16, h: u16) -> io::Resul
         term.draw(|f| app.draw(f))?;
         wheels.push(t0.elapsed().as_secs_f64() * 1e3);
     }
-    let _ = term.backend().size();
     Ok(format!(
         "{w}x{h} transcript {total} lines ({} entries)\nkey-to-paint  n={} p50 {:.3} ms p99 {:.3} ms max {:.3} ms\nwheel-to-paint n={} p50 {:.3} ms p99 {:.3} ms max {:.3} ms",
         app.t.len(), keys.len(), pct(&mut keys.clone(), 0.5), pct(&mut keys.clone(), 0.99), keys.iter().cloned().fold(0.0, f64::max),
         wheels.len(), pct(&mut wheels.clone(), 0.5), pct(&mut wheels.clone(), 0.99), wheels.iter().cloned().fold(0.0, f64::max)
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct Sink(Arc<Mutex<Vec<u8>>>);
+    impl Write for Sink {
+        fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_half_built_frame_is_discarded_on_drop_not_flushed() {
+        let sink = Sink::default();
+        {
+            let mut f = FrameBuf(Vec::new(), sink.clone());
+            f.write_all(b"frame one").unwrap();
+            f.flush().unwrap();
+            f.write_all(b"half of frame two").unwrap();
+        } // unwinding from a panic drops it here
+        assert_eq!(sink.0.lock().unwrap().as_slice(), b"frame one");
+    }
+
+    #[test]
+    fn restore_ends_synchronized_output_before_leaving_the_alt_screen() {
+        let mut out = Vec::new();
+        restore_modes(&mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.starts_with("\x1b[?2026l"), "{s:?}");
+        for seq in ["\x1b[?1004l", "\x1b[?2004l", "\x1b[?1000l", "\x1b[?1049l"] {
+            assert!(s.contains(seq), "missing {seq:?} in {s:?}");
+        }
+        assert!(s.find("\x1b[?2026l").unwrap() < s.find("\x1b[?1049l").unwrap());
+    }
 }

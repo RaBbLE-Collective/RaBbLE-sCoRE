@@ -4,7 +4,7 @@
 use ratatui::{buffer::Buffer, layout::Rect, text::{Line, Span}};
 
 use super::FACE_SLOT_WIDTH;
-use crate::{theme::Theme, wrap::{spans_width, str_width}};
+use crate::{theme::Theme, wrap::{clean, spans_width, str_width}};
 
 #[derive(Debug, Default, Clone)]
 pub struct HeaderState {
@@ -33,7 +33,7 @@ impl HeaderState {
         let sep = || Span::styled(format!(" {} ", th.glyphs.bullet), th.muted);
         let mut a = vec![Span::styled("RaBbLE", th.accent.add_modifier(ratatui::style::Modifier::BOLD))];
         a.push(sep());
-        a.push(Span::styled(if self.model.is_empty() { "default".to_owned() } else { self.model.clone() }, th.secondary));
+        a.push(Span::styled(if self.model.is_empty() { "default".to_owned() } else { clean(&self.model) }, th.secondary));
         a.push(sep());
         a.push(Span::styled(self.mode.clone(), th.tertiary));
         if !self.trust.is_empty() {
@@ -46,7 +46,7 @@ impl HeaderState {
             a.push(sep());
             a.push(Span::styled("offline", th.error));
         }
-        let mut b = vec![Span::styled(home_short(&self.cwd), th.muted)];
+        let mut b = vec![Span::styled(clean(&home_short(&self.cwd)), th.muted)];
         if let Some((score, band)) = &self.entropy {
             b.push(sep());
             let st = if matches!(band.as_str(), "DEGRADED" | "UNSTABLE") { th.error } else { th.ok };

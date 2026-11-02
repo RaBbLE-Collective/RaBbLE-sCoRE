@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use ratatui::{buffer::Buffer, layout::Rect, style::Style, text::{Line, Span}, widgets::Widget};
 
-use crate::{markdown, theme::Theme, wrap::{self, str_width}};
+use crate::{markdown, theme::Theme, wrap::{self, clean, str_width}};
 
 pub const WHEEL_LINES: usize = 3;
 pub const SLACK: usize = 3; // follow while the distance from the bottom is < SLACK lines
@@ -125,7 +125,7 @@ impl Transcript {
     pub fn user(&mut self, text: &str) {
         self.drop_transient();
         self.end_stream();
-        self.push(Item::User(text.to_owned()));
+        self.push(Item::User(clean(text)));
         self.follow = true; // sending jumps to the bottom
     }
 
@@ -140,6 +140,8 @@ impl Transcript {
     }
 
     pub fn delta(&mut self, organ: &str, text: &str) {
+        let (organ, text) = (clean(organ), clean(text));
+        let (organ, text) = (organ.as_str(), text.as_str());
         self.drop_transient();
         if let Some(Entry { item: Item::Reply { organ: o, text: t, streaming: true }, dirty, .. }) = self.entries.last_mut() {
             if o == organ {
@@ -155,6 +157,8 @@ impl Transcript {
 
     /// The finished block replaces what streamed for it (text is drawn once).
     pub fn block(&mut self, organ: &str, text: &str) {
+        let (organ, text) = (clean(organ), clean(text));
+        let (organ, text) = (organ.as_str(), text.as_str());
         self.drop_transient();
         if let Some(Entry { item: Item::Reply { organ: o, text: t, streaming }, dirty, .. }) = self.entries.last_mut() {
             if o == organ && *streaming {
@@ -185,15 +189,15 @@ impl Transcript {
     pub fn tool_call(&mut self, organ: &str, id: &str, name: &str, input: &serde_json::Map<String, serde_json::Value>) {
         self.drop_transient();
         self.end_stream();
-        let pretty = serde_json::to_string_pretty(input).unwrap_or_default();
-        self.push(Item::Tool { id: id.into(), organ: organ.into(), name: name.into(), line: clip(&one_line(input), TITLE_MAX, "…"), input: pretty, result: None });
+        let pretty = clean(&serde_json::to_string_pretty(input).unwrap_or_default());
+        self.push(Item::Tool { id: id.into(), organ: clean(organ), name: clean(name), line: clip(&clean(&one_line(input)), TITLE_MAX, "…"), input: pretty, result: None });
     }
 
     pub fn tool_result(&mut self, id: &str, ok: bool, summary: &str) {
         for e in self.entries.iter_mut().rev() {
             if let Item::Tool { id: i, result, .. } = &mut e.item {
                 if i == id {
-                    *result = Some((ok, if summary.is_empty() { if ok { "ok".into() } else { "failed".into() } } else { summary.to_owned() }));
+                    *result = Some((ok, if summary.is_empty() { if ok { "ok".into() } else { "failed".into() } } else { clean(summary) }));
                     e.dirty = true;
                     self.stale = true;
                     return;
@@ -205,7 +209,7 @@ impl Transcript {
     pub fn notice(&mut self, text: &str, error: bool) {
         self.drop_transient();
         self.end_stream();
-        self.push(Item::Notice { text: text.to_owned(), error });
+        self.push(Item::Notice { text: clean(text), error });
     }
 
     pub fn end_turn(&mut self) {
@@ -601,5 +605,23 @@ mod tests {
         let rows = paint(&mut t, 10, 5);
         let all: String = rows.concat().chars().filter(|c| !c.is_whitespace()).collect();
         assert_eq!(all, "*日本語日本語日本語more", "{rows:?}"); // nothing lost, nothing clipped at width 10
+    }
+
+    #[test]
+    fn escape_sequences_from_the_engine_never_reach_a_cell() {
+        let mut t = Transcript::new();
+        let evil = "a\x1b]52;c;QQ==\x07b\x1b[2Jc \u{202e}rtl \u{9b}d\te";
+        t.user(evil);
+        t.delta("rab\x1bble", evil);
+        t.end_stream();
+        let input: serde_json::Map<_, _> = serde_json::from_str(&serde_json::json!({"command": evil}).to_string()).unwrap();
+        t.tool_call("rabble", "t", "Ba\x1bsh", &input);
+        t.tool_result("t", true, evil);
+        t.notice(evil, true);
+        t.toggle_cards();
+        let rows = paint(&mut t, 80, 40);
+        let b: String = rows.concat();
+        assert!(!b.chars().any(char::is_control) && !b.contains('\u{202e}'), "{rows:?}");
+        assert!(b.contains("d    e"), "tabs are expanded before wrapping");
     }
 }

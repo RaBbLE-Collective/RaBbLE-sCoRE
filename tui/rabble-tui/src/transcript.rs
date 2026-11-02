@@ -3,10 +3,11 @@
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::Widget,
 };
+
+use crate::theme::Theme;
 
 pub struct Transcript {
     pub lines: Vec<Line<'static>>,
@@ -14,22 +15,23 @@ pub struct Transcript {
 
 impl Transcript {
     pub fn synthetic(n: usize) -> Self {
+        Self::synthetic_with(n, &Theme::from_env())
+    }
+
+    pub fn synthetic_with(n: usize, th: &Theme) -> Self {
         let lines = (0..n)
             .map(|i| match i % 12 {
-                0 => Line::from(Span::styled(
-                    format!("## Section {:05}", i / 12),
-                    Style::new().fg(Color::Rgb(0, 245, 255)).add_modifier(Modifier::BOLD),
-                )),
+                0 => Line::from(Span::styled(format!("## Section {:05}", i / 12), th.heading)),
                 5 => Line::from(vec![
-                    Span::styled(format!("{i:05} "), Style::new().fg(Color::Rgb(107, 104, 128))),
-                    Span::styled("tool ", Style::new().fg(Color::Rgb(255, 0, 170))),
+                    Span::styled(format!("{i:05} "), th.muted),
+                    Span::styled("tool ", th.accent),
                     Span::raw("result [with brackets] and `code` runs, wrapped at the edge of the pane"),
                 ]),
                 _ => Line::from(vec![
-                    Span::styled(format!("{i:05} "), Style::new().fg(Color::Rgb(107, 104, 128))),
-                    Span::styled("the quick brown fox ", Style::new().fg(Color::Rgb(232, 230, 240))),
-                    Span::styled("jumps over ", Style::new().fg(Color::Rgb(0, 245, 255))),
-                    Span::styled("the lazy dog", Style::new().fg(Color::Rgb(255, 0, 170))),
+                    Span::styled(format!("{i:05} "), th.muted),
+                    Span::styled("the quick brown fox ", th.text),
+                    Span::styled("jumps over ", th.secondary),
+                    Span::styled("the lazy dog", th.accent),
                 ]),
             })
             .collect();

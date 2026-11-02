@@ -17,5 +17,6 @@ rabble-proto = { path = "../rabble-proto" }
 serde_json.workspace = true
 rabble-theme = { path = "../rabble-theme" }
 unicode-width = "0.2"
+signal-hook = "0.3"
 ratatui.workspace = true
 crossterm.workspace = true
