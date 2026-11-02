@@ -54,7 +54,7 @@ fn real_main() -> io::Result<()> {
             Ok(())
         }
         Some("connect") => connect(&args, socket()),
-        _ => run::run(Opts {
+        _ => match run::run(Opts {
             socket: socket(),
             cwd: flag("--cwd").unwrap_or_else(|| std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| ".".into())),
             start: match (flag("--attach"), flag("--resume")) {
@@ -63,8 +63,22 @@ fn real_main() -> io::Result<()> {
             },
             model: flag("--model"),
             latency_log: flag("--latency-log").map(PathBuf::from),
-        }),
+        })? {
+            Some(session) => reexec(&args, &session),
+            None => Ok(()),
+        },
     }
+}
+
+/// `/reload`: replace this process with the binary on disk (a fresh `cargo build` lands there), reattached to the
+/// same session. The engine never stopped, so the transcript replays from its ring. The terminal is already restored.
+fn reexec(args: &[String], session: &str) -> io::Result<()> {
+    use std::os::unix::process::CommandExt;
+    // a rebuilt binary replaces the file this process was started from, so Linux reports ".../rabble-tui (deleted)"
+    let exe = std::env::current_exe()?;
+    let exe = PathBuf::from(exe.to_string_lossy().trim_end_matches(" (deleted)"));
+    let err = std::process::Command::new(&exe).args(run::reload_args(args, session)).exec();
+    Err(io::Error::new(err.kind(), format!("reload: cannot start {}: {err}", exe.display())))
 }
 
 /// The R1 probe, now on the threaded client: print a turn as text.

@@ -104,7 +104,8 @@ pub fn restore_modes(out: &mut impl Write) -> io::Result<()> {
     out.flush()
 }
 
-pub fn run(o: Opts) -> io::Result<()> {
+/// Runs the shell. `Ok(Some(session))` means `/reload`: the terminal is already restored, the caller re-execs.
+pub fn run(o: Opts) -> io::Result<Option<String>> {
     let th = Theme::from_env();
     let mut settings = Settings::load(&prefs::default_path());
     if o.model.is_some() {
@@ -242,7 +243,23 @@ pub fn run(o: Opts) -> io::Result<()> {
             writeln!(f, "{k},{},{:.3},{:.3}", v.len(), pct(v, 0.5), pct(v, 0.99))?;
         }
     }
-    result
+    result.map(|()| if app.reload { app.session.clone() } else { None })
+}
+
+/// The command line for the re-exec: the same flags, but on the live session (`--attach`) instead of however this
+/// one started (`--attach`, `--resume`, or neither).
+pub fn reload_args(args: &[String], session: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--attach" || a == "--resume" {
+            it.next();
+        } else {
+            out.push(a.clone());
+        }
+    }
+    out.extend(["--attach".to_owned(), session.to_owned()]);
+    out
 }
 
 /// Headless T1 / wheel measurement on real content: replay a recorded turn `repeat` times into an
@@ -316,6 +333,14 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn reload_swaps_the_start_flag_and_keeps_the_rest() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(reload_args(&a(&["--socket", "/s", "--resume", "sdk1", "--model", "opus"]), "s9"), a(&["--socket", "/s", "--model", "opus", "--attach", "s9"]));
+        assert_eq!(reload_args(&a(&["--attach", "old"]), "s9"), a(&["--attach", "s9"]));
+        assert_eq!(reload_args(&[], "s9"), a(&["--attach", "s9"]));
     }
 
     #[test]

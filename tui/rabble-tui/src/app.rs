@@ -37,7 +37,7 @@ use crate::{
 pub const QUIT_WINDOW_MS: u128 = 2000;
 /// How long an error or a denial holds the face's mood (Python `FLASH`).
 pub const FLASH: Duration = Duration::from_millis(2500);
-pub const HELP: [(&str, &str); 13] = [
+pub const HELP: [(&str, &str); 14] = [
     ("/model", "pick the model (or /model opus|sonnet|haiku|fable|default|<id>)"),
     ("/crew", "organs on/off: /crew on|off (off = solo, no agents, cheapest)"),
     ("/trust", "auto-approve level: /trust strict|standard|trusted|auto (auto = earned from session entropy)"),
@@ -48,6 +48,7 @@ pub const HELP: [(&str, &str); 13] = [
     ("/clear", "start a fresh session"),
     ("/copy", "copy the last reply to the clipboard (Ctrl-V pastes; Shift+drag selects text)"),
     ("/face", "show the full face"),
+    ("/reload", "restart this shell on the same session (picks up a rebuilt binary; the engine is untouched)"),
     ("/help", "this list"),
     ("/quit", "leave (Ctrl-C twice also works)"),
     ("Ctrl-O", "expand or collapse tool cards"),
@@ -106,6 +107,8 @@ pub struct App {
     pub settings: Settings,
     pub overlay: Overlay,
     pub quit: bool,
+    /// Set with `quit` by `/reload`: leave the terminal, then `exec` the (rebuilt) binary on this session.
+    pub reload: bool,
     pub dirty: bool,
     flow_t0: Instant,
     flow_next: Instant,
@@ -164,7 +167,7 @@ impl App {
         let header = HeaderState { model: settings.model.clone().unwrap_or_default(), mode: settings.mode.clone(), trust: settings.trust.clone().unwrap_or_default(), crew: settings.crew, cwd: cfg.cwd.clone(), connected: true, ..Default::default() };
         let composer = Composer::new(&cfg.cwd, base_commands());
         App {
-            th, t: Transcript::new(), composer, header, settings, overlay: Overlay::None, quit: false, dirty: true, flow_t0: Instant::now(), flow_next: Instant::now(), usage_at: None, effects: vec![], malformed: 0,
+            th, t: Transcript::new(), composer, header, settings, overlay: Overlay::None, quit: false, reload: false, dirty: true, flow_t0: Instant::now(), flow_next: Instant::now(), usage_at: None, effects: vec![], malformed: 0,
             session: None, max_seq: 0, turn_open: false, engine_ok: true, cfg, out, asks: VecDeque::new(), seen_asks: HashSet::new(), last_ctrl_c: None,
             sdk_session: None, started: false, live: vec![], parking: None, park_pending: false, park_warned: false, park_blocked: false, seed: None,
             continue_once: false, entropy_trust: None, caps_line: String::new(), focused: true,
@@ -993,6 +996,16 @@ impl App {
                 }
                 None => self.notice("RaBbLE", false),
             },
+            "/reload" => {
+                if matches!(self.overlay, Overlay::Permission(_)) || !self.asks.is_empty() {
+                    self.notice("reload when the approval is answered", true);
+                } else if self.session.is_none() {
+                    self.notice("reload: no engine session yet (/clear starts one)", true);
+                } else {
+                    self.reload = true;
+                    self.quit = true;
+                }
+            }
             "/clear" => {
                 self.restart(None, true);
                 self.notice("new session", false);
@@ -1763,6 +1776,20 @@ mod tests {
         let small = paint_face(&mut b, 50, 18);
         assert!(small[(0, 0)].symbol() == "R", "a small pane keeps the two-row header: {:?}", small[(0, 0)].symbol());
         assert_eq!(b.face_due(), None, "a hidden mark costs nothing");
+    }
+
+    #[test]
+    fn reload_quits_for_a_reexec_unless_an_approval_is_open_or_there_is_no_session() {
+        let (mut a, _rx) = live();
+        say(&mut a, "/reload");
+        assert!(a.quit && a.reload);
+        let (mut b, _rx) = app_with(Start::New { resume: None });
+        say(&mut b, "/reload");
+        assert!(!b.quit && !b.reload, "no session to reattach to");
+        let (mut c, _rx) = live();
+        ev(&mut c, r#"{"type":"PermissionAsk","organ":"rabble","id":"p1","tool":"Bash","input":{"command":"ls"}}"#);
+        say(&mut c, "/reload");
+        assert!(!c.quit && !c.reload, "a pending approval blocks it");
     }
 
     #[test]
