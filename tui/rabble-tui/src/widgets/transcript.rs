@@ -9,8 +9,9 @@
 
 use std::time::{Duration, Instant};
 
-use ratatui::{buffer::Buffer, layout::Rect, style::Style, text::{Line, Span}, widgets::Widget};
+use ratatui::{buffer::Buffer, layout::Rect, style::{Modifier, Style}, text::{Line, Span}, widgets::Widget};
 
+use crate::widgets::select::{self, Pos, Selection};
 use crate::{markdown, theme::Theme, wrap::{self, clean, str_width}};
 
 pub const WHEEL_LINES: usize = 3;
@@ -52,6 +53,7 @@ pub struct Transcript {
     guard_until: Option<(Instant, bool)>,
     pub view_h: u16,
     face_rows: usize,
+    pub sel: Selection,
 }
 
 pub fn one_line(data: &serde_json::Map<String, serde_json::Value>) -> String {
@@ -102,7 +104,7 @@ impl Default for Transcript {
 
 impl Transcript {
     pub fn new() -> Self {
-        Transcript { entries: Vec::new(), width: 0, total: 0, max: 0, stale: true, offset: 0, follow: true, expanded: false, blurred: None, guard_until: None, view_h: 0, face_rows: FACE_MIN_ROWS }
+        Transcript { entries: Vec::new(), width: 0, total: 0, max: 0, stale: true, offset: 0, follow: true, expanded: false, blurred: None, guard_until: None, view_h: 0, face_rows: FACE_MIN_ROWS, sel: Selection::default() }
     }
 
     fn push(&mut self, item: Item) {
@@ -138,6 +140,7 @@ impl Transcript {
         self.entries.retain(|e| e.item != Item::Face);
         if self.entries.len() != n {
             self.stale = true;
+            self.sel.clear();
         }
     }
 
@@ -259,6 +262,7 @@ impl Transcript {
 
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.sel.clear();
         (self.offset, self.follow, self.stale) = (0, true, true);
     }
 
@@ -271,12 +275,59 @@ impl Transcript {
 
     pub fn toggle_cards(&mut self) {
         self.expanded = !self.expanded;
+        self.sel.clear();
         for e in &mut self.entries {
             if matches!(e.item, Item::Tool { .. }) {
                 e.dirty = true;
             }
         }
         self.stale = true;
+    }
+
+    // selection ----------------------------------------------------------------------------
+    fn line_at(&self, i: usize) -> Option<&Line<'static>> {
+        if self.stale {
+            return None; // entry starts are only valid after a layout
+        }
+        let k = self.entries.partition_point(|e| e.start <= i).checked_sub(1)?;
+        let e = &self.entries[k];
+        e.lines.get(i - e.start)
+    }
+
+    /// The transcript line and column under a cell `(row, col)` of the transcript's own area.
+    pub fn pos_at(&self, row: u16, col: u16) -> Option<Pos> {
+        if self.total == 0 || self.stale {
+            return None;
+        }
+        Some(((self.offset.min(self.max) + row as usize).min(self.total - 1), col as usize))
+    }
+
+    /// Button down: one click anchors a drag, two take a word, three a line.
+    pub fn select_press(&mut self, p: Pos) {
+        match self.sel.press(p, Instant::now()) {
+            2 => {
+                if let Some(l) = self.line_at(p.0) {
+                    let (a, b) = select::word_at(l, p.1);
+                    self.sel.set((p.0, a), (p.0, b));
+                }
+            }
+            3 => self.sel.set((p.0, 0), (p.0, select::EOL)),
+            _ => {}
+        }
+    }
+
+    /// The selected text, lines joined by newlines.
+    pub fn selected_text(&self) -> Option<String> {
+        let ((l0, _), (l1, _)) = self.sel.ordered()?;
+        let out: Vec<String> = (l0..=l1.min(self.total.saturating_sub(1)))
+            .filter_map(|i| {
+                let (f, t) = self.sel.cols(i)?;
+                self.line_at(i).map(|l| select::slice(l, f, t))
+            })
+            .collect();
+        let s = out.join("\n");
+        let s = s.trim_matches('\n').to_owned();
+        (!s.is_empty()).then_some(s)
     }
 
     // scroll -------------------------------------------------------------------------------
@@ -408,6 +459,7 @@ impl Transcript {
         if width != self.width {
             self.width = width;
             self.stale = true;
+            self.sel.clear();
             for e in &mut self.entries {
                 e.dirty = true;
             }
@@ -465,6 +517,12 @@ impl Transcript {
                     break 'outer;
                 }
                 buf.set_line(area.x, area.y + y, l, area.width);
+                if let Some((from, to)) = self.sel.cols(top + y as usize) {
+                    for c in from..to.min(select::width(l)).min(area.width as usize) {
+                        let cell = &mut buf[(area.x + c as u16, area.y + y)];
+                        cell.modifier.insert(Modifier::REVERSED);
+                    }
+                }
                 y += 1;
             }
         }

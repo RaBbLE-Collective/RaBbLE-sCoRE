@@ -46,7 +46,7 @@ pub const HELP: [(&str, &str); 14] = [
     ("/park", "hand off to a fresh session: /park [now|continue] | auto|ask|off | continue on|off (parks itself at 80% context)"),
     ("/resume", "pick an earlier session"),
     ("/clear", "start a fresh session"),
-    ("/copy", "copy the last reply to the clipboard (Ctrl-V pastes; Shift+drag selects text)"),
+    ("/copy", "copy the last reply (drag to select, Ctrl-C copies the selection, Ctrl-V pastes)"),
     ("/face", "show the full face"),
     ("/reload", "restart this shell on the same session (picks up a rebuilt binary; the engine is untouched)"),
     ("/help", "this list"),
@@ -124,6 +124,8 @@ pub struct App {
     asks: VecDeque<Ask>,
     seen_asks: HashSet<String>,
     last_ctrl_c: Option<Instant>,
+    /// Where the transcript was last painted; mouse selection maps cells through it.
+    tr_rect: Rect,
     sdk_session: Option<String>,
     started: bool,
     live: Vec<SessionInfo>,
@@ -168,7 +170,7 @@ impl App {
         let composer = Composer::new(&cfg.cwd, base_commands());
         App {
             th, t: Transcript::new(), composer, header, settings, overlay: Overlay::None, quit: false, reload: false, dirty: true, flow_t0: Instant::now(), flow_next: Instant::now(), usage_at: None, effects: vec![], malformed: 0,
-            session: None, max_seq: 0, turn_open: false, engine_ok: true, cfg, out, asks: VecDeque::new(), seen_asks: HashSet::new(), last_ctrl_c: None,
+            session: None, max_seq: 0, turn_open: false, engine_ok: true, cfg, out, asks: VecDeque::new(), seen_asks: HashSet::new(), last_ctrl_c: None, tr_rect: Rect::default(),
             sdk_session: None, started: false, live: vec![], parking: None, park_pending: false, park_warned: false, park_blocked: false, seed: None,
             continue_once: false, entropy_trust: None, caps_line: String::new(), focused: true,
             post: None, connector: None, quit_reason: None, create_id: None, reconnecting: false, reconnect_running: false,
@@ -777,8 +779,13 @@ impl App {
 
     pub fn on_input(&mut self, e: Event) {
         // pointer motion, clicks and drags change nothing here: no repaint, and (in the loop) no stalled face frame
-        if matches!(&e, Event::Mouse(m) if !matches!(m.kind, MouseEventKind::ScrollDown | MouseEventKind::ScrollUp)) {
-            return;
+        if let Event::Mouse(m) = &e {
+            if !matches!(m.kind, MouseEventKind::ScrollDown | MouseEventKind::ScrollUp) {
+                if matches!(self.overlay, Overlay::None) && self.select_mouse(*m) {
+                    self.dirty = true;
+                }
+                return;
+            }
         }
         self.dirty = true;
         match e {
@@ -820,6 +827,47 @@ impl App {
         self.sync_face();
     }
 
+    /// Left-button selection in the transcript; true when something on screen changed.
+    fn select_mouse(&mut self, m: crossterm::event::MouseEvent) -> bool {
+        use crossterm::event::{MouseButton, MouseEventKind::{Down, Drag, Up}};
+        let r = self.tr_rect;
+        let inside = m.row >= r.y && m.row < r.y + r.height && m.column >= r.x && m.column < r.x + r.width;
+        match m.kind {
+            Down(MouseButton::Left) => {
+                let had = self.t.sel.has();
+                self.t.sel.clear();
+                if inside {
+                    if let Some(p) = self.t.pos_at(m.row - r.y, m.column - r.x) {
+                        self.t.select_press(p);
+                    }
+                }
+                had || self.t.sel.has()
+            }
+            Drag(MouseButton::Left) => {
+                // dragging past an edge scrolls the view one line per event
+                let row = if m.row < r.y {
+                    self.t.scroll_by(-1);
+                    0
+                } else if m.row >= r.y + r.height {
+                    self.t.scroll_by(1);
+                    r.height.saturating_sub(1)
+                } else {
+                    m.row - r.y
+                };
+                let col = m.column.saturating_sub(r.x).min(r.width.saturating_sub(1));
+                if let Some(p) = self.t.pos_at(row, col) {
+                    self.t.sel.drag(p);
+                }
+                true
+            }
+            Up(MouseButton::Left) => {
+                self.t.sel.release();
+                false
+            }
+            _ => false,
+        }
+    }
+
     fn on_key(&mut self, k: crossterm::event::KeyEvent) {
         match &mut self.overlay {
             Overlay::Permission(p) => {
@@ -855,6 +903,18 @@ impl App {
             Overlay::None => {}
         }
         let (ctrl, shift) = (k.modifiers.contains(KeyModifiers::CONTROL), k.modifiers.contains(KeyModifiers::SHIFT));
+        if self.t.sel.has() {
+            // Ctrl-C (and Ctrl-Shift-C) copy a selection instead of counting towards quit; any other key drops it
+            let copy = matches!(k.code, KeyCode::Char('c' | 'C')) && ctrl;
+            if let Some(text) = self.t.selected_text().filter(|_| copy) {
+                self.effects.push(Effect::Copy(text));
+                self.notice("copied", false);
+            }
+            self.t.sel.clear();
+            if copy || k.code == KeyCode::Esc {
+                return;
+            }
+        }
         match k.code {
             KeyCode::Char('o') if ctrl => self.t.toggle_cards(),
             KeyCode::PageUp => self.t.page(false),
@@ -1149,6 +1209,7 @@ impl App {
         }
         let (ha, da) = (Rect { height: hh, ..a }, Rect { y: a.y + hh, height: 1, ..a });
         let ta = Rect { y: a.y + top, height: tr_h, ..a };
+        self.tr_rect = ta;
         let ca = Rect { y: a.y + top + tr_h, height: comp_h, ..a };
         self.t.layout(&self.th, a.width, tr_h);
         let buf = f.buffer_mut();
@@ -1831,6 +1892,39 @@ mod tests {
         a.composer.insert_str("\n\n\nmore"); // the composer grows, the transcript shrinks, the face refits
         t.draw(|f| a.draw(f)).unwrap();
         assert!(!a.hub_full_cells_empty(), "cells are ready on the very paint that refit");
+    }
+
+    #[test]
+    fn dragging_selects_transcript_text_and_ctrl_c_copies_it() {
+        use crossterm::event::{MouseButton::Left, MouseEventKind::{Down, Drag, Up}};
+        let (mut a, _rx) = live();
+        ev(&mut a, r#"{"type":"TextBlock","organ":"rabble","text":"alpha beta\n\ngamma delta"}"#);
+        let scr = screen(&mut a, 60, 20);
+        let row = scr.lines().position(|l| l.contains("alpha beta")).expect("reply painted") as u16;
+        let m = |kind, column, row| Event::Mouse(MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE });
+        let c = a.tr_rect.x + scr.lines().nth(row as usize).unwrap().find("alpha").unwrap() as u16;
+        a.on_input(m(Down(Left), c, row));
+        a.on_input(m(Drag(Left), c + 9, row));
+        a.on_input(m(Up(Left), c + 9, row));
+        assert!(a.t.sel.has());
+        let ctrl_c = Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        a.on_input(ctrl_c.clone());
+        assert_eq!(a.effects, [Effect::Copy("alpha beta".into())]);
+        assert!(!a.t.sel.has() && !a.quit, "a copy is not a quit hint");
+        // double click takes the word
+        let scr = screen(&mut a, 60, 20);
+        let row = scr.lines().position(|l| l.contains("alpha beta")).unwrap() as u16;
+        let c2 = a.tr_rect.x + scr.lines().nth(row as usize).unwrap().find("beta").unwrap() as u16;
+        a.on_input(m(Down(Left), c2, row));
+        a.on_input(m(Up(Left), c2, row));
+        a.on_input(m(Down(Left), c2, row));
+        assert_eq!(a.t.selected_text().as_deref(), Some("beta"));
+        // typing drops the selection and Ctrl-C then behaves as before
+        a.on_input(key(KeyCode::Char('x')));
+        assert!(!a.t.sel.has());
+        a.effects.clear();
+        a.on_input(ctrl_c);
+        assert!(a.effects.is_empty());
     }
 
     #[test]

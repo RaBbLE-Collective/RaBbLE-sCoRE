@@ -1,6 +1,7 @@
 pub mod composer;
 pub mod face;
 pub mod header;
+pub mod select;
 pub mod modal;
 pub mod transcript;
 
