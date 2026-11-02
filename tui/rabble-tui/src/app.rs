@@ -15,6 +15,7 @@ use std::{
 
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use rabble_proto::{Decision, Down, Frame, LimitStatus, OrganStatus, SessionInfo, Snapshot, TurnOrigin, Up};
+use rabble_face::{provider_of, FacePalette, Mood};
 use ratatui::{layout::Rect, Frame as TermFrame};
 
 use crate::{
@@ -25,13 +26,17 @@ use crate::{
     theme::Theme,
     widgets::{
         composer::{Action, Composer},
+        face::{safe_glyphs, FaceHub},
         header::{draw_divider, HeaderState},
         modal::{Ask, Permission, Picked, Picker, Reply},
         transcript::{Transcript, View},
+        FACE_MIN_AREA, FACE_ROWS,
     },
 };
 
 pub const QUIT_WINDOW_MS: u128 = 2000;
+/// How long an error or a denial holds the face's mood (Python `FLASH`).
+pub const FLASH: Duration = Duration::from_millis(2500);
 pub const HELP: [(&str, &str); 13] = [
     ("/model", "pick the model (or /model opus|sonnet|haiku|fable|default|<id>)"),
     ("/crew", "organs on/off: /crew on|off (off = solo, no agents, cheapest)"),
@@ -129,6 +134,17 @@ pub struct App {
     create_id: Option<String>,
     reconnecting: bool,
     reconnect_running: bool,
+    /// The face (`None` without a palette that has the face's colours).
+    pub face: Option<FaceHub>,
+    streaming: bool,
+    busy: HashSet<String>,
+    flash: Option<(Mood, Instant)>,
+    local: bool,
+}
+
+/// The palette names the face reads; a palette without them gets no face.
+fn palette_has_face_colours(p: &rabble_theme::Palette) -> bool {
+    ["bg", "text", "cyan", "magenta", "violet", "pink", "muted"].iter().all(|n| p.get(n).is_some())
 }
 
 fn base_commands() -> Vec<String> {
@@ -147,6 +163,69 @@ impl App {
             sdk_session: None, started: false, live: vec![], parking: None, park_pending: false, park_warned: false, park_blocked: false, seed: None,
             continue_once: false, entropy_trust: None, caps_line: String::new(), focused: true,
             post: None, connector: None, quit_reason: None, create_id: None, reconnecting: false, reconnect_running: false,
+            face: None, streaming: false, busy: HashSet::new(), flash: None, local: false,
+        }.with_face()
+    }
+
+    fn with_face(mut self) -> App {
+        self.face = self.th.pal.as_ref().filter(|p| palette_has_face_colours(p)).map(|p| FaceHub::new(FacePalette::from_palette(p), safe_glyphs(), Instant::now()));
+        self.sync_face();
+        self
+    }
+
+    // ---- the face -----------------------------------------------------------------------------
+    fn flash(&mut self, m: Mood) {
+        self.flash = Some((m, Instant::now() + FLASH));
+    }
+
+    /// Python `_mood()`: a flash, else streaming, else something running, else typing, else idle.
+    fn derive_mood(&self, now: Instant) -> Mood {
+        if let Some((m, until)) = self.flash {
+            if now < until {
+                return m;
+            }
+        }
+        if self.streaming {
+            Mood::Streaming
+        } else if !self.busy.is_empty() {
+            Mood::Working
+        } else if !self.composer.is_empty() {
+            Mood::Typing
+        } else {
+            Mood::Idle
+        }
+    }
+
+    /// The model the provider tint follows (Python `_model_for_entropy`).
+    fn model_for_face(&self) -> Option<&str> {
+        let m = self.header.model.as_str();
+        if m.is_empty() || m == "default" { self.settings.model.as_deref() } else { Some(m) }
+    }
+
+    /// Push mood and provider into the face. Cheap: both are no-ops when unchanged.
+    fn sync_face(&mut self) {
+        let (now, provider) = (Instant::now(), provider_of(self.model_for_face(), self.local));
+        let mood = self.derive_mood(now);
+        if let Some(f) = &mut self.face {
+            f.set_provider(provider);
+            f.set_mood(mood, now);
+        }
+    }
+
+    /// When the run loop should next call `tick_face` (faces that are on screen only).
+    pub fn face_due(&self) -> Option<Instant> {
+        self.face.as_ref().and_then(|f| f.due())
+    }
+
+    /// Compute due face frames; a paint is requested only if a cell changed. The run loop calls this on
+    /// iterations that carried no input, so it never sits in front of a key or a wheel notch.
+    pub fn tick_face(&mut self, now: Instant) {
+        if self.face.is_none() {
+            return;
+        }
+        self.sync_face();
+        if self.face.as_mut().is_some_and(|f| f.tick(now)) {
+            self.dirty = true;
         }
     }
 
@@ -196,6 +275,11 @@ impl App {
     // ---- engine ------------------------------------------------------------------------------
     pub fn on_net(&mut self, n: Net) {
         self.dirty = true;
+        self.on_net_inner(n);
+        self.sync_face();
+    }
+
+    fn on_net_inner(&mut self, n: Net) {
         match n {
             Net::Frame(f) => self.on_frame(f),
             Net::Reply { label, frame } => match (label.as_str(), &frame.msg) {
@@ -265,6 +349,8 @@ impl App {
             }
             (Down::Error { .. }, Some(s)) if self.session.as_deref() != Some(s.as_str()) => return, // another session's trouble
             (Down::Error { text }, _) => {
+                self.streaming = false;
+                self.flash(Mood::Error);
                 self.t.end_turn();
                 self.notice(text, true);
                 return;
@@ -326,11 +412,24 @@ impl App {
                     self.notice(&p, true);
                 }
             }
-            Down::TextDelta { organ, text } => self.t.delta(&organ, &text),
-            Down::TextBlock { organ, text } => self.t.block(&organ, &text),
+            Down::TextDelta { organ, text } => {
+                self.streaming = true;
+                self.t.delta(&organ, &text)
+            }
+            Down::TextBlock { organ, text } => {
+                self.streaming = false;
+                self.t.block(&organ, &text)
+            }
             Down::Thinking { .. } => self.t.thinking(),
-            Down::ToolCall { organ, id, name, input } => self.t.tool_call(&organ, &id, &name, &input),
-            Down::ToolResult { id, ok, summary, .. } => self.t.tool_result(&id, ok, &summary),
+            Down::ToolCall { organ, id, name, input } => {
+                self.streaming = false;
+                self.busy.insert(id.clone());
+                self.t.tool_call(&organ, &id, &name, &input)
+            }
+            Down::ToolResult { id, ok, summary, .. } => {
+                self.busy.remove(&id);
+                self.t.tool_result(&id, ok, &summary)
+            }
             Down::UserSaid { text, client, .. } => {
                 if client == self.cfg.client {
                     self.t.user(&text); // our own message: jump to the bottom
@@ -360,8 +459,12 @@ impl App {
                     self.next_ask();
                 }
             }
-            Down::OrganStarted { organ, brief, .. } => self.notice(&format!("{organ} started: {brief}"), false),
+            Down::OrganStarted { organ, brief, .. } => {
+                self.busy.insert(format!("organ:{organ}"));
+                self.notice(&format!("{organ} started: {brief}"), false)
+            }
             Down::OrganDone { organ, status, .. } => {
+                self.busy.remove(&format!("organ:{organ}"));
                 let (word, err) = match status {
                     OrganStatus::Completed => ("completed", false),
                     OrganStatus::Failed => ("failed", true),
@@ -372,7 +475,11 @@ impl App {
             }
             Down::OrganProgress { .. } => {}
             Down::ModelUsed { model } => self.header.model = model,
-            Down::EntropyChanged { score, band, trust, reason, .. } => {
+            Down::EntropyChanged { score, band, trust, reason, base, stability, local, .. } => {
+                self.local = local;
+                if let Some(f) = &mut self.face {
+                    f.set_signal(base as f64, stability as f64);
+                }
                 self.entropy_trust = Some(trust.clone());
                 self.header.entropy = Some((score, band.clone()));
                 self.sync_header();
@@ -405,8 +512,10 @@ impl App {
                 }
             }
             Down::TurnDone { origin, .. } => {
+                self.streaming = false;
                 self.t.end_turn();
                 if origin == TurnOrigin::Observer {
+                    self.busy.clear();
                     self.turn_open = false;
                     if self.parking.is_some() {
                         self.finish_park();
@@ -453,6 +562,7 @@ impl App {
         let (id, decision) = (p.ask.id.clone(), r.decision.clone());
         self.to_session("answer", |s| Up::Answer { session: s, ask_id: id, decision: r.decision, reason: r.reason });
         if decision == Decision::Deny {
+            self.flash(Mood::Denied);
             self.notice(&format!("denied {}", p.ask.tool), true);
         }
         self.next_ask();
@@ -663,6 +773,7 @@ impl App {
             _ => {}
         }
         self.pump_composer();
+        self.sync_face();
     }
 
     fn on_key(&mut self, k: crossterm::event::KeyEvent) {
@@ -746,6 +857,10 @@ impl App {
 
     pub fn submit(&mut self, text: String) {
         self.t.drop_transient();
+        self.t.drop_face();
+        if let Some(f) = &mut self.face {
+            f.hide_full();
+        }
         let word = text.split_whitespace().next().unwrap_or("").to_owned();
         if HELP.iter().any(|(c, _)| *c == word && c.starts_with('/')) {
             let arg = text[word.len()..].trim().to_owned();
@@ -827,7 +942,16 @@ impl App {
                 }
                 _ => self.notice("nothing to copy (last reply)", true),
             },
-            "/face" => self.notice("the full face is not wired into the Rust shell yet (rabble-face lands separately)", false),
+            "/face" => match &mut self.face {
+                // like Python: a full face joins the conversation and goes with the next message
+                Some(f) => {
+                    f.show_full(Instant::now());
+                    self.t.push_face();
+                    self.sync_face();
+                    self.dirty = true;
+                }
+                None => self.notice("RaBbLE", false),
+            },
             "/clear" => {
                 self.restart(None, true);
                 self.notice("new session", false);
@@ -957,17 +1081,37 @@ impl App {
         if a.width < 4 || a.height < 6 {
             return;
         }
-        let comp_h = self.composer.height(a.width).min(a.height.saturating_sub(4));
-        let tr_h = a.height.saturating_sub(3 + comp_h);
+        // the header grows to the mark's six rows when the pane is big enough for it
+        let face_on = self.face.is_some() && a.width >= FACE_MIN_AREA.0 && a.height >= FACE_MIN_AREA.1;
+        let hh = if face_on { FACE_ROWS } else { 2 };
+        let top = hh + 1;
+        let comp_h = self.composer.height(a.width).min(a.height.saturating_sub(top + 1));
+        let tr_h = a.height.saturating_sub(top + comp_h);
         self.header.session = self.session.clone().unwrap_or_default();
-        let (ha, da) = (Rect { height: 2, ..a }, Rect { y: a.y + 2, height: 1, ..a });
-        let ta = Rect { y: a.y + 3, height: tr_h, ..a };
-        let ca = Rect { y: a.y + 3 + tr_h, height: comp_h, ..a };
+        let (ha, da) = (Rect { height: hh, ..a }, Rect { y: a.y + hh, height: 1, ..a });
+        let ta = Rect { y: a.y + top, height: tr_h, ..a };
+        let ca = Rect { y: a.y + top + tr_h, height: comp_h, ..a };
         self.t.layout(&self.th, a.width, tr_h);
         let buf = f.buffer_mut();
-        self.header.draw(ha, buf, &self.th);
+        self.header.draw(ha, buf, &self.th, face_on);
         draw_divider(da, buf, &self.th, self.busy_label());
         ratatui::widgets::Widget::render(View(&self.t), ta, buf);
+        if let Some(hub) = &mut self.face {
+            hub.mini_visible = face_on;
+            if face_on {
+                hub.mini.draw(Rect { width: crate::widgets::FACE_SLOT_WIDTH.min(a.width), height: FACE_ROWS, ..ha }, buf, &self.th, 0);
+            }
+            // the full face (`/face`) fills the room reserved for it in the transcript
+            if !self.t.has_face() {
+                hub.hide_full();
+            }
+            hub.full_visible = false;
+            if let (Some(full), Some((rect, skip))) = (&mut hub.full, self.t.face_rect(ta)) {
+                full.fit(a.width as usize, self.t.face_rows());
+                hub.full_visible = true;
+                full.draw(rect, buf, &self.th, skip);
+            }
+        }
         let focused = matches!(self.overlay, Overlay::None);
         let cursor = self.composer.draw(ca, buf, &self.th, focused);
         if self.composer.completing() && focused {
@@ -976,7 +1120,7 @@ impl App {
             self.composer.draw_dropdown(drop, buf, &self.th);
         }
         match &self.overlay {
-            Overlay::Permission(p) => p.draw(Rect { y: a.y + 3, height: a.height - 3, ..a }, buf, &self.th),
+            Overlay::Permission(p) => p.draw(Rect { y: a.y + top, height: a.height - top, ..a }, buf, &self.th),
             Overlay::Model(p) | Overlay::Sessions(p) => p.draw(a, buf, &self.th),
             Overlay::None => f.set_cursor_position(cursor),
         }
@@ -1533,5 +1677,140 @@ mod tests {
         // a second hello does not attach again
         feed(&mut a, r#"{"type":"hello","version":1,"engine":"e","user":"u"}"#);
         assert!(sent(&rx2).iter().all(|m| m["type"] != "attach"));
+    }
+
+    // ---- the face ----------------------------------------------------------------------------
+    fn face_app() -> (App, Receiver<String>) {
+        let pal = rabble_theme::Palette::parse(
+            "  bg: \"#0a0010\"\n  surface: \"#101018\"\n  text: \"#e8e6f0\"\n  muted: \"#6b6880\"\n  magenta: \"#ff2bd6\"\n  cyan: \"#00f5ff\"\n  violet: \"#8a4dff\"\n  pink: \"#ff7ab8\"\n",
+        );
+        let (h, rx) = Handle::detached();
+        let cfg = Config { cwd: "/w".into(), start: Start::New { resume: None }, client: CLIENT.into() };
+        let mut a = App::new(cfg, Theme::new(Some(&pal), false, Glyphs::FANCY), Settings::default(), h);
+        a.session = Some("s1".into());
+        (a, rx)
+    }
+    fn mood(a: &App) -> Mood {
+        a.face.as_ref().unwrap().mood()
+    }
+    fn paint_face(a: &mut App, w: u16, h: u16) -> ratatui::buffer::Buffer {
+        let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+        t.draw(|f| a.draw(f)).unwrap();
+        a.tick_face(Instant::now() + Duration::from_millis(500));
+        t.draw(|f| a.draw(f)).unwrap();
+        t.backend().buffer().clone()
+    }
+
+    #[test]
+    fn the_mark_takes_six_header_rows_in_a_big_pane_and_none_in_a_small_one() {
+        let (mut a, _rx) = face_app();
+        let big = paint_face(&mut a, 100, 30);
+        let mark_cells = (0..24).flat_map(|x| (0..6).map(move |y| (x, y))).filter(|&(x, y)| big[(x, y)].symbol() != " ").count();
+        assert!(mark_cells > 20, "the mark is drawn in the slot: {mark_cells} cells");
+        let header: String = (0..60).map(|x| big[(25 + x, 2)].symbol().to_owned()).collect();
+        assert!(header.contains("RaBbLE"), "the text lines sit beside the mark, centred: {header:?}");
+        let (mut b, _rx) = face_app();
+        let small = paint_face(&mut b, 50, 18);
+        assert!(small[(0, 0)].symbol() == "R", "a small pane keeps the two-row header: {:?}", small[(0, 0)].symbol());
+        assert_eq!(b.face_due(), None, "a hidden mark costs nothing");
+    }
+
+    #[test]
+    fn mood_follows_the_events_the_python_widget_reacts_to() {
+        let (mut a, _rx) = face_app();
+        assert_eq!(mood(&a), Mood::Idle);
+        ev(&mut a, r#"{"type":"TextDelta","organ":"rabble","text":"hi"}"#);
+        assert_eq!(mood(&a), Mood::Streaming);
+        ev(&mut a, r#"{"type":"ToolCall","organ":"rabble","id":"t1","name":"Bash","input":{"command":"ls"}}"#);
+        assert_eq!(mood(&a), Mood::Working);
+        ev(&mut a, r#"{"type":"ToolResult","organ":"rabble","id":"t1","ok":true,"summary":"ok"}"#);
+        assert_eq!(mood(&a), Mood::Idle);
+        type_in(&mut a, "hel");
+        assert_eq!(mood(&a), Mood::Typing);
+        ev(&mut a, r#"{"type":"Error","text":"boom"}"#);
+        assert_eq!(mood(&a), Mood::Error, "an error flashes");
+        a.flash = Some((Mood::Error, Instant::now() - Duration::from_millis(1)));
+        a.sync_face();
+        assert_eq!(mood(&a), Mood::Typing, "and the flash ends");
+        ev(&mut a, r#"{"type":"OrganStarted","organ":"gobble","tool_use_id":"u","task_id":"k","brief":"x"}"#);
+        a.composer.set_text("");
+        a.sync_face();
+        assert_eq!(mood(&a), Mood::Working);
+        ev(&mut a, r#"{"type":"TurnDone","stop_reason":"end_turn","origin":"observer"}"#);
+        assert_eq!(mood(&a), Mood::Idle, "an observer turn ending clears what was running");
+    }
+
+    #[test]
+    fn denying_a_permission_flashes_the_denied_mood() {
+        let (mut a, _rx) = face_app();
+        ev(&mut a, &ask("a1"));
+        a.on_input(key(KeyCode::Esc));
+        assert_eq!(mood(&a), Mood::Denied);
+    }
+
+    #[test]
+    fn the_providers_tint_follows_the_model_and_the_entropy_signal_reaches_the_face() {
+        let (mut a, _rx) = face_app();
+        let tint = |a: &App| a.face.as_ref().unwrap().mini_provider_for_test();
+        assert_eq!(tint(&a), Some(rabble_face::Provider::Anthropic), "no model named = Claude Code's own default");
+        ev(&mut a, r#"{"type":"ModelUsed","model":"gemini-3-pro"}"#);
+        assert_eq!(tint(&a), Some(rabble_face::Provider::Google));
+        ev(&mut a, r#"{"type":"EntropyChanged","score":0.4,"band":"NOMINAL","trust":"standard","base":35,"stability":40,"local":true}"#);
+        assert_eq!(tint(&a), None, "a local model has no provider");
+        assert!(a.face.as_ref().unwrap().mini_noise_for_test() > 0.3, "capability 35 is grainy");
+    }
+
+    #[test]
+    fn slash_face_mounts_a_full_face_until_the_next_message() {
+        let (mut a, rx) = face_app();
+        say(&mut a, "/face");
+        assert!(a.t.has_face() && a.face.as_ref().unwrap().full.is_some());
+        assert!(sent(&rx).is_empty(), "/face is local");
+        let before = paint_face(&mut a, 100, 40);
+        let after = paint_face(&mut a, 100, 40);
+        let full = a.face.as_ref().unwrap().full.as_ref().unwrap();
+        assert_eq!(full.size(), (100, 40 - 7 - a.composer.height(100) as usize), "the face fills the transcript pane");
+        let painted = (0..100).flat_map(|x| (8..30).map(move |y| (x, y))).filter(|&(x, y)| after[(x, y)].bg != ratatui::style::Color::Reset).count();
+        assert!(painted > 100, "the full face paints its cells: {painted}");
+        let _ = before;
+        say(&mut a, "hello");
+        assert!(!a.t.has_face() && a.face.as_ref().unwrap().full.is_none(), "the next submit drops it");
+        assert!(sent(&rx).iter().any(|m| m["type"] == "send"));
+    }
+
+    #[test]
+    fn keys_and_wheel_never_compute_a_face_frame() {
+        let (mut a, _rx) = face_app();
+        let _ = paint_face(&mut a, 100, 30);
+        let frames = a.face.as_ref().unwrap().mini.frames;
+        for c in "typing away".chars() {
+            a.on_input(key(KeyCode::Char(c)));
+        }
+        a.on_input(Event::Mouse(MouseEvent { kind: MouseEventKind::ScrollUp, column: 3, row: 3, modifiers: KeyModifiers::NONE }));
+        assert_eq!(a.face.as_ref().unwrap().mini.frames, frames, "only tick_face computes a frame");
+    }
+
+    #[test]
+    fn a_face_frame_is_cheap_enough_to_sit_between_keys() {
+        let (mut a, _rx) = face_app();
+        say(&mut a, "/face");
+        let _ = paint_face(&mut a, 220, 60);
+        let mut now = Instant::now() + Duration::from_secs(1);
+        let mut ms = Vec::new();
+        for _ in 0..60 {
+            now += Duration::from_millis(40);
+            let t0 = Instant::now();
+            a.tick_face(now);
+            ms.push(t0.elapsed().as_secs_f64() * 1e3);
+        }
+        ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        eprintln!("mark + full face at 220x60, tick p50 {:.2} ms p99 {:.2} ms", ms[30], ms[58]);
+        assert!(ms[58] < 8.0, "p99 {} ms", ms[58]);
+    }
+
+    #[test]
+    fn no_face_without_a_palette() {
+        let (a, _rx) = live();
+        assert!(a.face.is_none() && a.face_due().is_none());
     }
 }

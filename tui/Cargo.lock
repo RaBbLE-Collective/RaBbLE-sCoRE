@@ -330,6 +330,7 @@ name = "rabble-tui"
 version = "0.0.0"
 dependencies = [
  "crossterm",
+ "rabble-face",
  "rabble-proto",
  "rabble-theme",
  "ratatui",

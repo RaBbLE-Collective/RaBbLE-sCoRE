@@ -174,7 +174,10 @@ pub fn run(o: Opts) -> io::Result<()> {
     let result = (|| -> io::Result<()> {
         paint(&mut term, &mut app)?;
         loop {
-            let wait = if app.needs_tick() { Duration::from_millis(50) } else { Duration::from_secs(1) };
+            let mut wait = if app.needs_tick() { Duration::from_millis(50) } else { Duration::from_secs(1) };
+            if let Some(due) = app.face_due() {
+                wait = wait.min(due.saturating_duration_since(Instant::now()));
+            }
             let mut first_input: Option<(Instant, bool)> = None;
             let note = |m: &Msg, first: &mut Option<(Instant, bool)>| {
                 if let Msg::Input(e, at) = m {
@@ -207,6 +210,10 @@ pub fn run(o: Opts) -> io::Result<()> {
             }
             if app.quit {
                 return Ok(());
+            }
+            // the face's frame: only on an iteration with no keyboard or wheel input, so it never sits in front of one
+            if first_input.is_none() {
+                app.tick_face(Instant::now());
             }
             if app.dirty {
                 paint(&mut term, &mut app)?;

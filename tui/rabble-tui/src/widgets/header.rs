@@ -1,5 +1,6 @@
-//! Header (two rows) and the divider under it. The left `FACE_SLOT_WIDTH` columns belong to the
-//! face widget (Lane F); nothing is drawn there yet.
+//! Header (two rows of text) and the divider under it. With the face mark showing, the header is
+//! `FACE_ROWS` tall: the left `FACE_SLOT_WIDTH` columns belong to the mark and the two text lines sit
+//! beside it, vertically centred.
 
 use ratatui::{buffer::Buffer, layout::Rect, text::{Line, Span}};
 
@@ -73,11 +74,14 @@ impl HeaderState {
         [clipw(a), clipw(b)]
     }
 
-    pub fn draw(&self, area: Rect, buf: &mut Buffer, th: &Theme) {
-        let x0 = area.x + FACE_SLOT_WIDTH.min(area.width);
-        let w = area.width.saturating_sub(FACE_SLOT_WIDTH);
+    /// `face_slot`: leave the left `FACE_SLOT_WIDTH` columns (and a one-column gap) to the face mark and
+    /// centre the two lines against it.
+    pub fn draw(&self, area: Rect, buf: &mut Buffer, th: &Theme, face_slot: bool) {
+        let slot = if face_slot { (FACE_SLOT_WIDTH + 1).min(area.width) } else { 0 };
+        let (x0, w) = (area.x + slot, area.width.saturating_sub(slot));
+        let y0 = area.y + if face_slot { area.height.saturating_sub(2) / 2 } else { 0 };
         for (i, l) in self.lines(th, w as usize).iter().enumerate().take(area.height as usize) {
-            buf.set_line(x0, area.y + i as u16, l, w);
+            buf.set_line(x0, y0 + i as u16, l, w);
         }
     }
 }

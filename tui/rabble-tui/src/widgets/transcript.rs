@@ -16,6 +16,8 @@ use crate::{markdown, theme::Theme, wrap::{self, clean, str_width}};
 pub const WHEEL_LINES: usize = 3;
 pub const SLACK: usize = 3; // follow while the distance from the bottom is < SLACK lines
 pub const REFOCUS_GUARD: Duration = Duration::from_millis(400);
+/// The full face fills the pane's height, never less than this (Python `FaceWidget.-full`: `min-height: 12`).
+pub const FACE_MIN_ROWS: usize = 12;
 const TITLE_MAX: usize = 100;
 const RESULT_MAX: usize = 60;
 
@@ -26,6 +28,8 @@ pub enum Item {
     Tool { id: String, organ: String, name: String, line: String, input: String, result: Option<(bool, String)> },
     Notice { text: String, error: bool },
     Thinking,
+    /// `/face`: room for the full face, which the app paints over these rows. Dropped on the next submit.
+    Face,
 }
 
 struct Entry {
@@ -47,6 +51,7 @@ pub struct Transcript {
     blurred: Option<bool>,
     guard_until: Option<(Instant, bool)>,
     pub view_h: u16,
+    face_rows: usize,
 }
 
 pub fn one_line(data: &serde_json::Map<String, serde_json::Value>) -> String {
@@ -97,7 +102,7 @@ impl Default for Transcript {
 
 impl Transcript {
     pub fn new() -> Self {
-        Transcript { entries: Vec::new(), width: 0, total: 0, max: 0, stale: true, offset: 0, follow: true, expanded: false, blurred: None, guard_until: None, view_h: 0 }
+        Transcript { entries: Vec::new(), width: 0, total: 0, max: 0, stale: true, offset: 0, follow: true, expanded: false, blurred: None, guard_until: None, view_h: 0, face_rows: FACE_MIN_ROWS }
     }
 
     fn push(&mut self, item: Item) {
@@ -119,6 +124,41 @@ impl Transcript {
     }
     pub fn max_scroll(&self) -> usize {
         self.max
+    }
+
+    // the full face ------------------------------------------------------------------------
+    /// `/face`: one room for the full face at the end of the conversation (replaces an earlier one).
+    pub fn push_face(&mut self) {
+        self.drop_face();
+        self.push(Item::Face);
+    }
+
+    pub fn drop_face(&mut self) {
+        let n = self.entries.len();
+        self.entries.retain(|e| e.item != Item::Face);
+        if self.entries.len() != n {
+            self.stale = true;
+        }
+    }
+
+    pub fn has_face(&self) -> bool {
+        self.entries.iter().any(|e| e.item == Item::Face)
+    }
+
+    pub fn face_rows(&self) -> usize {
+        self.face_rows
+    }
+
+    /// Where the face is on screen inside `area` (the transcript pane): its visible part and how many of its
+    /// top rows are scrolled out of view. None when it is not showing.
+    pub fn face_rect(&self, area: Rect) -> Option<(Rect, u16)> {
+        let e = self.entries.iter().find(|e| e.item == Item::Face)?;
+        let top = self.offset.min(self.max);
+        let (lo, hi) = (e.start.max(top), (e.start + e.lines.len()).min(top + area.height as usize));
+        if lo >= hi {
+            return None;
+        }
+        Some((Rect { x: area.x, y: area.y + (lo - top) as u16, width: area.width, height: (hi - lo) as u16 }, (lo - e.start) as u16))
     }
 
     // content ------------------------------------------------------------------------------
@@ -295,7 +335,7 @@ impl Transcript {
     }
 
     // layout and paint -----------------------------------------------------------------------
-    fn render_entry(item: &Item, th: &Theme, w: usize, expanded: bool) -> Vec<Line<'static>> {
+    fn render_entry(item: &Item, th: &Theme, w: usize, expanded: bool, face_rows: usize) -> Vec<Line<'static>> {
         let g = th.glyphs;
         match item {
             Item::User(t) => {
@@ -316,6 +356,7 @@ impl Transcript {
                 v.push(Line::default());
                 v
             }
+            Item::Face => vec![Line::default(); face_rows],
             Item::Thinking => vec![Line::from(Span::styled(format!("{}{}", "thinking", g.ellipsis), th.muted))],
             Item::Notice { text, error } => {
                 let st = if *error { th.error } else { th.muted };
@@ -372,6 +413,16 @@ impl Transcript {
             }
         }
         self.view_h = height;
+        let face_rows = (height as usize).max(FACE_MIN_ROWS);
+        if face_rows != self.face_rows {
+            self.face_rows = face_rows;
+            self.stale = true;
+            for e in &mut self.entries {
+                if e.item == Item::Face {
+                    e.dirty = true;
+                }
+            }
+        }
         if !self.stale && self.max == self.total.saturating_sub(height as usize) {
             return;
         }
@@ -379,7 +430,7 @@ impl Transcript {
         let mut start = 0;
         for e in &mut self.entries {
             if e.dirty {
-                e.lines = Self::render_entry(&e.item, th, w, ex);
+                e.lines = Self::render_entry(&e.item, th, w, ex, face_rows);
                 e.dirty = false;
             }
             e.start = start;

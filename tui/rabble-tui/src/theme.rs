@@ -46,10 +46,17 @@ pub struct Theme {
     pub modal: Style,
     pub select: Style,
     organs: Vec<Style>,
+    /// The palette itself, for the face (it draws cell by cell); `None` without one.
+    pub pal: Option<Palette>,
 }
 
 fn c(r: Rgb) -> Color {
     Color::Rgb(r.0, r.1, r.2)
+}
+
+/// A palette-derived colour for cells the face paints (the only other place that builds `Color::Rgb`).
+pub fn rgb(r: Rgb) -> Color {
+    c(r)
 }
 
 impl Theme {
@@ -83,6 +90,7 @@ impl Theme {
             modal: both("text", "raised"),
             select: Style::new().add_modifier(Modifier::REVERSED),
             organs: ["cyan", "violet", "pink", "green", "yellow"].iter().map(|n| fg(n)).collect(),
+            pal: p.cloned(),
         };
         if !colour {
             // without colour, errors and headings still need to stand apart

@@ -62,7 +62,7 @@ Rust tests live beside the code (`cargo test --offline --release` from `tui/`). 
 ## Behaviours in `ui/` with no Python test
 Ported: header (model, mode, trust, crew, cwd, entropy, cost, context %, limit), divider with status, thinking placeholder, Ctrl-O tool cards, Shift+Tab mode cycle, history, multiline (Shift+Enter, Ctrl-J, Alt-Enter), bracketed paste, Ctrl-V clipboard paste, `/park` settings, `/park now|continue`, auto-park at `RABBLE_PARK_AT` (default 80%), handoff check, `/resume` picker (live engine sessions + `~/.claude/projects` history), `/status`, `/help`.
 Dropped, because: `/reload` (compiled); Ctrl-C copies a mouse selection (mouse capture is on, the terminal selects with Shift+drag, so bare Ctrl-C only counts toward quitting); park ETA from context growth (`Bloat`); the "inside RaBbLE-sCoRE" warning; the OS usage tracker (5h/week windows in the header and `/status`), which reads `orchestra/usage.py`'s cache and needs a port or an engine event.
-Not here (other lanes): the face widget (empty slot: `widgets::FACE_SLOT_WIDTH`, `/face` says so), narration lines (Lane N events render as `Unknown` until `rabble-proto` adds them).
+Not here (other lanes): narration lines (Lane N events render as `Unknown` until `rabble-proto` adds them). The face is below (S297).
 
 ## Added by the S296 review fixes (no Python counterpart)
 Prompt: ask arriving behind a picker (`an_ask_that_arrives_while_a_picker_is_open...`), late `/resume` list never replaces a prompt and switching sessions clears queued asks (`a_late_session_list...`), tiny-terminal modals (`modals_do_not_panic_in_tiny_areas`).
@@ -70,3 +70,38 @@ Terminal: half frame discarded on panic (`run::a_half_built_frame...`), ESU firs
 Engine I/O: bounded frame queue with the input channel drained first, capped line reader, invalid UTF-8 is malformed not closed (`client::` tests), reconnect with `attach{since_seq: max(seq)}` (`app::a_dropped_connection_reconnects...`), a replaced `create_session` is closed not adopted, another session's `Error` is not shown.
 Workers off the render thread: `@` file scan (capped during the walk, no symlinked dirs, cache dropped on submit), history titles (first 200 lines of at most 4 MiB), Ctrl-V clipboard (2 s limit), session list.
 Safety of what is drawn: control characters, C1, DEL and bidi overrides are stripped, tabs expanded (`wrap::clean`; `transcript::escape_sequences_from_the_engine_never_reach_a_cell`, `modal::escape_sequences_in_a_prompt...`, `composer::submit_drops_the_file_cache_and_paste_strips_escapes`).
+
+## The face (S297, Lane F): `ui/face.py`, `ui/eyes.py`, `tests/test_ui_face.py`, the face parts of `ui/app.py`
+The Rust face is a cell-for-cell port: `tests/golden_face.py` dumps 48 frames (+5 degrade runs, rigs, meshes, Life) from Python into `tests/fixtures/face/golden.json`; `rabble-face/tests/golden.rs` replays them. Result: every cell identical, glyph and both colours (0 cells off by even one channel unit). `ui/prng.py` + `rabble-face/src/prng.rs` (SplitMix64) replaced `random.Random` in both bodies, so the mesh and orb dust differ from before the change in the PYTHON face too (Mark confirms by eye).
+| Python | Rust |
+|---|---|
+| test_mini_shape | `behaviour::mini_shape` |
+| test_rig_baseline (mini, 100x30, 200x55) | `golden::rig_baseline` (+ `rig_matches_python`: 12 rigs, snap and unsnapped, to 1e-9) |
+| test_mood_mapping | `golden::moods_curves_and_blend_match` |
+| test_blend_pose | same test (3 blends against Python's numbers) |
+| test_widget_renders, test_full_fills_and_denied_reverts | `golden::driver_eases_and_denied_reverts` (the mood/pose state machine is `rabble_face::Driver`, no clock inside), `widgets::face::{the_mark_ticks_at_its_own_cadence_and_only_when_visible, the_full_face_draws_into_the_buffer_and_survives_a_resize}` |
+| test_no_color | `widgets::face::no_color_shows_the_word_and_nothing_else` |
+| test_provider_of | `golden::provider_of_matches` (14 models incl. local, empty, case) |
+| test_provider_aura_tints_outside_the_eyes_only | `behaviour::provider_aura_tints_outside_the_eyes_only` + golden frames for all three providers |
+| test_safe_glyphs_stay_in_block_elements | `behaviour::safe_glyphs_stay_in_block_elements`, `widgets::face::safe_glyph_override...` (the `RABBLE_GLYPHS` / `TERM_PROGRAM=vscode` env read in `face::safe_glyphs()` is not unit-tested: it reads the process environment) |
+| test_compose_matches_frame (100x30, 220x60) | `behaviour::compose_matches_frame` + golden `compose` frames (cached background + layer + assemble equals Python's) |
+| test_canvas_cells_fast_path_matches_cell | dropped, because: Rust has one cell path (no half-block "used cells" shortcut); every golden frame covers it |
+| test_divider_flows_cyan_to_magenta | not face code (the divider widget); the Rust divider is a plain rule, unchanged |
+| `degrade`, `noise_level`, `break_level`, `eye_block` (no Python test) | `golden::degrade_matches_python` (5 settings x 6 consecutive frames through one rng + burst state), curves test |
+| `Life` | `golden::life_matches_python` (600 steps incl. a speed change) |
+| mesh layout | `golden::mesh_matches_python` (3 sizes, node positions to 1e-9) |
+| octant table | `golden::octant_table_matches_unicode` (256 patterns against Python's `unicodedata` build) |
+| frame rate | `behaviour::frame_rate_gates_at_260x70` (eyes >= 30 fps, background >= 15 fps, release builds), `examples/bench.rs` |
+| wiring: mood from events | `app::mood_follows_the_events_the_python_widget_reacts_to` (TextDelta streaming, ToolCall/ToolResult/Organ working, composer text typing, Error flash, observer TurnDone clears), `denying_a_permission_flashes_the_denied_mood` |
+| wiring: provider tint, signal | `app::the_providers_tint_follows_the_model_and_the_entropy_signal_reaches_the_face` (ModelUsed -> provider, `EntropyChanged.local` -> none, `base`/`stability` -> noise/breaking) |
+| `/face` | `app::slash_face_mounts_a_full_face_until_the_next_message` (transient: the next submit drops it, as Python's `drop_transient`) |
+| never delays keys | `app::keys_and_wheel_never_compute_a_face_frame` (only `tick_face` computes, and `run.rs` calls it only on an iteration with no input), `a_face_frame_is_cheap_enough_to_sit_between_keys` |
+| mark layout | `app::the_mark_takes_six_header_rows_in_a_big_pane_and_none_in_a_small_one` |
+
+Differences, on purpose:
+- Header: the mark makes the header 6 rows (as Python) only when the pane is at least 56x22 (`FACE_MIN_AREA`); smaller panes keep the 2-row header and the mark costs nothing (not ticked while hidden). The two text lines are centred beside the mark; Python's header shows five more info lines (capability bars, usage windows, ...) that the Rust shell does not have yet.
+- Frames are computed inline on the event loop, not on the two worker threads Python needs because of the GIL. A frame costs 0.2 ms (mark) to about 1.3 ms (full, 260x70); `tick_face` runs only when the loop has no keyboard or wheel input in hand, so under a wheel flood the face holds its last frame. A paint is requested only when a cell changed (replaces `_refresh_changed`).
+- Palette-background cells draw with the terminal's default background (translucent terminals show through), where Python resolves to the header's background.
+- `/face` without a palette: a notice (`RaBbLE`), nothing to draw.
+- Dropped, because: the stepped drawing path (`fine_eyes=False`, `_eye_and_portal`, `_in_pill`: dead code, never enabled); constructor knobs only tests used (`eye_h`, `eye_w`, `aura`, `rim`, `rim_tips`, `spread`); `/reload` of `ui.prng` (compiled); the style cache and `Strip` merging (ratatui diffs cells).
+- Not done: T6 (cell aspect read from the terminal; Python assumes square sub-pixels too); the native fixes the plan asked for where Python could not (dark stair-stepped halo, black portal fill, specks on the mini mark): parity first, the goldens pin Python's pixels, so any fix is a deliberate golden regeneration with Mark's eye.
