@@ -12,7 +12,7 @@ pub const VOID_BLACK: Rgb = Rgb(0, 0, 0);
 /// Per-channel distance under which a cell colour is the void itself (the halo's far tail rounds to a
 /// level or two off the background): such a cell is left alone so the terminal's own background shows.
 const VOID_TOL: i32 = 3;
-/// A dark cluster this close to the base (per channel, above its brightest channel) is void, not lit.
+/// A cluster this close to the base's brightest channel is void, not lit (see the rule in `paint`).
 const VOID_DARK: i32 = 40;
 
 fn close(a: Rgb, b: Rgb) -> bool {
@@ -252,11 +252,14 @@ pub struct PaintOpts {
     pub safe: bool,
     pub halo: f64,
     pub edge: f64,
+    /// Physical height over width of one grid pixel (cell aspect / 2): the rig is in isotropic units
+    /// (x in pixels, y in pixels times `ay`), so shapes keep their true aspect on any cell shape.
+    pub ay: f64,
 }
 
 impl Default for PaintOpts {
     fn default() -> Self {
-        PaintOpts { fine: 2.0, n: 2.0, lids: [None, None], rim_w: 1.0, block: 1, supersample: true, safe: false, halo: 1.0, edge: 0.8 }
+        PaintOpts { fine: 2.0, n: 2.0, lids: [None, None], rim_w: 1.0, block: 1, supersample: true, safe: false, halo: 1.0, edge: 0.8, ay: 1.0 }
     }
 }
 
@@ -334,8 +337,9 @@ pub fn paint(bg_grid: &[Vec<Rgb>], rig: &RigSet, pal: &EyePalette, o: &PaintOpts
     let y1 = parts.iter().map(|p| p.bbox[3]).fold(f64::NEG_INFINITY, f64::max) + 5.0;
     let c0 = ((x0 / 2.0).floor().max(0.0)) as usize;
     let c1 = ((x1 / 2.0).floor().min(ncols as f64 - 1.0)).max(-1.0);
-    let r0 = ((y0 / 4.0).floor().max(0.0)) as usize;
-    let r1 = ((y1 / 4.0).floor().min(nrows as f64 - 1.0)).max(-1.0);
+    let ay = o.ay;
+    let r0 = ((y0 / (4.0 * ay)).floor().max(0.0)) as usize;
+    let r1 = ((y1 / (4.0 * ay)).floor().min(nrows as f64 - 1.0)).max(-1.0);
     let has_lids = o.lids.iter().any(|l| l.is_some());
     let big = parts.iter().map(|p| p.eye.rx).fold(f64::INFINITY, f64::min) > 8.0;
     const SS_SMALL: [(f64, f64); 4] = [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)];
@@ -351,23 +355,24 @@ pub fn paint(bg_grid: &[Vec<Rgb>], rig: &RigSet, pal: &EyePalette, o: &PaintOpts
             let (cf, rf) = (c as f64, r as f64);
             let near: Vec<&Part> = parts
                 .iter()
-                .filter(|p| p.bbox[0] - 5.0 <= cf * 2.0 + 2.0 && cf * 2.0 <= p.bbox[2] + 5.0 && p.bbox[1] - 5.0 <= rf * 4.0 + 4.0 && rf * 4.0 <= p.bbox[3] + 5.0)
+                .filter(|p| p.bbox[0] - 5.0 <= cf * 2.0 + 2.0 && cf * 2.0 <= p.bbox[2] + 5.0 && p.bbox[1] - 5.0 <= (rf * 4.0 + 4.0) * ay && rf * 4.0 * ay <= p.bbox[3] + 5.0)
                 .collect();
             if near.is_empty() {
                 continue;
             }
             let base_rgb = bg_grid[r][c];
             let base = v3(base_rgb);
+            // sample points arrive in grid pixels; the shapes live in isotropic units
             let shade = |x: f64, y: f64| -> V3 {
                 let mut col = base;
                 for pt in &near {
-                    col = pt.sample(&p, x, y, col);
+                    col = pt.sample(&p, x, y * ay, col);
                 }
                 col
             };
             if !has_lids && o.block == 1 {
                 let (mx, my) = (cf * 2.0 + 1.0, rf * 4.0 + 2.0);
-                if near.iter().all(|pt| pt.eye.sd(mx, my).abs() > FLAT && pt.portal.sd(mx, my).abs() > FLAT) {
+                if near.iter().all(|pt| pt.eye.sd(mx, my * ay).abs() > FLAT && pt.portal.sd(mx, my * ay).abs() > FLAT) {
                     let col = rgb(shade(mx, my));
                     if col == pal.void || (col != base_rgb && !close(col, base_rgb)) {
                         out.push((r, c, Cell { ch: ' ', fg: col, bg: col }));
@@ -415,13 +420,15 @@ pub fn paint(bg_grid: &[Vec<Rgb>], rig: &RigSet, pal: &EyePalette, o: &PaintOpts
             } else {
                 // foreground-only blend: the glyph and its fg carry the anti-aliased edge; a void-dark back
                 // stays the cell's own background (the terminal's), or pure black inside a portal
-                let top = base_rgb.0.max(base_rgb.1).max(base_rgb.2) as i32 + VOID_DARK;
-                if bg.0.max(bg.1).max(bg.2) as i32 <= top {
+                let (bm, gm) = (base_rgb.0.max(base_rgb.1).max(base_rgb.2) as i32, bg.0.max(bg.1).max(bg.2) as i32);
+                // void-like: no more than VOID_DARK above the base; on a light base also no more than that below
+                // it (a dark back there is the eye's own colour, not the void)
+                if gm <= bm + VOID_DARK && (bm <= 128 || gm + VOID_DARK >= bm) {
                     let (mut dark, mut inside) = (0, 0);
                     for i in (0..8).filter(|i| lit >> i & 1 == 0) {
                         dark += 1;
                         let (sx, sy) = sub_at(i);
-                        if near.iter().any(|p| p.portal.sd(sx + 0.5, sy + 0.5) <= 0.0) {
+                        if near.iter().any(|p| p.portal.sd(sx + 0.5, (sy + 0.5) * ay) <= 0.0) {
                             inside += 1;
                         }
                     }

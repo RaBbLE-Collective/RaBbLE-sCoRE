@@ -23,6 +23,22 @@ pub fn safe_glyphs() -> bool {
     g == "safe" || (g != "octant" && std::env::var("TERM_PROGRAM").as_deref() == Ok("vscode"))
 }
 
+/// The terminal cell's height over its width in pixels: from the window's pixel size when the terminal reports
+/// it (TIOCGWINSZ via crossterm), else 2.0. `RABBLE_CELL_ASPECT` overrides. Implausible values fall back to 2.
+pub fn cell_aspect() -> f64 {
+    let sane = |a: f64| a.is_finite() && (1.0..=4.0).contains(&a);
+    if let Some(a) = std::env::var("RABBLE_CELL_ASPECT").ok().and_then(|v| v.parse::<f64>().ok()).filter(|&a| sane(a)) {
+        return a;
+    }
+    match crossterm::terminal::window_size() {
+        Ok(w) if w.columns > 0 && w.rows > 0 && w.width > 0 && w.height > 0 => {
+            let a = (w.height as f64 / w.rows as f64) / (w.width as f64 / w.columns as f64);
+            if sane(a) { a } else { 2.0 }
+        }
+        _ => 2.0,
+    }
+}
+
 /// One face (mini or full) with its clock, eased pose, caches and the latest cells.
 pub struct FaceView {
     detail: Detail,
@@ -30,6 +46,8 @@ pub struct FaceView {
     safe: bool,
     face: Option<Face>,
     size: (usize, usize),
+    aspect: f64,
+    fixed_aspect: Option<f64>,
     driver: Driver,
     t0: Instant,
     provider: Option<Provider>,
@@ -44,7 +62,7 @@ pub struct FaceView {
 impl FaceView {
     pub fn new(pal: FacePalette, detail: Detail, safe: bool, now: Instant) -> FaceView {
         FaceView {
-            detail, pal, safe, face: None, size: (0, 0), driver: Driver::new(), t0: now, provider: None, base: None, base_at: f64::NEG_INFINITY,
+            detail, pal, safe, face: None, size: (0, 0), aspect: 2.0, fixed_aspect: None, driver: Driver::new(), t0: now, provider: None, base: None, base_at: f64::NEG_INFINITY,
             layer: None, cells: Vec::new(), next: now, frames: 0,
         }
     }
@@ -53,12 +71,27 @@ impl FaceView {
         self.size
     }
 
+    /// Pin the cell aspect (height / width in pixels) instead of querying the terminal; tests and callers
+    /// that already know it. Non-finite or non-positive values unpin it.
+    pub fn set_cell_aspect(&mut self, aspect: f64) {
+        self.fixed_aspect = Some(aspect).filter(|a| a.is_finite() && *a > 0.0);
+        let aspect = self.fixed_aspect.unwrap_or(2.0);
+        if (aspect - self.aspect).abs() > 0.01 {
+            self.aspect = aspect;
+            (self.face, self.base, self.layer) = (None, None, None);
+            self.next = self.t0;
+        }
+    }
+
     /// Resize: the face is rebuilt on the next tick (the mesh depends on the size).
     /// Returns true when the size changed (the caller computes a frame at once so the new size never paints blank).
     pub fn fit(&mut self, cols: usize, rows: usize) -> bool {
-        let changed = self.size != (cols, rows);
+        // the full face is laid out for the real cell shape and re-queries it here (a resize, a font change)
+        let aspect = if self.detail != Detail::Full { 2.0 } else { self.fixed_aspect.unwrap_or_else(cell_aspect) };
+        let changed = self.size != (cols, rows) || (aspect - self.aspect).abs() > 0.01;
         if changed {
             self.size = (cols, rows);
+            self.aspect = aspect;
             (self.face, self.base, self.layer) = (None, None, None);
             self.cells.clear();
             self.next = self.t0; // due at once
@@ -107,7 +140,7 @@ impl FaceView {
             if self.detail == Detail::Full && (cols < 4 || rows < 2) || cols == 0 || rows == 0 {
                 return false;
             }
-            let mut f = Face::new(cols, rows, self.pal, self.detail, self.safe);
+            let mut f = Face::with_aspect(cols, rows, self.pal, self.detail, self.safe, self.aspect);
             f.set_provider(self.provider);
             self.face = Some(f);
         }

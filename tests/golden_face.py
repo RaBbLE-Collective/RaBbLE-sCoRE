@@ -32,7 +32,8 @@ def enc(grid):
 
 
 def make_face(spec, pal):
-    f = F.Face(spec["cols"], spec["rows"], pal, detail=spec["detail"], safe=spec.get("safe", False))
+    f = F.Face(spec["cols"], spec["rows"], pal, detail=spec["detail"], safe=spec.get("safe", False),
+               cell_aspect=spec.get("aspect", 2.0))
     f.set_provider(spec.get("provider"))
     f.block = spec.get("block", 1)
     pose = spec.get("pose")
@@ -78,6 +79,10 @@ def frame_specs():
     add(kind="compose", detail="full", cols=220, rows=60, t=2.2, gaze=[-0.8, 0.3])
     add(kind="frame", detail="full", cols=8, rows=4, t=0.3)        # tiny
     add(kind="frame", detail="full", cols=150, rows=22, t=1.0)     # wide and short
+    # real cell shapes (S302: Mark's terminal measured about 2.3): the sphere stays round, the eyes keep their aspect
+    add(kind="frame", detail="full", cols=100, rows=40, t=0.5, gaze=[0.3, 0.1], aspect=2.3)
+    add(kind="compose", detail="full", cols=100, rows=12, t=1.3, gaze=[0.6, -0.4], provider="anthropic", aspect=2.3)
+    add(kind="frame", detail="full", cols=60, rows=20, t=0.8, expr="joy", aspect=1.75)
     return s
 
 

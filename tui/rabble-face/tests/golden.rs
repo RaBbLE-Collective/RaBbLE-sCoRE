@@ -73,7 +73,7 @@ fn compare(got: &Grid, want: &Value, label: &str) -> Diff {
 
 fn face_for(spec: &Value, pal: FacePalette) -> Face {
     let detail = if spec["detail"] == "mini" { Detail::Mini } else { Detail::Full };
-    let mut f = Face::new(spec["cols"].as_u64().unwrap() as usize, spec["rows"].as_u64().unwrap() as usize, pal, detail, spec["safe"].as_bool().unwrap_or(false));
+    let mut f = Face::with_aspect(spec["cols"].as_u64().unwrap() as usize, spec["rows"].as_u64().unwrap() as usize, pal, detail, spec["safe"].as_bool().unwrap_or(false), spec["aspect"].as_f64().unwrap_or(2.0));
     f.set_provider(spec["provider"].as_str().and_then(Provider::from_name));
     f.block = spec["block"].as_u64().unwrap_or(1) as u32;
     if let Some(p) = spec.get("pose").filter(|p| !p.is_null()) {

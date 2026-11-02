@@ -279,6 +279,8 @@ pub struct Face {
     hw: f64,
     hh: f64,
     k: f64,
+    /// Physical height over width of one grid pixel (cell aspect / 2; 1.0 on the usual 2:1 cell).
+    ay: f64,
     mins_erx: f64,
     mins_prx: f64,
     mins_pry: f64,
@@ -297,16 +299,25 @@ pub struct Face {
 
 impl Face {
     pub fn new(cols: usize, rows: usize, pal: FacePalette, detail: Detail, safe: bool) -> Face {
+        Face::with_aspect(cols, rows, pal, detail, safe, 2.0)
+    }
+
+    /// `cell_aspect` is a terminal cell's height over its width in pixels (about 2; non-finite or non-positive
+    /// falls back to 2). The full face lays its sphere, eyes and portals out in physical units, so the sphere
+    /// is a true circle and the eyes keep their aspect on any cell shape. The mini mark stays at 2:1.
+    pub fn with_aspect(cols: usize, rows: usize, pal: FacePalette, detail: Detail, safe: bool, cell_aspect: f64) -> Face {
         let full = detail == Detail::Full;
         let octant = !full;
         let (w, h) = if octant { (cols as f64 * 2.0, rows as f64 * 4.0) } else { (cols as f64, rows as f64 * 2.0) };
+        let ay = if full && cell_aspect.is_finite() && cell_aspect > 0.0 { (cell_aspect / 2.0).clamp(0.25, 4.0) } else { 1.0 };
         let (r, hw, hh, k);
         if full {
-            // One uniform scale for the whole rig, set by the smaller dimension: the sphere is a true circle
-            // (a half-block pixel is square on a ~2:1 cell) of ORB_R face units, which envelops every pose.
-            r = (w.min(h) / 2.0 - 1.0).max(1.0);
+            // One uniform scale for the whole rig, set by the smaller dimension: the sphere is a true circle of
+            // ORB_R face units, which envelops every pose. `r` is in isotropic units (x pixels); a pixel is
+            // `ay` times taller than wide, so the vertical room is (h / 2 - 1) * ay.
+            r = (w / 2.0 - 1.0).min((h / 2.0 - 1.0) * ay).max(1.0);
             hw = w / 2.0 - 0.5;
-            hh = (h * 0.49).min(r * 1.38);
+            hh = (h * 0.49).min(r * 1.38 / ay);
             k = r / ORB_R;
         } else {
             r = h * 0.48;
@@ -316,7 +327,7 @@ impl Face {
         }
         let mut f = Face {
             cols, rows, pal, detail, expr: Expr::Calm, pose: None, seed: 7, safe, octant,
-            cx: w / 2.0, cy: h / 2.0, r, hw, hh, k,
+            cx: w / 2.0, cy: h / 2.0, r, hw, hh, k, ay,
             // the full face has no minimum sizes: a floor on one axis would stretch the eyes at small scales
             mins_erx: if full { 0.0 } else { 4.0 },
             mins_prx: if full { 0.0 } else { 7.0 },
@@ -340,6 +351,16 @@ impl Face {
 
     pub fn from_theme(cols: usize, rows: usize, p: &Palette, detail: Detail, safe: bool) -> Face {
         Face::new(cols, rows, FacePalette::from_palette(p), detail, safe)
+    }
+
+    /// The sphere as (cx, cy, rx, ry) in grid pixels (half-block pixels on the full face), for fit checks.
+    pub fn orb_extent(&self) -> (f64, f64, f64, f64) {
+        (self.cx, self.cy, self.r, self.r / self.ay)
+    }
+
+    /// Physical height over width of one grid pixel the face was laid out for (cell aspect / 2).
+    pub fn pixel_aspect(&self) -> f64 {
+        self.ay
     }
 
     pub fn set_provider(&mut self, p: Option<Provider>) {
@@ -431,10 +452,10 @@ impl Face {
         let mut out = [(0.0, 0.0, 0.0, 0.0, 0.0); 4]; // eL eR pL pR
         for (idx, (side, ep, pp)) in [(-1.0f64, pose.e_l, pose.p_l), (1.0, pose.e_r, pose.p_r)].into_iter().enumerate() {
             let mut ex = self.cx + side * EYE_X * self.spread * k * w0 + (ep.dx + gx * GAZE_X) * k;
-            let ey = self.cy + (ep.dy + gy * GAZE_Y + float_y) * k;
+            let ey = self.cy * self.ay + (ep.dy + gy * GAZE_Y + float_y) * k;
             let mut erx = EYE_RX * ep.sx * k;
             let ery = EYE_RY * ep.sy * k;
-            let por_y = self.cy + (side * POR_OFF + pp.dy + float_y + side * bob) * k;
+            let por_y = self.cy * self.ay + (side * POR_OFF + pp.dy + float_y + side * bob) * k;
             let prx = POR_RX * pp.sx * k * w0;
             let pry = (prx * (POR_RY / POR_RX) * pp.sy / pp.sx).max(if full { 0.0 } else { 1.2 });
             let mut px = self.cx + side * EYE_X * self.spread * k * w0 + pp.dx * k;
@@ -458,7 +479,10 @@ impl Face {
     fn aura<'a>(&'a self, rig: &'a RigSet) -> impl Fn(f64, f64, Rgb) -> Rgb + 'a {
         let ring = self.aura_ring();
         let strength = (if ring.is_empty() { AURA_POLES } else { AURA_RING }) * self.aura_k;
+        let ay = self.ay;
+        // x, y arrive in grid pixels; the rig is isotropic
         move |x, y, base| {
+            let y = y * ay;
             let mut c = base;
             for (e, pole) in [(rig.e_l, self.pal.cyan), (rig.e_r, self.pal.magenta)] {
                 let (ex, ey, rx, ry, _) = e;
@@ -485,8 +509,8 @@ impl Face {
         let fold = |f: &dyn Fn(&Rig5) -> f64, lo: bool| es.iter().map(f).fold(if lo { f64::INFINITY } else { f64::NEG_INFINITY }, |a, b| if lo { a.min(b) } else { a.max(b) });
         let x0 = fold(&|e| e.0 - e.2 * 2.6, true);
         let x1 = fold(&|e| e.0 + e.2 * 2.6, false);
-        let y0 = fold(&|e| e.1 - e.3 * 1.55, true);
-        let y1 = fold(&|e| e.1 + e.3 * 1.55, false);
+        let y0 = fold(&|e| e.1 - e.3 * 1.55, true) / self.ay;
+        let y1 = fold(&|e| e.1 + e.3 * 1.55, false) / self.ay;
         let lo = |v: f64| if v < 0.0 { 0 } else { v as usize };
         (
             lo((y0 / 2.0).floor() - 1.0),
@@ -510,7 +534,7 @@ impl Face {
     fn paint_opts(&self, supersample: bool, fine: f64, lid: Option<(f64, f64)>) -> PaintOpts {
         PaintOpts {
             fine, n: 2.0, lids: [lid, lid], rim_w: self.rim_w, block: self.block, supersample,
-            safe: self.safe, halo: self.halo, edge: self.edge,
+            safe: self.safe, halo: self.halo, edge: self.edge, ay: self.ay,
         }
     }
 
@@ -645,8 +669,9 @@ impl Face {
     fn orb(&self, cv: &mut Canvas, t: f64) {
         let p = &self.pal;
         let (cx, cy, r) = (self.cx, self.cy, self.r);
+        let ry = r / self.ay; // vertical radius in pixels: the sphere is round in physical units
         let dim = if self.detail == Detail::Full { 0.55 } else { 0.75 };
-        for (x, y) in ellipse_pts(cx, cy, r, r, 0.0, 0.0, TAU, None) {
+        for (x, y) in ellipse_pts(cx, cy, r, ry, 0.0, 0.0, TAU, None) {
             cv.dot(x, y, mix(self.side(x), p.bg, dim * 0.6), 0.7);
         }
         if self.detail != Detail::Full {
@@ -658,15 +683,15 @@ impl Face {
             if rx < 0.6 {
                 continue;
             }
-            let pts = if a.cos() > 0.0 { ellipse_pts(cx, cy, rx, r, 0.0, -PI / 2.0, PI / 2.0, None) } else { ellipse_pts(cx, cy, rx, r, 0.0, PI / 2.0, 3.0 * PI / 2.0, None) };
+            let pts = if a.cos() > 0.0 { ellipse_pts(cx, cy, rx, ry, 0.0, -PI / 2.0, PI / 2.0, None) } else { ellipse_pts(cx, cy, rx, ry, 0.0, PI / 2.0, 3.0 * PI / 2.0, None) };
             for (x, y) in pts {
                 cv.dot(x, y, mix(self.side(x), p.bg, dim), 0.3);
             }
         }
         for lat in [-0.6f64, -0.3, 0.0, 0.3, 0.6] {
-            let y0 = cy + r * (lat * 1.2).sin();
+            let y0 = cy + ry * (lat * 1.2).sin();
             let rx = r * (lat * 1.2).cos();
-            for (x, y) in ellipse_pts(cx, y0, rx, rx * 0.12, 0.0, 0.0, PI, None) {
+            for (x, y) in ellipse_pts(cx, y0, rx, rx * 0.12 / self.ay, 0.0, 0.0, PI, None) {
                 cv.dot(x, y, mix(self.side(x), p.bg, dim), 0.3);
             }
         }
@@ -677,7 +702,7 @@ impl Face {
             let a = rng.uniform(0.0, TAU);
             let rr = r * rng.random().sqrt() * 0.95;
             let drift = t * 0.4 * (0.5 + rng.random());
-            let (x, y) = (cx + rr * (a + drift).cos(), cy + rr * (a + drift).sin() * 0.9);
+            let (x, y) = (cx + rr * (a + drift).cos(), cy + rr * (a + drift).sin() * 0.9 / self.ay);
             let col = *rng.choice(&cols);
             cv.dot(x, y, mix(col, p.bg, 0.35 + 0.3 * rng.random()), 0.2);
         }

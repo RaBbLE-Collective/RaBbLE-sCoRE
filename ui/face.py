@@ -117,6 +117,35 @@ _glyphs = os.environ.get("RABBLE_GLYPHS", "").lower()
 SAFE_GLYPHS = _glyphs == "safe" or (_glyphs != "octant" and os.environ.get("TERM_PROGRAM") == "vscode")
 
 
+def cell_aspect():
+    """A terminal cell's height over its width in pixels: from the window's pixel size when the terminal reports it
+    (TIOCGWINSZ), else 2.0. RABBLE_CELL_ASPECT overrides; implausible values fall back to 2 (the Rust twin does
+    the same)."""
+    def sane(a):
+        return math.isfinite(a) and 1.0 <= a <= 4.0
+    try:
+        a = float(os.environ.get("RABBLE_CELL_ASPECT", ""))
+        if sane(a):
+            return a
+    except ValueError:
+        pass
+    try:
+        import fcntl
+        import struct
+        import termios
+        for fd in (1, 0, 2):
+            try:
+                rows, cols, xpix, ypix = struct.unpack("HHHH", fcntl.ioctl(fd, termios.TIOCGWINSZ, b"\0" * 8))
+            except OSError:
+                continue
+            if rows and cols and xpix and ypix:
+                a = (ypix / rows) / (xpix / cols)
+                return a if sane(a) else 2.0
+    except ImportError:
+        pass
+    return 2.0
+
+
 def _dist(a, b):
     return sum((x - y) ** 2 for x, y in zip(a, b))
 
@@ -343,7 +372,7 @@ class Face:
     """One entity instance. `frame(t)` returns a Canvas; `state`/`expr` steer it."""
 
     def __init__(self, cols, rows, palette=None, detail="full", seed=7, spread=None,
-                 eye_n=None, eye_h=None, eye_w=None, aura=None, rim=None, rim_tips=None, safe=None):
+                 eye_n=None, eye_h=None, eye_w=None, aura=None, rim=None, rim_tips=None, safe=None, cell_aspect=2.0):
         self.cols, self.rows = cols, rows
         self.P = palette or load_palette()
         self.detail = detail  # "full" (orb, mesh, envelope) or "mini" (header mark)
@@ -354,12 +383,17 @@ class Face:
         self.octant = detail != "full"  # the mini mark needs the finer grid; the full face reads well in half-blocks
         w, h = (cols * 2, rows * 4) if self.octant else (cols, rows * 2)
         self.cx, self.cy = w / 2, h / 2
+        # a grid pixel's physical height over width (cell aspect / 2; 1.0 on the usual 2:1 cell). The full face is
+        # laid out in isotropic units (x in pixels, y in pixels times ay) so the sphere is a true circle and the
+        # eyes keep their aspect on any cell shape; the mini mark stays at 2:1.
+        ok = isinstance(cell_aspect, (int, float)) and math.isfinite(cell_aspect) and cell_aspect > 0
+        self.ay = min(4.0, max(0.25, cell_aspect / 2)) if (detail == "full" and ok) else 1.0
         if detail == "full":
-            # one uniform scale for the whole rig, set by the smaller dimension: the sphere is a true circle
-            # (a half-block pixel is square on a ~2:1 cell) of ORB_R face units, which envelops every pose
-            self.R = max(min(w, h) / 2 - 1.0, 1.0)
+            # one uniform scale for the whole rig, set by the room on the tighter axis: the sphere is a true circle
+            # of ORB_R face units, which envelops every pose
+            self.R = max(min(w / 2 - 1.0, (h / 2 - 1.0) * self.ay), 1.0)
             self.hw = w / 2 - 0.5             # envelope half-width
-            self.hh = min(h * 0.49, self.R * 1.38)
+            self.hh = min(h * 0.49, self.R * 1.38 / self.ay)
             self.k = self.R / ORB_R            # face units -> px
         else:
             self.R = h * 0.48
@@ -458,9 +492,9 @@ class Face:
         for side, name in ((-1, "L"), (1, "R")):
             ep, pp = e["e" + name], e["p" + name]
             ex = self.cx + side * EYE_X * self.spread * k * w0 + (ep["dx"] + gx * GAZE_X) * k
-            ey = self.cy + (ep["dy"] + gy * GAZE_Y + float_y) * k
+            ey = self.cy * self.ay + (ep["dy"] + gy * GAZE_Y + float_y) * k
             erx, ery = EYE_RX * ep["sx"] * k, EYE_RY * ep["sy"] * k
-            por_y = self.cy + (side * POR_OFF + pp["dy"] + float_y + side * bob) * k  # left portal above, right below
+            por_y = self.cy * self.ay + (side * POR_OFF + pp["dy"] + float_y + side * bob) * k  # left portal above, right below
             # portal width and flatten follow the eye's drawn width (rig baseline: 2.7 widths, 0.3 flat)
             prx = POR_RX * pp["sx"] * k * w0
             pry = max(prx * (POR_RY / POR_RX) * pp["sy"] / pp["sx"], 1.2 if not full else 0.0)
@@ -486,7 +520,10 @@ class Face:
         P, ring = self.P, self._aura_ring()
         strength = (AURA_RING if ring else AURA_POLES) * self.aura_k
 
+        ay = self.ay
+
         def aura(x, y, base):
+            y = y * ay      # grid pixels in; the rig is isotropic
             c = base
             for name, pole in (("eL", P["cyan"]), ("eR", P["magenta"])):
                 ex, ey, rx, ry, _ = rig[name]
@@ -507,8 +544,8 @@ class Face:
         """Cell rows/cols (r0, r1, c0, c1) the halos can reach, half-block grid."""
         x0 = min(rig[n][0] - rig[n][2] * 2.6 for n in ("eL", "eR"))
         x1 = max(rig[n][0] + rig[n][2] * 2.6 for n in ("eL", "eR"))
-        y0 = min(rig[n][1] - rig[n][3] * 1.55 for n in ("eL", "eR"))
-        y1 = max(rig[n][1] + rig[n][3] * 1.55 for n in ("eL", "eR"))
+        y0 = min(rig[n][1] - rig[n][3] * 1.55 for n in ("eL", "eR")) / self.ay
+        y1 = max(rig[n][1] + rig[n][3] * 1.55 for n in ("eL", "eR")) / self.ay
         return (max(0, int(y0 // 2) - 1), min(self.rows - 1, int(y1 // 2) + 1),
                 max(0, int(x0) - 1), min(self.cols - 1, int(x1) + 1))
 
@@ -547,7 +584,7 @@ class Face:
                     row[c] = col
                     tints[(r, c)] = col
         eye_cells = eyes.paint(cv, rig, P, _OCTANT, fine=2, n=2.0, rim_w=self.rim_w, block=self.block,
-                               supersample=not rough, safe=self.safe, halo=self.halo, edge=self.edge)
+                               supersample=not rough, safe=self.safe, halo=self.halo, edge=self.edge, ay=self.ay)
         return {"key": key, "rig": rig, "rough": rough, "tints": tints, "eyes": eye_cells}
 
     def assemble(self, base, layer):
@@ -600,7 +637,7 @@ class Face:
                 rough = moved and self._eye_key is not None   # the first frame paints clean
                 self._eye_cells = eyes.paint(cv, rig, self.P, _OCTANT, fine=1 if self.octant else 2, n=2.0,
                                              lids={"L": lid, "R": lid} if lid else None, rim_w=self.rim_w,
-                                             block=self.block, supersample=not rough, safe=self.safe, halo=self.halo, edge=self.edge)
+                                             block=self.block, supersample=not rough, safe=self.safe, halo=self.halo, edge=self.edge, ay=self.ay)
                 self._eye_rough = rough
                 self._eye_key = key
             cv.override.update(self._eye_cells)
@@ -646,9 +683,10 @@ class Face:
     def _orb(self, cv, t):
         P = self.P
         cx, cy, R = self.cx, self.cy, self.R
+        Ry = R / self.ay   # vertical radius in pixels: the sphere is round in physical units
         dim = 0.55 if self.detail == "full" else 0.75  # mini: solid octant ring, so keep it quiet
         # outline
-        for x, y in _ellipse_pts(cx, cy, R, R, 0):
+        for x, y in _ellipse_pts(cx, cy, R, Ry, 0):
             cv.dot(x, y, mix(self._side(x), P["bg"], dim * 0.6), 0.7)
         if self.detail != "full":
             return
@@ -658,21 +696,21 @@ class Face:
             rx = abs(math.cos(a)) * R
             if rx < 0.6:
                 continue
-            for x, y in _ellipse_pts(cx, cy, rx, R, 0, -math.pi / 2, math.pi / 2, None) if math.cos(a) > 0 else \
-                    _ellipse_pts(cx, cy, rx, R, 0, math.pi / 2, 3 * math.pi / 2, None):
+            for x, y in _ellipse_pts(cx, cy, rx, Ry, 0, -math.pi / 2, math.pi / 2, None) if math.cos(a) > 0 else \
+                    _ellipse_pts(cx, cy, rx, Ry, 0, math.pi / 2, 3 * math.pi / 2, None):
                 cv.dot(x, y, mix(self._side(x), P["bg"], dim), 0.3)
         # parallels
         for lat in (-0.6, -0.3, 0.0, 0.3, 0.6):
-            y0 = cy + R * math.sin(lat * 1.2)
+            y0 = cy + Ry * math.sin(lat * 1.2)
             rx = R * math.cos(lat * 1.2)
-            for x, y in _ellipse_pts(cx, y0, rx, rx * 0.12, 0, 0, math.pi):
+            for x, y in _ellipse_pts(cx, y0, rx, rx * 0.12 / self.ay, 0, 0, math.pi):
                 cv.dot(x, y, mix(self._side(x), P["bg"], dim), 0.3)
         # motes inside
         rng = SplitMix64(self.seed + 1)
         for i in range(int(R * 1.6)):
             a, r = rng.uniform(0, 2 * math.pi), R * math.sqrt(rng.random()) * 0.95
             drift = t * 0.4 * (0.5 + rng.random())
-            x, y = cx + r * math.cos(a + drift), cy + r * math.sin(a + drift) * 0.9
+            x, y = cx + r * math.cos(a + drift), cy + r * math.sin(a + drift) * 0.9 / self.ay
             col = rng.choice((P["violet"], P["cyan"], P["magenta"], P["pink"]))
             cv.dot(x, y, mix(col, P["bg"], 0.35 + 0.3 * rng.random()), 0.2)
 
@@ -753,8 +791,12 @@ class Life:
     def set_gaze(self, target, until=math.inf):
         """Look at `target` (normalized x, y in -1..1; clamped) until `until` (seconds on the `step` clock,
         inf = until cleared). None hands the gaze back to the seeded saccades."""
-        self.external = None if target is None else (
-            [max(-1.0, min(1.0, target[0])), max(-1.0, min(1.0, target[1]))], until)
+        # a non-finite target is no target (a NaN would poison the gaze); a non-finite `until` is no time limit
+        if target is None or not (math.isfinite(target[0]) and math.isfinite(target[1])):
+            self.external = None
+            return
+        until = until if math.isfinite(until) else math.inf
+        self.external = ([max(-1.0, min(1.0, target[0])), max(-1.0, min(1.0, target[1]))], until)
 
     def step(self, t, dt):
         if self.blink_t < 0 and t >= self.next_blink:
@@ -961,7 +1003,7 @@ class FaceWidget(Widget):
             cols, rows = self.size
             if cols < 4 or rows < 2:
                 return None
-            face = Face(cols, rows, self._pal, detail="full")
+            face = Face(cols, rows, self._pal, detail="full", cell_aspect=cell_aspect())
         else:
             face = Face(24, 6, self._pal, detail="mini")
         face.set_provider(self.provider)

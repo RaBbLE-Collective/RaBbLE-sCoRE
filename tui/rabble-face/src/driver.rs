@@ -35,7 +35,10 @@ impl Life {
     /// Look at `target` (normalized, x and y in -1..1; clamped) until `until` (seconds on the `step` clock;
     /// `f64::INFINITY` = until cleared). `None` hands the gaze back to the seeded saccades.
     pub fn set_gaze(&mut self, target: Option<(f64, f64)>, until: f64) {
-        self.external = target.map(|(x, y)| ([x.clamp(-1.0, 1.0), y.clamp(-1.0, 1.0)], until));
+        // a non-finite target is no target (clamp would pass a NaN through and poison the gaze); a non-finite
+        // `until` is no time limit
+        let until = if until.is_finite() { until } else { f64::INFINITY };
+        self.external = target.filter(|(x, y)| x.is_finite() && y.is_finite()).map(|(x, y)| ([x.clamp(-1.0, 1.0), y.clamp(-1.0, 1.0)], until));
     }
 
     pub fn external_gaze(&self) -> Option<(f64, f64)> {

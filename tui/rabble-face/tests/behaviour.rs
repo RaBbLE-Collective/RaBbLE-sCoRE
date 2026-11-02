@@ -163,3 +163,94 @@ fn frame_rate_gates_at_260x70() {
     assert!(eyes >= 30.0, "eyes {eyes}");
     assert!(bg >= 15.0, "background {bg}");
 }
+
+/// The whole sphere always fits, as a true circle in physical units, with the eyes and portals inside the pane,
+/// at any pane shape and cell aspect (S302: /face used to assume 2:1 cells and crop at short heights).
+#[test]
+fn the_sphere_fits_whole_and_is_round_at_any_cell_aspect() {
+    for aspect in [2.0, 2.3, 1.75, 1.4] {
+        for (cols, rows) in [(100, 12), (160, 8), (60, 20), (100, 40), (220, 60), (30, 60)] {
+            let f = Face::with_aspect(cols, rows, pal(), Detail::Full, false, aspect);
+            let (w, h) = (cols as f64, rows as f64 * 2.0);
+            let (cx, cy, rx, ry) = f.orb_extent();
+            let tag = format!("{cols}x{rows} @{aspect}");
+            assert!(cx - rx >= 0.0 && cx + rx <= w && cy - ry >= 0.0 && cy + ry <= h, "{tag}: sphere bbox {cx} {cy} {rx} {ry} in {w}x{h}");
+            // physical aspect: height in x-pixel units over width
+            let phys = (2.0 * ry * f.pixel_aspect()) / (2.0 * rx);
+            assert!((phys - 1.0).abs() < 1e-9, "{tag}: physical aspect {phys}");
+            assert!((f.pixel_aspect() - aspect / 2.0).abs() < 1e-9);
+            // every pose, every moment of the float: the four ellipses stay inside the pane
+            for expr in [Expr::Calm, Expr::Joy, Expr::Angry] {
+                let mut g = Face::with_aspect(cols, rows, pal(), Detail::Full, false, aspect);
+                g.expr = expr;
+                for t in [0.0, 0.7, 1.5, 2.2, 3.0] {
+                    let rig = g.rig(t, 0.0, (1.0, 1.0), false);
+                    for (ex, ey, erx, ery, _) in [rig.e_l, rig.e_r, rig.p_l, rig.p_r] {
+                        let ay = f.pixel_aspect();
+                        assert!(ex - erx >= -1.0 && ex + erx <= w + 1.0, "{tag} {expr:?} t={t}: x {ex}±{erx} in {w}");
+                        assert!((ey - ery) / ay >= -1.0 && (ey + ery) / ay <= h + 1.0, "{tag} {expr:?} t={t}: y {ey}±{ery} in {h}");
+                    }
+                }
+            }
+            // the picture itself has the pane's shape
+            let grid = f.frame(0.5, 0.0, (0.0, 0.0));
+            assert!(grid.len() == rows && grid.iter().all(|r| r.len() == cols), "{tag}");
+        }
+    }
+    // an absurd aspect falls back to 2:1
+    for bad in [f64::NAN, 0.0, -3.0, f64::INFINITY] {
+        assert_eq!(Face::with_aspect(100, 30, pal(), Detail::Full, false, bad).pixel_aspect(), 1.0);
+    }
+}
+
+/// A taller cell stretches nothing: the same eye is the same physical shape, so its pixel height shrinks.
+#[test]
+fn eyes_stay_isotropic_under_a_non_square_cell() {
+    let a = Face::with_aspect(100, 30, pal(), Detail::Full, false, 2.0).rig(0.0, 0.0, (0.0, 0.0), false);
+    let b = Face::with_aspect(100, 30, pal(), Detail::Full, false, 2.4).rig(0.0, 0.0, (0.0, 0.0), false);
+    for (n, v) in [("e_l", (a.e_l, b.e_l)), ("p_l", (a.p_l, b.p_l))] {
+        assert!((v.1 .3 / v.1 .2 - v.0 .3 / v.0 .2).abs() < 1e-9, "{n}: ry/rx is the face's own ratio at every aspect");
+    }
+}
+
+/// A non-finite gaze target is no target and a non-finite `until` is no time limit (clamp would pass a NaN through).
+#[test]
+fn non_finite_gaze_is_ignored() {
+    let mut l = Life::new(3);
+    for bad in [(f64::NAN, 0.2), (0.2, f64::NAN), (f64::INFINITY, 0.0), (0.0, f64::NEG_INFINITY)] {
+        l.set_gaze(Some((0.5, 0.5)), f64::INFINITY);
+        l.set_gaze(Some(bad), f64::INFINITY);
+        assert_eq!(l.external_gaze(), None, "{bad:?} clears");
+    }
+    l.set_gaze(Some((0.5, -0.5)), f64::NAN);
+    assert_eq!(l.external_gaze(), Some((0.5, -0.5)));
+    let mut t = 0.0;
+    for _ in 0..900 {
+        t += 1.0 / 30.0;
+        let (b, g) = l.step(t, 1.0 / 30.0);
+        assert!(b.is_finite() && g.0.is_finite() && g.1.is_finite(), "gaze stays finite");
+    }
+    assert!(l.external_gaze().is_some(), "a NaN until never expires");
+    let mut p = Life::new(3);
+    p.set_gaze(Some((f64::NAN, f64::NAN)), f64::INFINITY);
+    for i in 1..300 {
+        let g = p.step(i as f64 / 30.0, 1.0 / 30.0).1;
+        assert!(g.0.is_finite() && g.1.is_finite() && g.0.abs() <= 1.0 && g.1.abs() <= 1.0);
+    }
+}
+
+/// On a light canvas the eye's dark back is its own colour, not the void: it must not be wiped to the base
+/// (the old `max(base) + 40` rule saturated at base >= 215). Dark palettes keep the old rule (goldens).
+#[test]
+fn light_base_keeps_the_eye_edge_colour() {
+    let light = FacePalette::from_palette(&Palette::parse(
+        "  bg: \"#f2f0f8\"\n  text: \"#14102a\"\n  cyan: \"#008fa0\"\n  magenta: \"#b0208f\"\n  violet: \"#5a2dc0\"\n  pink: \"#c04a88\"\n  muted: \"#6b6880\"\n",
+    ));
+    let f = Face::new(100, 30, light, Detail::Full, false);
+    let g = f.frame(0.5, 0.0, (0.0, 0.0));
+    let dark_backs = g.iter().flatten().filter(|c| c.ch != ' ' && c.bg != Rgb(0, 0, 0) && c.bg.0.max(c.bg.1).max(c.bg.2) < 120).count();
+    assert!(dark_backs > 50, "edge cells on a light base keep their dark back: {dark_backs}");
+    let dark = Face::new(100, 30, pal(), Detail::Full, false).frame(0.5, 0.0, (0.0, 0.0));
+    let void = dark.iter().flatten().filter(|c| c.ch != ' ' && c.bg == Rgb(0, 0, 0)).count();
+    assert!(void > 0, "portal edge cells on a dark base still read as the void: {void}");
+}

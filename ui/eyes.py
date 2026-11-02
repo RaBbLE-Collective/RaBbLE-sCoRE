@@ -189,11 +189,13 @@ def _fit(subs, octant, safe=False):
     return octant[ins], ma, mb, ins
 
 
-def paint(canvas, rig, P, octant, fine, n=2.0, lids=None, inner=None, rim_w=1.0, block=1, supersample=True, safe=False, halo=1.0, edge=0.8):
+def paint(canvas, rig, P, octant, fine, n=2.0, lids=None, inner=None, rim_w=1.0, block=1, supersample=True, safe=False, halo=1.0, edge=0.8, ay=1.0):
     """Both eye/portal pairs as per-cell overrides: {(row, col): (glyph, fg, bg)}. Reads `canvas.bg`
     (the aura glow) but does not write to it, so a caller can cache the result per rig.
 
     rig: {"eL","eR","pL","pR"} -> (cx, cy, rx, ry, rot) in the face's pixel units.
+    ay: physical height over width of one grid pixel (cell aspect / 2). The rig is isotropic (x in pixels, y in
+    pixels times ay), so the shapes keep their true aspect on any cell shape; samples map y by ay.
     lids: {"L": (depth, slope) | None, "R": ...}; inner: {"L": +1, "R": -1}.
     block: resolution step in sub-pixels; above 1 every sub-pixel samples its block's centre, so a model of
     low capability is drawn coarser (and not anti-aliased).
@@ -209,7 +211,7 @@ def paint(canvas, rig, P, octant, fine, n=2.0, lids=None, inner=None, rim_w=1.0,
     x1 = max(p.box[2] for p in parts) + 5
     y1 = max(p.box[3] for p in parts) + 5
     c0, c1 = max(0, int(x0 // 2)), min(canvas.cols - 1, int(x1 // 2))
-    r0, r1 = max(0, int(y0 // 4)), min(canvas.rows - 1, int(y1 // 4))
+    r0, r1 = max(0, int(y0 // (4 * ay))), min(canvas.rows - 1, int(y1 // (4 * ay)))
     has_lids = bool(lids and any(lids.values()))
     big = min(p.eye.rx for p in parts) > 8   # long smooth edges: two taps are enough
     ss_small = ((.25, .25), (.75, .25), (.25, .75), (.75, .75))
@@ -219,7 +221,7 @@ def paint(canvas, rig, P, octant, fine, n=2.0, lids=None, inner=None, rim_w=1.0,
     for r in range(r0, r1 + 1):
         for c in range(c0, c1 + 1):
             near = [p for p in parts
-                    if p.box[0] - 5 <= c * 2 + 2 and c * 2 <= p.box[2] + 5 and p.box[1] - 5 <= r * 4 + 4 and r * 4 <= p.box[3] + 5]
+                    if p.box[0] - 5 <= c * 2 + 2 and c * 2 <= p.box[2] + 5 and p.box[1] - 5 <= (r * 4 + 4) * ay and r * 4 * ay <= p.box[3] + 5]
             if not near:
                 continue
             base = canvas.bg[r][c]
@@ -227,14 +229,14 @@ def paint(canvas, rig, P, octant, fine, n=2.0, lids=None, inner=None, rim_w=1.0,
             def shade(x, y):
                 col = base
                 for p in near:
-                    col = p.sample(x, y, col)
+                    col = p.sample(x, y * ay, col)
                 return col
 
             if not has_lids and block == 1:
                 # a cell well inside an eye, or well clear of every edge and rim, is one flat colour: one
                 # sample instead of eight (most of a big eye is interior)
                 mx, my = c * 2 + 1.0, r * 4 + 2.0
-                if all(abs(p.eye.sd(mx, my)) > FLAT and abs(p.portal.sd(mx, my)) > FLAT for p in near):
+                if all(abs(p.eye.sd(mx, my * ay)) > FLAT and abs(p.portal.sd(mx, my * ay)) > FLAT for p in near):
                     col = shade(mx, my)
                     col = (round(col[0]), round(col[1]), round(col[2]))
                     if col == VOID_BLACK or (col != base and not _close(col, base)):
@@ -257,12 +259,14 @@ def paint(canvas, rig, P, octant, fine, n=2.0, lids=None, inner=None, rim_w=1.0,
                 # a flat cell on the void (or its faintest fringe) is not drawn: the terminal's background stays
                 if fg != VOID_BLACK and _close(fg, base):
                     continue
-            elif max(bg) <= max(base) + VOID_DARK:
+            elif max(bg) <= max(base) + VOID_DARK and (max(base) <= 128 or max(bg) + VOID_DARK >= max(base)):
                 # foreground-only blend: the glyph and its fg carry the anti-aliased edge; a void-dark back stays
-                # the cell's own background (the terminal's), or pure black inside a portal
+                # the cell's own background (the terminal's), or pure black inside a portal. Void-like = no more
+                # than VOID_DARK above the base's brightest channel; on a light base also no more than that below
+                # it (a dark back there is the eye's own colour, not the void, and must not be wiped)
                 dark = [i for i in range(8) if not lit >> i & 1]
                 inside = sum(1 for i in dark
-                             if any(p.portal.sd(c * 2 + i % 2 + 0.5, r * 4 + i // 2 + 0.5) <= 0 for p in near))
+                             if any(p.portal.sd(c * 2 + i % 2 + 0.5, (r * 4 + i // 2 + 0.5) * ay) <= 0 for p in near))
                 bg = VOID_BLACK if dark and inside * 2 >= len(dark) else base
             out[(r, c)] = (ch, fg, bg)
     return out
