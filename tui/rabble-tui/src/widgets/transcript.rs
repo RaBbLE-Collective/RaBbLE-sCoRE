@@ -18,7 +18,7 @@ pub const WHEEL_LINES: usize = 3;
 pub const SLACK: usize = 3; // follow while the distance from the bottom is < SLACK lines
 pub const REFOCUS_GUARD: Duration = Duration::from_millis(400);
 /// The full face fills the pane's height, never less than this (Python `FaceWidget.-full`: `min-height: 12`).
-pub const FACE_MIN_ROWS: usize = 12;
+pub const FACE_MIN_ROWS: usize = 2;
 const TITLE_MAX: usize = 100;
 const RESULT_MAX: usize = 60;
 
