@@ -55,7 +55,8 @@ pub struct Transcript {
     face_rows: usize,
     pub sel: Selection,
     /// Where the entry holding the selection starts; if it moves, the selection no longer points at its text.
-    sel_start: Option<usize>,
+    /// (entry index, its start line), taken at the press so an upward drag into an earlier entry keeps the anchor.
+    sel_start: Option<(usize, usize)>,
 }
 
 pub fn one_line(data: &serde_json::Map<String, serde_json::Value>) -> String {
@@ -320,7 +321,9 @@ impl Transcript {
 
     /// Button down: one click anchors a drag, two take a word, three a line.
     pub fn select_press(&mut self, p: Pos) {
-        match self.sel.press(p, Instant::now()) {
+        let n = self.sel.press(p, Instant::now());
+        self.sel_start = self.entry_key(p.0);
+        match n {
             2 => {
                 if let Some(l) = self.line_at(p.0) {
                     let (a, b) = select::word_at(l, p.1);
@@ -330,6 +333,12 @@ impl Transcript {
             3 => self.sel.set((p.0, 0), (p.0, select::EOL)),
             _ => {}
         }
+    }
+
+    /// (index, start line) of the entry holding `line`.
+    fn entry_key(&self, line: usize) -> Option<(usize, usize)> {
+        let k = self.entries.partition_point(|e| e.start <= line).saturating_sub(1);
+        self.entries.get(k).map(|e| (k, e.start))
     }
 
     /// The selected text, lines joined by newlines.
@@ -473,15 +482,14 @@ impl Transcript {
     /// Lines above the selection changed height (card toggled, result arrived, face resized): it drifted.
     fn guard_selection(&mut self) {
         if self.sel.has() {
-            let at = self.sel.ordered().map_or(0, |(a, _)| a.0);
-            let k = self.entries.partition_point(|e| e.start <= at).saturating_sub(1);
-            let now = self.entries.get(k).map(|e| e.start);
+            // keyed to the entry the press landed in (stable while the head wanders upward), else to the selection's first line
+            let now = self.sel_start.map(|(k, _)| k).and_then(|k| self.entries.get(k).map(|e| (k, e.start)));
             match self.sel_start {
                 Some(was) if Some(was) != now => {
                     self.sel.clear();
                     self.sel_start = None;
                 }
-                None => self.sel_start = now,
+                None => self.sel_start = self.sel.ordered().and_then(|(a, _)| self.entry_key(a.0)),
                 _ => {}
             }
         } else {

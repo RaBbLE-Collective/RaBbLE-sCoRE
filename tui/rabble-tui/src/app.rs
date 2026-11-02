@@ -926,13 +926,14 @@ impl App {
             let text = self.t.selected_text();
             self.t.sel.clear();
             self.dirty = true;
-            // a selection with nothing visible in it (off-screen, blank) swallows nothing
-            if text.is_some() {
-                if let Some(text) = text.filter(|_| copy) {
+            if k.code == KeyCode::Esc {
+                return; // Esc with a selection only clears it, visible text or not: never an interrupt
+            }
+            // a selection with nothing visible in it (off-screen, blank) swallows no Ctrl-C
+            if let Some(text) = text {
+                if copy {
                     self.effects.push(Effect::Copy(text));
                     self.brief("copied", false);
-                }
-                if copy || k.code == KeyCode::Esc {
                     return;
                 }
             }
@@ -2134,6 +2135,67 @@ mod tests {
         a.on_input(Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)));
         assert!(!a.t.sel.has() && a.effects.is_empty());
         assert!(a.last_ctrl_c.is_some(), "the press counted towards quit");
+    }
+
+    #[test]
+    fn esc_with_a_blank_selection_clears_it_and_never_interrupts() {
+        let (mut a, rx) = live();
+        ev(&mut a, r#"{"type":"TextBlock","organ":"rabble","text":"alpha"}"#);
+        screen(&mut a, 60, 20);
+        let esc = || Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let far = a.t.total_lines() + 50;
+        a.t.sel.set((far, 0), (far, 3));
+        a.on_input(esc());
+        assert!(!a.t.sel.has());
+        assert!(rx.try_iter().all(|l| !l.contains("interrupt")), "Esc on a selection is not an interrupt");
+        a.on_input(esc());
+        assert!(rx.try_iter().any(|l| l.contains("interrupt")), "with no selection Esc interrupts as before");
+    }
+
+    #[test]
+    fn dragging_upward_across_replies_keeps_the_selection() {
+        use crossterm::event::{MouseButton::Left, MouseEventKind::{Down, Drag, Up}};
+        let (mut a, _rx) = live();
+        ev(&mut a, r#"{"type":"TextBlock","organ":"rabble","text":"first reply"}"#);
+        ev(&mut a, r#"{"type":"TextBlock","organ":"rabble","text":"second reply"}"#);
+        let scr = screen(&mut a, 60, 20);
+        let at = |w: &str| (scr.lines().position(|l| l.contains(w)).unwrap() as u16, a.tr_rect.x + scr.lines().find(|l| l.contains(w)).unwrap().find(w).unwrap() as u16);
+        let (r2, c2) = at("second");
+        let (r1, c1) = at("first");
+        let m = |kind, column, row| Event::Mouse(MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE });
+        a.on_input(m(Down(Left), c2 + 5, r2));
+        a.on_input(m(Drag(Left), c1, r1));
+        screen(&mut a, 60, 20); // a layout between events must not drop the anchor
+        assert!(a.t.sel.has() && a.t.sel.dragging());
+        a.on_input(m(Drag(Left), c1, r1));
+        a.on_input(m(Up(Left), c1, r1));
+        let text = a.t.selected_text().expect("selected");
+        assert!(text.contains("first reply") && text.contains("second"), "{text}");
+    }
+
+    #[test]
+    fn dragging_upward_past_the_top_scrolls_and_keeps_selecting() {
+        use crossterm::event::{MouseButton::Left, MouseEventKind::{Down, Drag, Up}};
+        let (mut a, _rx) = live();
+        for i in 0..40 {
+            ev(&mut a, &format!(r#"{{"type":"TextBlock","organ":"rabble","text":"line {i}"}}"#));
+        }
+        let scr = screen(&mut a, 60, 20);
+        let m = |kind, column, row| Event::Mouse(MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE });
+        let row = a.tr_rect.y + a.tr_rect.height - 1;
+        let c = a.tr_rect.x + 1;
+        let _ = scr;
+        let off = a.t.offset;
+        a.on_input(m(Down(Left), c, row));
+        for _ in 0..6 {
+            a.on_input(m(Drag(Left), c, 0));
+            screen(&mut a, 60, 20);
+        }
+        a.on_input(m(Up(Left), c, 0));
+        assert!(a.t.offset + 4 <= off, "the view kept scrolling up: {} vs {off}", a.t.offset);
+        assert!(a.t.sel.has());
+        let n = a.t.selected_text().expect("copy is not empty").lines().count();
+        assert!(n > 10, "{n} lines selected");
     }
 
     #[test]
