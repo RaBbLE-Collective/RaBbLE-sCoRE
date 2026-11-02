@@ -175,12 +175,16 @@ pub fn run(o: Opts) -> io::Result<()> {
         paint(&mut term, &mut app)?;
         loop {
             let mut wait = if app.needs_tick() { Duration::from_millis(50) } else { Duration::from_secs(1) };
-            if let Some(due) = app.face_due() {
+            for due in [app.face_due(), app.flow_due()].into_iter().flatten() {
                 wait = wait.min(due.saturating_duration_since(Instant::now()));
             }
             let mut first_input: Option<(Instant, bool)> = None;
             let note = |m: &Msg, first: &mut Option<(Instant, bool)>| {
                 if let Msg::Input(e, at) = m {
+                    // pointer motion and clicks are not typing: they must not hold back a face frame
+                    if matches!(e, Event::Mouse(mm) if !matches!(mm.kind, event::MouseEventKind::ScrollUp | event::MouseEventKind::ScrollDown)) {
+                        return;
+                    }
                     let wheel = matches!(e, Event::Mouse(mm) if matches!(mm.kind, event::MouseEventKind::ScrollUp | event::MouseEventKind::ScrollDown));
                     if first.is_none() {
                         *first = Some((*at, wheel));
@@ -212,8 +216,10 @@ pub fn run(o: Opts) -> io::Result<()> {
                 return Ok(());
             }
             // the face's frame: only on an iteration with no keyboard or wheel input, so it never sits in front of one
+            let now = Instant::now();
+            app.tick_flow(now);
             if first_input.is_none() {
-                app.tick_face(Instant::now());
+                app.tick_face(now);
             }
             if app.dirty {
                 paint(&mut term, &mut app)?;

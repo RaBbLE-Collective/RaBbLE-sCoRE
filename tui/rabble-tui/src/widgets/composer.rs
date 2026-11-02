@@ -378,7 +378,7 @@ impl Composer {
     }
 
     /// Draw the bordered box; returns the cursor position inside `area`.
-    pub fn draw(&self, area: Rect, buf: &mut Buffer, th: &Theme, focused: bool) -> (u16, u16) {
+    pub fn draw(&self, area: Rect, buf: &mut Buffer, th: &Theme, focused: bool, phase: f64) -> (u16, u16) {
         let g = th.glyphs;
         let st = if focused { th.tertiary } else { th.border };
         let w = area.width as usize;
@@ -386,7 +386,14 @@ impl Composer {
             return (area.x, area.y);
         }
         let inner = w - 4;
-        let bar = |l: char, r: char| Line::from(Span::styled(format!("{l}{}{r}", g.rule.to_string().repeat(w - 2)), st));
+        // focused, the border flows cyan -> magenta with the divider; unfocused it rests in the border colour
+        let at = |x: usize| if focused { th.flow(x, w, phase, st) } else { st };
+        let bar = |l: char, r: char| {
+            let mut v = vec![Span::styled(l.to_string(), at(0))];
+            v.extend((1..w - 1).map(|x| Span::styled(g.rule.to_string(), at(x))));
+            v.push(Span::styled(r.to_string(), at(w - 1)));
+            Line::from(v)
+        };
         buf.set_line(area.x, area.y, &bar(g.corner[0], g.corner[1]), area.width);
         buf.set_line(area.x, area.y + area.height - 1, &bar(g.corner[2], g.corner[3]), area.width);
         let (rows, (cr, cc)) = self.rows(inner);
@@ -395,9 +402,9 @@ impl Composer {
         for i in 0..vis {
             let y = area.y + 1 + i as u16;
             let text = rows.get(first + i).map(String::as_str).unwrap_or("");
-            let line = Line::from(vec![Span::styled(g.vert.to_string(), st), Span::raw(" "), Span::styled(text.to_owned(), th.text)]);
+            let line = Line::from(vec![Span::styled(g.vert.to_string(), at(0)), Span::raw(" "), Span::styled(text.to_owned(), th.text)]);
             buf.set_line(area.x, y, &line, area.width);
-            buf.set_line(area.x + area.width - 1, y, &Line::from(Span::styled(g.vert.to_string(), st)), 1);
+            buf.set_line(area.x + area.width - 1, y, &Line::from(Span::styled(g.vert.to_string(), at(w - 1))), 1);
         }
         (area.x + 2 + cc as u16, area.y + 1 + (cr - first) as u16)
     }

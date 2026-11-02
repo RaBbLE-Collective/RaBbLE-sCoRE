@@ -95,6 +95,9 @@ pub enum Overlay {
     Sessions(Picker),
 }
 
+const FLOW_EVERY: Duration = Duration::from_millis(125); // 8 fps, like the Python divider
+const USAGE_EVERY: Duration = Duration::from_secs(30);
+
 pub struct App {
     pub th: Theme,
     pub t: Transcript,
@@ -104,6 +107,9 @@ pub struct App {
     pub overlay: Overlay,
     pub quit: bool,
     pub dirty: bool,
+    flow_t0: Instant,
+    flow_next: Instant,
+    usage_at: Option<Instant>,
     pub effects: Vec<Effect>,
     pub malformed: u64,
     pub session: Option<String>,
@@ -158,7 +164,7 @@ impl App {
         let header = HeaderState { model: settings.model.clone().unwrap_or_default(), mode: settings.mode.clone(), trust: settings.trust.clone().unwrap_or_default(), crew: settings.crew, cwd: cfg.cwd.clone(), connected: true, ..Default::default() };
         let composer = Composer::new(&cfg.cwd, base_commands());
         App {
-            th, t: Transcript::new(), composer, header, settings, overlay: Overlay::None, quit: false, dirty: true, effects: vec![], malformed: 0,
+            th, t: Transcript::new(), composer, header, settings, overlay: Overlay::None, quit: false, dirty: true, flow_t0: Instant::now(), flow_next: Instant::now(), usage_at: None, effects: vec![], malformed: 0,
             session: None, max_seq: 0, turn_open: false, engine_ok: true, cfg, out, asks: VecDeque::new(), seen_asks: HashSet::new(), last_ctrl_c: None,
             sdk_session: None, started: false, live: vec![], parking: None, park_pending: false, park_warned: false, park_blocked: false, seed: None,
             continue_once: false, entropy_trust: None, caps_line: String::new(), focused: true,
@@ -215,6 +221,23 @@ impl App {
     /// When the run loop should next call `tick_face` (faces that are on screen only).
     pub fn face_due(&self) -> Option<Instant> {
         self.face.as_ref().and_then(|f| f.due())
+    }
+
+    /// When the flowing divider and border next need a frame (and the usage cache a re-read).
+    pub fn flow_due(&self) -> Option<Instant> {
+        self.th.animates().then_some(self.flow_next)
+    }
+
+    pub fn tick_flow(&mut self, now: Instant) {
+        if now < self.flow_next || !self.th.animates() {
+            return;
+        }
+        self.flow_next = now + FLOW_EVERY;
+        self.dirty = true;
+        if self.usage_at.is_none_or(|t| now.duration_since(t) >= USAGE_EVERY) {
+            self.usage_at = Some(now);
+            self.header.usage = Some(crate::usage::read());
+        }
     }
 
     /// Compute due face frames; a paint is requested only if a cell changed. The run loop calls this on
@@ -475,8 +498,12 @@ impl App {
             }
             Down::OrganProgress { .. } => {}
             Down::ModelUsed { model } => self.header.model = model,
-            Down::EntropyChanged { score, band, trust, reason, base, stability, local, .. } => {
+            Down::EntropyChanged { score, band, trust, reason, base, stability, local, capability, categories, .. } => {
                 self.local = local;
+                self.header.local = local;
+                self.header.capability = Some(capability);
+                self.header.categories = categories.into_iter().collect();
+                self.header.stability = Some(stability);
                 if let Some(f) = &mut self.face {
                     f.set_signal(base as f64, stability as f64);
                 }
@@ -736,6 +763,10 @@ impl App {
     }
 
     pub fn on_input(&mut self, e: Event) {
+        // pointer motion, clicks and drags change nothing here: no repaint, and (in the loop) no stalled face frame
+        if matches!(&e, Event::Mouse(m) if !matches!(m.kind, MouseEventKind::ScrollDown | MouseEventKind::ScrollUp)) {
+            return;
+        }
         self.dirty = true;
         match e {
             Event::Resize(..) => {}
@@ -1088,13 +1119,17 @@ impl App {
         let comp_h = self.composer.height(a.width).min(a.height.saturating_sub(top + 1));
         let tr_h = a.height.saturating_sub(top + comp_h);
         self.header.session = self.session.clone().unwrap_or_default();
+        let phase = self.flow_t0.elapsed().as_secs_f64() * crate::theme::FLOW_SPEED;
+        if self.header.usage.is_none() {
+            self.header.usage = Some(crate::usage::read());
+        }
         let (ha, da) = (Rect { height: hh, ..a }, Rect { y: a.y + hh, height: 1, ..a });
         let ta = Rect { y: a.y + top, height: tr_h, ..a };
         let ca = Rect { y: a.y + top + tr_h, height: comp_h, ..a };
         self.t.layout(&self.th, a.width, tr_h);
         let buf = f.buffer_mut();
         self.header.draw(ha, buf, &self.th, face_on);
-        draw_divider(da, buf, &self.th, self.busy_label());
+        draw_divider(da, buf, &self.th, self.busy_label(), phase);
         ratatui::widgets::Widget::render(View(&self.t), ta, buf);
         if let Some(hub) = &mut self.face {
             hub.mini_visible = face_on;
@@ -1113,7 +1148,7 @@ impl App {
             }
         }
         let focused = matches!(self.overlay, Overlay::None);
-        let cursor = self.composer.draw(ca, buf, &self.th, focused);
+        let cursor = self.composer.draw(ca, buf, &self.th, focused, phase);
         if self.composer.completing() && focused {
             let n = self.composer.dropdown.len().min(8) as u16;
             let drop = Rect { y: ca.y.saturating_sub(n).max(ta.y), height: n.min(tr_h), ..a };
@@ -1707,12 +1742,38 @@ mod tests {
         let big = paint_face(&mut a, 100, 30);
         let mark_cells = (0..24).flat_map(|x| (0..6).map(move |y| (x, y))).filter(|&(x, y)| big[(x, y)].symbol() != " ").count();
         assert!(mark_cells > 20, "the mark is drawn in the slot: {mark_cells} cells");
-        let header: String = (0..60).map(|x| big[(25 + x, 2)].symbol().to_owned()).collect();
-        assert!(header.contains("RaBbLE"), "the text lines sit beside the mark, centred: {header:?}");
+        let header: String = (0..60).map(|x| big[(25 + x, 0)].symbol().to_owned()).collect();
+        assert!(header.contains("RaBbLE"), "the wordmark leads the info lines beside the mark: {header:?}");
+        let row = |y: u16| -> String { (0..60).map(|x| big[(25 + x, y)].symbol().to_owned()).collect() };
+        assert!(row(2).contains("capability") && row(4).contains("usage") && row(5).contains("API equiv"), "Python's six info lines: {:?}", (2..6).map(row).collect::<Vec<_>>());
         let (mut b, _rx) = face_app();
         let small = paint_face(&mut b, 50, 18);
         assert!(small[(0, 0)].symbol() == "R", "a small pane keeps the two-row header: {:?}", small[(0, 0)].symbol());
         assert_eq!(b.face_due(), None, "a hidden mark costs nothing");
+    }
+
+    #[test]
+    fn pointer_motion_neither_repaints_nor_holds_back_the_face() {
+        use crossterm::event::MouseEventKind::{Moved, ScrollDown};
+        let (mut a, _rx) = face_app();
+        a.dirty = false;
+        let at = |kind| Event::Mouse(MouseEvent { kind, column: 3, row: 3, modifiers: KeyModifiers::NONE });
+        a.on_input(at(Moved));
+        assert!(!a.dirty, "a mouse move changes nothing on screen");
+        a.on_input(at(ScrollDown));
+        assert!(a.dirty);
+    }
+
+    #[test]
+    fn divider_and_input_border_flow_between_cyan_and_magenta() {
+        let (mut a, _rx) = face_app();
+        let buf = paint_face(&mut a, 100, 30);
+        let fg = |x: u16, y: u16| buf[(x, y)].style().fg;
+        let divider: std::collections::HashSet<_> = (0..100).map(|x| fg(x, 6)).collect();
+        assert!(divider.len() > 10 && !divider.contains(&None), "the divider is a gradient: {} colours", divider.len());
+        let top = 30 - a.composer.height(100);
+        assert!((0..100).map(|x| fg(x, top)).collect::<std::collections::HashSet<_>>().len() > 10, "the input border is a gradient");
+        assert!(a.flow_due().is_some());
     }
 
     #[test]

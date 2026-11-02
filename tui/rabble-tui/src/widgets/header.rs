@@ -1,11 +1,11 @@
-//! Header (two rows of text) and the divider under it. With the face mark showing, the header is
+//! Header (two rows of text, or the six Python info lines beside the mark) and the divider under it. With the face mark showing, the header is
 //! `FACE_ROWS` tall: the left `FACE_SLOT_WIDTH` columns belong to the mark and the two text lines sit
 //! beside it, vertically centred.
 
 use ratatui::{buffer::Buffer, layout::Rect, text::{Line, Span}};
 
 use super::FACE_SLOT_WIDTH;
-use crate::{theme::Theme, wrap::{clean, spans_width, str_width}};
+use crate::{theme::Theme, usage::{self, Usage}, wrap::{clean, spans_width, str_width}};
 
 #[derive(Debug, Default, Clone)]
 pub struct HeaderState {
@@ -20,6 +20,11 @@ pub struct HeaderState {
     pub limit: Option<String>,
     pub session: String,
     pub connected: bool,
+    pub capability: Option<i64>,
+    pub categories: Vec<(String, i64)>,
+    pub stability: Option<i64>,
+    pub local: bool,
+    pub usage: Option<Usage>,
 }
 
 fn home_short(cwd: &str) -> String {
@@ -30,6 +35,99 @@ fn home_short(cwd: &str) -> String {
 }
 
 impl HeaderState {
+    fn bar(&self, th: &Theme, pct: f64, band: u8, width: usize) -> Vec<Span<'static>> {
+        let filled = ((pct / 100.0 * width as f64).round().max(0.0) as usize).min(width);
+        let st = match band { 0 => th.secondary, 1 => th.warn, _ => th.error };
+        vec![
+            Span::styled(th.glyphs.bar[0].to_string().repeat(filled), st),
+            Span::styled(th.glyphs.bar[1].to_string().repeat(width - filled), th.muted),
+        ]
+    }
+
+    /// The six lines Python's header shows beside the mark: wordmark and cwd, model/mode/tier/crew,
+    /// capability bars, entropy and context, provider usage, limit and cost.
+    pub fn rich_lines(&self, th: &Theme, width: usize, now: f64) -> Vec<Line<'static>> {
+        let bold = ratatui::style::Modifier::BOLD;
+        let mark = "RaBbLE";
+        let n = mark.chars().count() - 1;
+        let mut l1: Vec<Span<'static>> = mark.chars().enumerate()
+            .map(|(i, ch)| Span::styled(ch.to_string(), th.blend("magenta", "cyan", i, n).unwrap_or(th.accent.add_modifier(bold)))).collect();
+        l1.push(Span::styled(format!("  {}", clean(&home_short(&self.cwd))), th.muted));
+        if !self.connected {
+            l1.push(Span::styled("  offline", th.error));
+        }
+        let tier = format!("{}{}{}", if self.trust.is_empty() { "standard" } else { &self.trust }, if self.local { " local" } else { "" },
+            self.capability.map(|c| format!(" {c}")).unwrap_or_default());
+        let model = if self.model.is_empty() { "default".to_owned() } else { clean(&self.model) };
+        let l2 = vec![Span::styled(format!("{model} · mode {} · {tier} · crew {}", self.mode, if self.crew { "on" } else { "off" }), th.text.add_modifier(bold))];
+
+        let mut l3 = vec![Span::styled("capability ", th.muted)];
+        if self.categories.is_empty() {
+            l3.push(Span::raw("--"));
+        }
+        for (name, short) in [("general", "gen"), ("coding", "code"), ("tools", "tools"), ("recall", "recall")] {
+            if let Some((_, v)) = self.categories.iter().find(|(k, _)| k == name) {
+                l3.push(Span::styled(format!("{short} "), th.muted));
+                l3.extend(self.bar(th, *v as f64, if *v >= 60 { 0 } else if *v >= 40 { 1 } else { 2 }, 6));
+                l3.push(Span::raw(format!(" {v}  ")));
+            }
+        }
+
+        let mut l4 = vec![];
+        if let Some((score, band)) = &self.entropy {
+            let (glyph, st) = match band.as_str() {
+                "ELEVATED" => ("▲", th.warn),
+                "DEGRADED" => ("⚠", th.accent),
+                "UNSTABLE" => ("✗", th.error),
+                _ => ("◆", th.secondary),
+            };
+            let glyph = if th.glyphs.vert == '|' { "*" } else { glyph };
+            l4.push(Span::styled(format!("{glyph} {}", band.to_lowercase()), st));
+            l4.push(Span::styled(format!(" entropy {score:.2}"), th.muted));
+            if let Some(s) = self.stability {
+                l4.push(Span::raw(format!(" · stab {s}")));
+            }
+            l4.push(Span::raw(" · "));
+        }
+        match self.context_pct {
+            None => l4.push(Span::raw("ctx --")),
+            Some(p) => {
+                l4.push(Span::raw(format!("ctx {p:.0}% ")));
+                l4.extend(self.bar(th, p, if p >= 80.0 { 2 } else if p >= 60.0 { 1 } else { 0 }, 8));
+            }
+        }
+
+        let mut l5 = vec![Span::styled("usage ", th.muted)];
+        match self.usage.filter(|u| !u.is_empty()) {
+            None => l5.push(Span::styled("-- (OS tracker not reporting)", th.muted)),
+            Some(u) => {
+                for (label, w) in [("5h", u.five_hour), ("wk", u.week)] {
+                    let Some(w) = w else { continue };
+                    l5.push(Span::styled(format!("{label} "), th.muted));
+                    l5.extend(self.bar(th, w.pct, w.band(), 8));
+                    l5.push(Span::raw(format!(" {:.0}%", w.pct)));
+                    l5.push(Span::styled(format!(" ↺{}  ", usage::fmt_remaining(w.resets_in(now))), th.muted));
+                }
+                if u.stale() {
+                    l5.push(Span::styled(format!("stale {}", usage::fmt_remaining(u.age)), th.warn));
+                }
+            }
+        }
+
+        let mut l6 = vec![match self.limit.as_deref() {
+            None => Span::styled("limits ok", th.muted),
+            Some(l) => Span::styled(format!("limit {l}"), if l == "warning" { th.warn } else { th.error }),
+        }];
+        l6.push(Span::styled(format!(" · {} API equiv", self.cost.map_or("--".to_owned(), |c| format!("${c:.4}"))), th.muted));
+
+        [l1, l2, l3, l4, l5, l6].into_iter().map(|mut v| {
+            while spans_width(&v) > width && v.len() > 1 {
+                v.pop();
+            }
+            Line::from(v)
+        }).collect()
+    }
+
     pub fn lines(&self, th: &Theme, width: usize) -> [Line<'static>; 2] {
         let sep = || Span::styled(format!(" {} ", th.glyphs.bullet), th.muted);
         let mut a = vec![Span::styled("RaBbLE", th.accent.add_modifier(ratatui::style::Modifier::BOLD))];
@@ -79,22 +177,25 @@ impl HeaderState {
     pub fn draw(&self, area: Rect, buf: &mut Buffer, th: &Theme, face_slot: bool) {
         let slot = if face_slot { (FACE_SLOT_WIDTH + 1).min(area.width) } else { 0 };
         let (x0, w) = (area.x + slot, area.width.saturating_sub(slot));
-        let y0 = area.y + if face_slot { area.height.saturating_sub(2) / 2 } else { 0 };
-        for (i, l) in self.lines(th, w as usize).iter().enumerate().take(area.height as usize) {
-            buf.set_line(x0, y0 + i as u16, l, w);
+        let lines: Vec<Line<'static>> = if face_slot { self.rich_lines(th, w as usize, usage::now()) } else { self.lines(th, w as usize).into() };
+        for (i, l) in lines.iter().enumerate().take(area.height as usize) {
+            buf.set_line(x0, area.y + i as u16, l, w);
         }
     }
 }
 
 /// A rule with a label at the right (`working`, `awaiting approval`, ...).
-pub fn draw_divider(area: Rect, buf: &mut Buffer, th: &Theme, label: &str) {
+/// The rule flows cyan -> magenta -> cyan (`phase` drifts it), like Python's `Divider`.
+pub fn draw_divider(area: Rect, buf: &mut Buffer, th: &Theme, label: &str, phase: f64) {
     let rule = th.glyphs.rule.to_string();
     let lw = str_width(label);
-    let n = (area.width as usize).saturating_sub(if lw > 0 { lw + 3 } else { 0 });
-    let mut spans = vec![Span::styled(rule.repeat(n), th.border)];
+    let w = area.width as usize;
+    let n = w.saturating_sub(if lw > 0 { lw + 3 } else { 0 });
+    let cell = |x: usize| Span::styled(rule.clone(), th.flow(x, w, phase, th.border));
+    let mut spans: Vec<Span<'static>> = (0..n).map(cell).collect();
     if lw > 0 {
         spans.push(Span::styled(format!(" {label} "), th.accent));
-        spans.push(Span::styled(rule, th.border));
+        spans.push(cell(w - 1));
     }
     buf.set_line(area.x, area.y, &Line::from(spans), area.width);
 }

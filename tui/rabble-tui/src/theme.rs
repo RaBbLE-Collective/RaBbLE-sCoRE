@@ -17,11 +17,12 @@ pub struct Glyphs {
     pub quote: &'static str,
     pub corner: [char; 4], // tl tr bl br
     pub vert: char,
+    pub bar: [char; 2], // filled, empty
 }
 
 impl Glyphs {
-    pub const FANCY: Glyphs = Glyphs { rule: '─', bullet: "•", prompt: "›", arrow: "→", ellipsis: "…", open: "▾", shut: "▸", quote: "▎", corner: ['╭', '╮', '╰', '╯'], vert: '│' };
-    pub const SAFE: Glyphs = Glyphs { rule: '-', bullet: "*", prompt: ">", arrow: "->", ellipsis: "...", open: "v", shut: ">", quote: "|", corner: ['+', '+', '+', '+'], vert: '|' };
+    pub const FANCY: Glyphs = Glyphs { rule: '─', bullet: "•", prompt: "›", arrow: "→", ellipsis: "…", open: "▾", shut: "▸", quote: "▎", corner: ['╭', '╮', '╰', '╯'], vert: '│', bar: ['▰', '▱'] };
+    pub const SAFE: Glyphs = Glyphs { rule: '-', bullet: "*", prompt: ">", arrow: "->", ellipsis: "...", open: "v", shut: ">", quote: "|", corner: ['+', '+', '+', '+'], vert: '|', bar: ['#', '-'] };
     pub fn for_env(term_program: Option<&str>) -> Glyphs {
         if term_program == Some("vscode") { Glyphs::SAFE } else { Glyphs::FANCY }
     }
@@ -48,7 +49,13 @@ pub struct Theme {
     organs: Vec<Style>,
     /// The palette itself, for the face (it draws cell by cell); `None` without one.
     pub pal: Option<Palette>,
+    /// cyan and magenta, the poles of the flowing divider and input border; `None` without colour.
+    flow: Option<(Rgb, Rgb)>,
 }
+
+/// Full cyan -> magenta -> cyan sweeps across the width, and how many sweeps per second it drifts.
+pub const FLOW_CYCLES: f64 = 1.5;
+pub const FLOW_SPEED: f64 = 0.12;
 
 fn c(r: Rgb) -> Color {
     Color::Rgb(r.0, r.1, r.2)
@@ -91,6 +98,10 @@ impl Theme {
             select: Style::new().add_modifier(Modifier::REVERSED),
             organs: ["cyan", "violet", "pink", "green", "yellow"].iter().map(|n| fg(n)).collect(),
             pal: p.cloned(),
+            flow: match (p.and_then(|p| p.get("cyan")), p.and_then(|p| p.get("magenta"))) {
+                (Some(a), Some(b)) if colour => Some((a, b)),
+                _ => None,
+            },
         };
         if !colour {
             // without colour, errors and headings still need to stand apart
@@ -107,6 +118,30 @@ impl Theme {
         let p = Palette::discover().ok();
         let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
         Theme::new(p.as_ref(), no_color, Glyphs::for_env(std::env::var("TERM_PROGRAM").ok().as_deref()))
+    }
+
+    /// Foreground for column `x` of `width` on the flowing cyan -> magenta -> cyan line (a cosine bounce, so no
+    /// seam), drifting with `phase` (sweeps). `fallback` when there is no colour. Mirrors ui/widgets/divider.py.
+    pub fn flow(&self, x: usize, width: usize, phase: f64, fallback: Style) -> Style {
+        match self.flow {
+            Some((a, b)) => {
+                let w = 0.5 - 0.5 * (std::f64::consts::TAU * (x as f64 / width.max(1) as f64 * FLOW_CYCLES - phase)).cos();
+                Style::new().fg(c(rabble_theme::mix(a, b, w)))
+            }
+            None => fallback,
+        }
+    }
+
+    /// Whether the flowing lines move (colour on and a cyan/magenta pair in the palette).
+    pub fn animates(&self) -> bool {
+        self.flow.is_some()
+    }
+
+    /// Bold per-character blend `a` -> `b` of two palette names (the wordmark); `None` without colour.
+    pub fn blend(&self, from: &str, to: &str, i: usize, n: usize) -> Option<Style> {
+        let (a, b) = (self.pal.as_ref()?.get(from)?, self.pal.as_ref()?.get(to)?);
+        self.flow?;
+        Some(Style::new().fg(c(rabble_theme::mix(a, b, i as f64 / n.max(1) as f64))).add_modifier(Modifier::BOLD))
     }
 
     /// The lead ("rabble") reads as plain text; each organ gets a stable accent from the palette.

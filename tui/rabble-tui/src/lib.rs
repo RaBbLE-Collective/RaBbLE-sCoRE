@@ -10,6 +10,7 @@ pub mod run;
 pub mod spike;
 pub mod theme;
 pub mod transcript;
+pub mod usage;
 pub mod util;
 pub mod widgets;
 pub mod wrap;
