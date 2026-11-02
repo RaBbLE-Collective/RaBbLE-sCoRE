@@ -23,11 +23,23 @@ pub struct Life {
     next_sacc: f64,
     /// >1 = quicker saccades (the "working" mood).
     pub speed: f64,
+    /// An outside gaze target and the time it lapses; while set it replaces the random saccades.
+    external: Option<([f64; 2], f64)>,
 }
 
 impl Life {
     pub fn new(seed: i64) -> Life {
-        Life { rng: SplitMix64::new(seed), next_blink: 2.5, blink_t: -1.0, double: false, gaze: [0.0; 2], target: [0.0; 2], next_sacc: 1.0, speed: 1.0 }
+        Life { rng: SplitMix64::new(seed), next_blink: 2.5, blink_t: -1.0, double: false, gaze: [0.0; 2], target: [0.0; 2], next_sacc: 1.0, speed: 1.0, external: None }
+    }
+
+    /// Look at `target` (normalized, x and y in -1..1; clamped) until `until` (seconds on the `step` clock;
+    /// `f64::INFINITY` = until cleared). `None` hands the gaze back to the seeded saccades.
+    pub fn set_gaze(&mut self, target: Option<(f64, f64)>, until: f64) {
+        self.external = target.map(|(x, y)| ([x.clamp(-1.0, 1.0), y.clamp(-1.0, 1.0)], until));
+    }
+
+    pub fn external_gaze(&self) -> Option<(f64, f64)> {
+        self.external.map(|(g, _)| (g[0], g[1]))
     }
 
     /// -> (blink 0..1, gaze).
@@ -49,7 +61,12 @@ impl Life {
                 self.blink_t = -1.0;
             }
         }
-        if t >= self.next_sacc {
+        if self.external.is_some_and(|(_, until)| t >= until) {
+            self.external = None;
+        }
+        if let Some((g, _)) = self.external {
+            self.target = g;
+        } else if t >= self.next_sacc {
             self.target = [self.rng.uniform(-1.0, 1.0), self.rng.uniform(-0.8, 0.8)];
             self.next_sacc = t + self.rng.uniform(0.6, 2.2) / self.speed;
         }
@@ -150,6 +167,11 @@ impl Driver {
 
     pub fn block(&self) -> u32 {
         eye_block(self.noise)
+    }
+
+    /// Steer the gaze (see `Life::set_gaze`); `ttl` seconds from `t`, None = until cleared.
+    pub fn set_gaze(&mut self, target: Option<(f64, f64)>, t: f64, ttl: Option<f64>) {
+        self.life.set_gaze(target, ttl.map_or(f64::INFINITY, |s| t + s));
     }
 
     pub fn set_mood(&mut self, mood: Mood, now: f64) {

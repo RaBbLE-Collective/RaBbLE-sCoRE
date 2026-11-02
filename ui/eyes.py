@@ -14,7 +14,14 @@ units to octant sub-pixels (2 for the half-block full face, 1 for the octant min
 import math
 
 TAU = math.pi * 2
+VOID_BLACK = (0, 0, 0)   # the inside of a portal: pure black, the one literal the face allows itself (Mark, S302)
+VOID_TOL = 3             # per channel: a cell colour this close to the base is the void itself and is left alone
+VOID_DARK = 40           # a dark cluster within this (per channel) of the base's brightest channel is void, not lit
 FLAT = 5.0   # sub-pixels from any eye or portal edge beyond which a 2x4 cell holds one colour (its half-diagonal is 2.2)
+
+
+def _close(a, b):
+    return max(abs(a[0] - b[0]), abs(a[1] - b[1]), abs(a[2] - b[2])) <= VOID_TOL
 
 
 def _over(base, top, a):
@@ -148,7 +155,7 @@ def _quads(subs):
 
 
 def _fit(subs, octant, safe=False):
-    """8 sub-pixel colours (row-major 2x4) -> (glyph, fg, bg): two clusters around the most distant pair.
+    """8 sub-pixel colours (row-major 2x4) -> (glyph, fg, bg, lit mask): two clusters around the most distant pair.
     `safe` limits the glyphs to Block Elements quadrants (terminals without Legacy Computing octants)."""
     if safe:
         subs = _quads(subs)
@@ -160,7 +167,7 @@ def _fit(subs, octant, safe=False):
                 best, a, b = d, subs[i], subs[j]
     if best < 90:  # nearly flat: no glyph, just the mean
         m = tuple(round(sum(s[k] for s in subs) / 8) for k in range(3))
-        return " ", m, m
+        return " ", m, m, 0
     ins, fa, fb = 0, [], []
     for i, s in enumerate(subs):
         da = (s[0] - a[0]) ** 2 + (s[1] - a[1]) ** 2 + (s[2] - a[2]) ** 2
@@ -173,13 +180,13 @@ def _fit(subs, octant, safe=False):
     mean = lambda g: tuple(round(sum(s[k] for s in g) / len(g)) for k in range(3))
     if best < 9000 and min(len(fa), len(fb)) <= 1:   # a lone faint sub-pixel (halo fringe) is a speck, not an edge
         m = mean(subs)
-        return " ", m, m
+        return " ", m, m, 0
     # the brighter cluster draws the glyph (foreground), the darker is the cell background
     ma, mb = mean(fa), mean(fb)
     if sum(ma) < sum(mb):
         ins = ~ins & 0xFF
         ma, mb = mb, ma
-    return octant[ins], ma, mb
+    return octant[ins], ma, mb, ins
 
 
 def paint(canvas, rig, P, octant, fine, n=2.0, lids=None, inner=None, rim_w=1.0, block=1, supersample=True, safe=False, halo=1.0, edge=0.8):
@@ -192,7 +199,7 @@ def paint(canvas, rig, P, octant, fine, n=2.0, lids=None, inner=None, rim_w=1.0,
     low capability is drawn coarser (and not anti-aliased).
     """
     P = dict(P)
-    P.setdefault("void", tuple(max(0, round(v * 0.5)) for v in P["bg"]))
+    P["void"] = VOID_BLACK
     parts = []
     for side, col in (("L", P["cyan"]), ("R", P["magenta"])):
         parts.append(_Part(rig["e" + side], rig["p" + side], col, P, fine, n,
@@ -230,7 +237,7 @@ def paint(canvas, rig, P, octant, fine, n=2.0, lids=None, inner=None, rim_w=1.0,
                 if all(abs(p.eye.sd(mx, my)) > FLAT and abs(p.portal.sd(mx, my)) > FLAT for p in near):
                     col = shade(mx, my)
                     col = (round(col[0]), round(col[1]), round(col[2]))
-                    if col != base:
+                    if col == VOID_BLACK or (col != base and not _close(col, base)):
                         out[(r, c)] = (" ", col, col)
                     continue
             if block > 1:
@@ -245,8 +252,17 @@ def paint(canvas, rig, P, octant, fine, n=2.0, lids=None, inner=None, rim_w=1.0,
                 subs = [tuple(sum(shade(c * 2 + i % 2 + ox, r * 4 + i // 2 + oy)[k] for ox, oy in taps) / len(taps)
                               for k in range(3))
                         for i in range(8)]
-            ch, fg, bg = _fit(subs, octant, safe)
-            if ch == " " and fg == base:
-                continue
+            ch, fg, bg, lit = _fit(subs, octant, safe)
+            if ch == " ":
+                # a flat cell on the void (or its faintest fringe) is not drawn: the terminal's background stays
+                if fg != VOID_BLACK and _close(fg, base):
+                    continue
+            elif max(bg) <= max(base) + VOID_DARK:
+                # foreground-only blend: the glyph and its fg carry the anti-aliased edge; a void-dark back stays
+                # the cell's own background (the terminal's), or pure black inside a portal
+                dark = [i for i in range(8) if not lit >> i & 1]
+                inside = sum(1 for i in dark
+                             if any(p.portal.sd(c * 2 + i % 2 + 0.5, r * 4 + i // 2 + 0.5) <= 0 for p in near))
+                bg = VOID_BLACK if dark and inside * 2 >= len(dark) else base
             out[(r, c)] = (ch, fg, bg)
     return out

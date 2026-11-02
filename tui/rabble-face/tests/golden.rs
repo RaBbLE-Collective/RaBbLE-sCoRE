@@ -215,6 +215,24 @@ fn life_matches_python() {
 }
 
 #[test]
+fn external_gaze_life_matches_python() {
+    let mut l = Life::new(3);
+    let (mut t, dt) = (0.0, 1.0 / 30.0);
+    for (i, want) in golden()["life_ext"].as_array().unwrap().iter().enumerate() {
+        match i {
+            60 => l.set_gaze(Some((0.7, -0.3)), t + 1.0),
+            150 => l.set_gaze(Some((9.0, -9.0)), f64::INFINITY),
+            220 => l.set_gaze(None, 0.0),
+            _ => {}
+        }
+        t += dt;
+        let (b, g) = l.step(t, dt);
+        let w = f64s(want);
+        assert!((b - w[0]).abs() < 1e-9 && (g.0 - w[1]).abs() < 1e-9 && (g.1 - w[2]).abs() < 1e-9, "step {i}: {b} {g:?} vs {w:?}");
+    }
+}
+
+#[test]
 fn frames_match_python_cell_for_cell() {
     let (pal, mut worst_off) = (palette(), 0.0f64);
     let mut bad = Vec::new();

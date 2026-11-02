@@ -128,6 +128,19 @@ def main():
         blink, gaze = lf.step(t, dt)
         life.append([blink, gaze[0], gaze[1]])
     out["life"] = life
+    # an outside gaze: an expiring target, then a clamped sticky one, then released back to the saccades
+    ext, lf, t = [], F.Life(), 0.0
+    for i in range(300):
+        if i == 60:
+            lf.set_gaze((0.7, -0.3), t + 1.0)
+        elif i == 150:
+            lf.set_gaze((9.0, -9.0))
+        elif i == 220:
+            lf.set_gaze(None)
+        t += dt
+        blink, gaze = lf.step(t, dt)
+        ext.append([blink, gaze[0], gaze[1]])
+    out["life_ext"] = ext
     frames = []
     for spec in frame_specs():
         e = dict(spec)

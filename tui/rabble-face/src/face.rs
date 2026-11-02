@@ -302,10 +302,12 @@ impl Face {
         let (w, h) = if octant { (cols as f64 * 2.0, rows as f64 * 4.0) } else { (cols as f64, rows as f64 * 2.0) };
         let (r, hw, hh, k);
         if full {
-            r = (h * 0.36).min(w * 0.17);
+            // One uniform scale for the whole rig, set by the smaller dimension: the sphere is a true circle
+            // (a half-block pixel is square on a ~2:1 cell) of ORB_R face units, which envelops every pose.
+            r = (w.min(h) / 2.0 - 1.0).max(1.0);
             hw = w / 2.0 - 0.5;
             hh = (h * 0.49).min(r * 1.38);
-            k = r / ORB_R * 1.45;
+            k = r / ORB_R;
         } else {
             r = h * 0.48;
             hw = 0.0;
@@ -315,9 +317,10 @@ impl Face {
         let mut f = Face {
             cols, rows, pal, detail, expr: Expr::Calm, pose: None, seed: 7, safe, octant,
             cx: w / 2.0, cy: h / 2.0, r, hw, hh, k,
-            mins_erx: if full { 3.0 } else { 4.0 },
-            mins_prx: if full { 5.5 } else { 7.0 },
-            mins_pry: if full { 2.6 } else { 2.4 },
+            // the full face has no minimum sizes: a floor on one axis would stretch the eyes at small scales
+            mins_erx: if full { 0.0 } else { 4.0 },
+            mins_prx: if full { 0.0 } else { 7.0 },
+            mins_pry: if full { 0.0 } else { 2.4 },
             spread: 1.0,
             aura_k: if full { 1.0 } else { 0.0 },
             lids: !full,
@@ -433,7 +436,7 @@ impl Face {
             let ery = EYE_RY * ep.sy * k;
             let por_y = self.cy + (side * POR_OFF + pp.dy + float_y + side * bob) * k;
             let prx = POR_RX * pp.sx * k * w0;
-            let pry = (prx * (POR_RY / POR_RX) * pp.sy / pp.sx).max(1.2);
+            let pry = (prx * (POR_RY / POR_RX) * pp.sy / pp.sx).max(if full { 0.0 } else { 1.2 });
             let mut px = self.cx + side * EYE_X * self.spread * k * w0 + pp.dx * k;
             let b = blink * 0.93;
             let ery_b = ery * (1.0 - b);
@@ -471,7 +474,8 @@ impl Face {
                 let col = if ring.is_empty() { pole } else { mix(pole, ring_colour(&ring, dy.atan2(dx)), 0.75) };
                 c = mix(c, col, strength * (1.0 - v).powf(1.6) * ((u - 1.0) * 3.0).min(1.0));
             }
-            c
+            // the halo's far tail is the void: leave it to the terminal's own background
+            if c.0.abs_diff(base.0).max(c.1.abs_diff(base.1)).max(c.2.abs_diff(base.2)) <= 3 { base } else { c }
         }
     }
 

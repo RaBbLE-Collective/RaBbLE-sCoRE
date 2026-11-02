@@ -7,6 +7,17 @@ use rabble_theme::Rgb;
 
 type V3 = [f64; 3];
 const FLAT: f64 = 5.0;
+/// Portals are always filled with pure black.
+pub const VOID_BLACK: Rgb = Rgb(0, 0, 0);
+/// Per-channel distance under which a cell colour is the void itself (the halo's far tail rounds to a
+/// level or two off the background): such a cell is left alone so the terminal's own background shows.
+const VOID_TOL: i32 = 3;
+/// A dark cluster this close to the base (per channel, above its brightest channel) is void, not lit.
+const VOID_DARK: i32 = 40;
+
+fn close(a: Rgb, b: Rgb) -> bool {
+    (a.0 as i32 - b.0 as i32).abs().max((a.1 as i32 - b.1 as i32).abs()).max((a.2 as i32 - b.2 as i32).abs()) <= VOID_TOL
+}
 
 fn v3(c: Rgb) -> V3 {
     [c.0 as f64, c.1 as f64, c.2 as f64]
@@ -221,14 +232,13 @@ pub struct EyePalette {
     pub text: Rgb,
     pub cyan: Rgb,
     pub magenta: Rgb,
-    /// `P.setdefault("void", bg * 0.5)`.
+    /// The inside of a portal: pure black, the one literal the face allows itself (Mark's call, S302).
     pub void: Rgb,
 }
 
 impl EyePalette {
     pub fn new(bg: Rgb, text: Rgb, cyan: Rgb, magenta: Rgb) -> EyePalette {
-        let h = |v: u8| (v as f64 * 0.5).round_ties_even() as u8;
-        EyePalette { bg, text, cyan, magenta, void: Rgb(h(bg.0), h(bg.1), h(bg.2)) }
+        EyePalette { bg, text, cyan, magenta, void: VOID_BLACK }
     }
 }
 
@@ -269,8 +279,8 @@ fn mean(g: &[V3]) -> Rgb {
     Rgb(rnd(m(0)), rnd(m(1)), rnd(m(2)))
 }
 
-/// 8 sub-pixel colours (row-major 2x4) -> (glyph, fg, bg): two clusters around the most distant pair.
-fn fit(subs_in: &[V3; 8], safe: bool) -> (char, Rgb, Rgb) {
+/// 8 sub-pixel colours (row-major 2x4) -> (glyph, fg, bg, lit mask): two clusters around the most distant pair.
+fn fit(subs_in: &[V3; 8], safe: bool) -> (char, Rgb, Rgb, usize) {
     let subs = if safe { quads(subs_in) } else { *subs_in };
     let (mut best, mut a, mut b) = (-1.0f64, subs[0], subs[0]);
     for i in 0..8 {
@@ -285,7 +295,7 @@ fn fit(subs_in: &[V3; 8], safe: bool) -> (char, Rgb, Rgb) {
     }
     if best < 90.0 {
         let m = mean(&subs);
-        return (' ', m, m);
+        return (' ', m, m, 0);
     }
     let (mut ins, mut fa, mut fb) = (0usize, Vec::new(), Vec::new());
     for (i, s) in subs.iter().enumerate() {
@@ -298,7 +308,7 @@ fn fit(subs_in: &[V3; 8], safe: bool) -> (char, Rgb, Rgb) {
     }
     if best < 9000.0 && fa.len().min(fb.len()) <= 1 {
         let m = mean(&subs);
-        return (' ', m, m);
+        return (' ', m, m, 0);
     }
     let (mut ma, mut mb) = (mean(&fa), mean(&fb));
     let sum = |c: Rgb| c.0 as u32 + c.1 as u32 + c.2 as u32;
@@ -306,7 +316,7 @@ fn fit(subs_in: &[V3; 8], safe: bool) -> (char, Rgb, Rgb) {
         ins = !ins & 0xFF;
         std::mem::swap(&mut ma, &mut mb);
     }
-    (octant_table()[ins], ma, mb)
+    (octant_table()[ins], ma, mb, ins)
 }
 
 /// Both eye/portal pairs as per-cell overrides. `bg` is the canvas's cell background (the aura glow), read only.
@@ -359,7 +369,7 @@ pub fn paint(bg_grid: &[Vec<Rgb>], rig: &RigSet, pal: &EyePalette, o: &PaintOpts
                 let (mx, my) = (cf * 2.0 + 1.0, rf * 4.0 + 2.0);
                 if near.iter().all(|pt| pt.eye.sd(mx, my).abs() > FLAT && pt.portal.sd(mx, my).abs() > FLAT) {
                     let col = rgb(shade(mx, my));
-                    if col != base_rgb {
+                    if col == pal.void || (col != base_rgb && !close(col, base_rgb)) {
                         out.push((r, c, Cell { ch: ' ', fg: col, bg: col }));
                     }
                     continue;
@@ -396,9 +406,27 @@ pub fn paint(bg_grid: &[Vec<Rgb>], rig: &RigSet, pal: &EyePalette, o: &PaintOpts
                     *s = acc.map(|a| a / taps.len() as f64);
                 }
             }
-            let (ch, fg, bg) = fit(&subs, o.safe);
-            if ch == ' ' && fg == base_rgb {
-                continue;
+            let (ch, fg, mut bg, lit) = fit(&subs, o.safe);
+            if ch == ' ' {
+                // a flat cell on the void (or its faintest fringe) is not drawn: the terminal's background stays
+                if fg != pal.void && close(fg, base_rgb) {
+                    continue;
+                }
+            } else {
+                // foreground-only blend: the glyph and its fg carry the anti-aliased edge; a void-dark back
+                // stays the cell's own background (the terminal's), or pure black inside a portal
+                let top = base_rgb.0.max(base_rgb.1).max(base_rgb.2) as i32 + VOID_DARK;
+                if bg.0.max(bg.1).max(bg.2) as i32 <= top {
+                    let (mut dark, mut inside) = (0, 0);
+                    for i in (0..8).filter(|i| lit >> i & 1 == 0) {
+                        dark += 1;
+                        let (sx, sy) = sub_at(i);
+                        if near.iter().any(|p| p.portal.sd(sx + 0.5, sy + 0.5) <= 0.0) {
+                            inside += 1;
+                        }
+                    }
+                    bg = if dark > 0 && inside * 2 >= dark { pal.void } else { base_rgb };
+                }
             }
             out.push((r, c, Cell { ch, fg, bg }));
         }

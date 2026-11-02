@@ -355,15 +355,18 @@ class Face:
         w, h = (cols * 2, rows * 4) if self.octant else (cols, rows * 2)
         self.cx, self.cy = w / 2, h / 2
         if detail == "full":
-            self.R = min(h * 0.36, w * 0.17)
+            # one uniform scale for the whole rig, set by the smaller dimension: the sphere is a true circle
+            # (a half-block pixel is square on a ~2:1 cell) of ORB_R face units, which envelops every pose
+            self.R = max(min(w, h) / 2 - 1.0, 1.0)
             self.hw = w / 2 - 0.5             # envelope half-width
             self.hh = min(h * 0.49, self.R * 1.38)
-            self.k = self.R / ORB_R * 1.45     # face units -> px; face enlarged for legibility
+            self.k = self.R / ORB_R            # face units -> px
         else:
             self.R = h * 0.48
             self.hw = self.hh = 0
             self.k = (h * (eye_h or 0.33)) / EYE_RY
-        self.mins = {"erx": 3, "prx": 5.5, "pry": 2.6} if detail == "full" else {"erx": 3, "prx": 7, "pry": 2.4}
+        # the full face has no minimum sizes: a floor on one axis would stretch the eyes at small scales
+        self.mins = {"erx": 0, "prx": 0, "pry": 0} if detail == "full" else {"erx": 3, "prx": 7, "pry": 2.4}
         # 1.0 = the rig baseline (centres 2.1 eye-widths apart); see rig() for how a minimum eye width scales it
         self.spread = spread if spread is not None else 1.0
         # mini look knobs: eye shape exponent (2 = true oval, 3 = blunt pill), min eye half-width in px,
@@ -460,7 +463,7 @@ class Face:
             por_y = self.cy + (side * POR_OFF + pp["dy"] + float_y + side * bob) * k  # left portal above, right below
             # portal width and flatten follow the eye's drawn width (rig baseline: 2.7 widths, 0.3 flat)
             prx = POR_RX * pp["sx"] * k * w0
-            pry = max(prx * (POR_RY / POR_RX) * pp["sy"] / pp["sx"], 1.2)
+            pry = max(prx * (POR_RY / POR_RX) * pp["sy"] / pp["sx"], 1.2 if not full else 0.0)
             px_ = self.cx + side * EYE_X * self.spread * k * w0 + pp["dx"] * k   # gaze moves the eyes inside their portals; the portals stay
             # blink: the eye sinks into its portal
             b = blink * 0.93
@@ -496,7 +499,8 @@ class Face:
                     continue
                 col = pole if not ring else mix(pole, _ring_colour(ring, math.atan2(dy, dx)), 0.75)
                 c = mix(c, col, strength * (1 - v) ** 1.6 * min(1.0, (u - 1) * 3))
-            return c
+            # the halo's far tail is the void: leave it to the terminal's own background
+            return base if max(abs(c[0] - base[0]), abs(c[1] - base[1]), abs(c[2] - base[2])) <= 3 else c
         return aura
 
     def _aura_box(self, rig):
@@ -678,7 +682,7 @@ class Face:
         ex, ey, erx, ery, erot = rig["e" + name]
         px_, py, prx, pry, prot = rig["p" + name]
         below = py > ey  # portal below its eye: front rim draws over the eye
-        void = mix(P["bg"], (0, 0, 0), 0.5)
+        void = (0, 0, 0)
 
         # portal: dark hole inside a one-pixel rim; rim pixels split into back (upper) and front (lower)
         front = []
@@ -744,6 +748,13 @@ class Life:
         self.next_blink, self.blink_t, self.double = 2.5, -1.0, False
         self.gaze, self.target, self.next_sacc = [0.0, 0.0], [0.0, 0.0], 1.0
         self.speed = 1.0  # >1 = quicker saccades (the "working" mood)
+        self.external = None  # (target, until): an outside gaze target replaces the random saccades while set
+
+    def set_gaze(self, target, until=math.inf):
+        """Look at `target` (normalized x, y in -1..1; clamped) until `until` (seconds on the `step` clock,
+        inf = until cleared). None hands the gaze back to the seeded saccades."""
+        self.external = None if target is None else (
+            [max(-1.0, min(1.0, target[0])), max(-1.0, min(1.0, target[1]))], until)
 
     def step(self, t, dt):
         if self.blink_t < 0 and t >= self.next_blink:
@@ -759,7 +770,11 @@ class Life:
                 blink = math.sin(math.pi * (x - .24) / .16)
             elif x > .45:
                 self.blink_t = -1
-        if t >= self.next_sacc:
+        if self.external is not None and t >= self.external[1]:
+            self.external = None
+        if self.external is not None:
+            self.target = list(self.external[0])
+        elif t >= self.next_sacc:
             self.target = [self.rng.uniform(-1, 1), self.rng.uniform(-.8, .8)]
             self.next_sacc = t + self.rng.uniform(0.6, 2.2) / self.speed
         for i in (0, 1):
@@ -930,6 +945,11 @@ class FaceWidget(Widget):
             self.face.block = eye_block(self.noise)
         if self.breaking <= 0:
             self._glitch = {}
+
+    def set_gaze(self, target, ttl=None):
+        """Look at a normalized target (x, y in -1..1) for `ttl` seconds, or until cleared with None; the seeded
+        saccades resume when it lapses. Nothing here reads the pointer: the caller decides where to look."""
+        self.life.set_gaze(target, math.inf if ttl is None else time.monotonic() - self._t0 + ttl)
 
     def set_provider(self, provider):
         self.provider = provider

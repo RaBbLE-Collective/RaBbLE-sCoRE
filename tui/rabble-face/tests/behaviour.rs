@@ -1,7 +1,8 @@
 //! Python `tests/test_ui_face.py` equivalents that are not golden dumps, plus the frame-rate gates.
 
 use rabble_face::face::{Expr, FacePalette, Provider};
-use rabble_face::{Detail, Face, Grid};
+use rabble_face::face::{EYE_RX, EYE_RY};
+use rabble_face::{Detail, Face, Grid, Life};
 use rabble_theme::{Palette, Rgb};
 use std::time::Instant;
 
@@ -80,6 +81,63 @@ fn expressions_all_draw() {
         f.expr = e;
         let g = f.frame(0.4, 0.0, (0.0, 0.0));
         assert!(g.iter().flatten().any(|c| c.bg != Rgb(0, 0, 0)));
+    }
+}
+
+/// One uniform scale: an eye keeps its aspect at any window shape, and the whole rig fits inside the area.
+#[test]
+fn eyes_keep_their_aspect_at_any_window_shape() {
+    for (cols, rows) in [(260, 70), (100, 30), (100, 12), (160, 8), (30, 60), (12, 40), (60, 60)] {
+        let f = face(cols, rows, Detail::Full);
+        let rig = f.rig(0.0, 0.0, (0.0, 0.0), false);
+        for (_, _, rx, ry, _) in [rig.e_l, rig.e_r] {
+            assert!((ry / rx - EYE_RY / EYE_RX).abs() < 1e-9, "{cols}x{rows}: eye {rx} x {ry}");
+        }
+        let (h, w) = (rows as f64 * 2.0, cols as f64);
+        let (_, ey, _, ery, _) = rig.e_l;
+        assert!(ey - ery > -1.0 && ey + ery < h + 1.0, "{cols}x{rows}: the eye stays in the area");
+        assert!(rig.e_r.0 + rig.e_r.2 < w + 1.0, "{cols}x{rows}: and in its width");
+    }
+}
+
+/// The sphere is a circle of the smaller dimension (square pixels on a 2:1 cell) and the portals are pure black.
+#[test]
+fn portals_are_black_and_the_void_is_the_palette_background() {
+    let p = pal();
+    let g = face(100, 30, Detail::Full).frame(0.0, 0.0, (0.0, 0.0));
+    assert!(g.iter().flatten().any(|c| c.bg == Rgb(0, 0, 0) && c.ch == ' '), "a portal cell is pure black");
+    let tinted = g.iter().flatten().filter(|c| c.bg != p.bg && c.bg != Rgb(0, 0, 0)).count();
+    let faint = g.iter().flatten().filter(|c| c.bg != p.bg && c.bg.0.abs_diff(p.bg.0).max(c.bg.1.abs_diff(p.bg.1)).max(c.bg.2.abs_diff(p.bg.2)) <= 3 && c.bg != Rgb(0, 0, 0)).count();
+    assert!(tinted > 0 && faint == 0, "no cell is a rounding-level off the void: {faint}");
+}
+
+/// An outside gaze target replaces the saccades while it holds, expires on its own, and clearing it
+/// returns the seeded Life untouched.
+#[test]
+fn external_gaze_steers_expires_and_falls_back() {
+    let mut steered = Life::new(3);
+    steered.set_gaze(Some((0.7, -0.3)), 2.0);
+    let (mut t, dt) = (0.0, 1.0 / 30.0);
+    let mut last = (0.0, 0.0);
+    while t < 1.9 {
+        t += dt;
+        last = steered.step(t, dt).1;
+    }
+    assert!((last.0 - 0.7).abs() < 0.01 && (last.1 + 0.3).abs() < 0.01, "{last:?}");
+    assert!(steered.external_gaze().is_some());
+    t += 0.5;
+    steered.step(t, dt);
+    assert!(steered.external_gaze().is_none(), "the target lapsed");
+    // out-of-range targets clamp
+    steered.set_gaze(Some((5.0, -5.0)), f64::INFINITY);
+    assert_eq!(steered.external_gaze(), Some((1.0, -1.0)));
+    // set then cleared before any step: identical to a Life that was never steered
+    let (mut a, mut b) = (Life::new(3), Life::new(3));
+    a.set_gaze(Some((1.0, 1.0)), f64::INFINITY);
+    a.set_gaze(None, 0.0);
+    for i in 1..300 {
+        let t = i as f64 * dt;
+        assert_eq!(a.step(t, dt), b.step(t, dt));
     }
 }
 

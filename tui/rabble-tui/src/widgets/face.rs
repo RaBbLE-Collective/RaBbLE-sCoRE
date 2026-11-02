@@ -70,6 +70,13 @@ impl FaceView {
         self.driver.set_mood(mood, now.saturating_duration_since(self.t0).as_secs_f64());
     }
 
+    /// Look at a normalized target (x, y in -1..1) for `ttl`, or until cleared with `None`; the seeded
+    /// saccades resume when it lapses. Nothing here reads the pointer: the caller decides where to look.
+    pub fn set_gaze(&mut self, target: Option<(f64, f64)>, ttl: Option<Duration>, now: Instant) {
+        let t = now.saturating_duration_since(self.t0).as_secs_f64();
+        self.driver.set_gaze(target, t, ttl.map(|d| d.as_secs_f64()));
+    }
+
     pub fn set_provider(&mut self, p: Option<Provider>) {
         if p != self.provider {
             self.provider = p;
@@ -212,6 +219,14 @@ impl FaceHub {
             if let Some(f) = &mut self.full {
                 f.set_provider(p);
             }
+        }
+    }
+
+    /// Point both faces at a normalized target (see `FaceView::set_gaze`); a full face opened later starts unsteered.
+    pub fn set_gaze(&mut self, target: Option<(f64, f64)>, ttl: Option<Duration>, now: Instant) {
+        self.mini.set_gaze(target, ttl, now);
+        if let Some(f) = &mut self.full {
+            f.set_gaze(target, ttl, now);
         }
     }
 
