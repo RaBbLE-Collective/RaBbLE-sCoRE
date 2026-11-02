@@ -681,7 +681,13 @@ impl App {
             self.t.clear();
             self.header.context_pct = None;
             self.header.entropy = None;
+            self.header.capability = None;
+            self.header.categories.clear();
+            self.header.stability = None;
             self.entropy_trust = None;
+            if let Some(f) = &mut self.face {
+                f.clear_signal();
+            }
         }
         self.create(resume, self.settings.crew);
     }
@@ -1925,6 +1931,17 @@ mod tests {
         a.effects.clear();
         a.on_input(ctrl_c);
         assert!(a.effects.is_empty());
+    }
+
+    #[test]
+    fn clear_forgets_the_old_sessions_entropy_everywhere() {
+        let (mut a, _rx) = face_app();
+        ev(&mut a, r#"{"type":"EntropyChanged","score":0.8,"band":"DEGRADED","trust":"strict","reason":"x","capability":30,"categories":{"general":30},"local":false,"base":30,"stability":20}"#);
+        assert!(a.header.entropy.is_some() && a.header.stability == Some(20) && a.header.capability == Some(30));
+        say(&mut a, "/clear");
+        assert!(a.header.entropy.is_none() && a.header.stability.is_none() && a.header.capability.is_none() && a.header.categories.is_empty());
+        assert!(a.trust_profile().is_empty());
+        assert!(a.face.as_ref().unwrap().signal_is_clear());
     }
 
     #[test]

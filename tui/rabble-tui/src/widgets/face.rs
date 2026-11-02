@@ -223,6 +223,17 @@ impl FaceHub {
         }
     }
 
+    /// A fresh session: forget the old session's noise and breaking (full capability, full stability).
+    pub fn clear_signal(&mut self) {
+        self.set_signal(100.0, 100.0);
+        self.signal = None;
+    }
+
+    #[cfg(test)]
+    pub fn signal_is_clear(&self) -> bool {
+        self.signal.is_none() && self.mini.driver.noise == 0.0 && self.mini.driver.breaking == 0.0
+    }
+
     /// `/face`: a full face carrying the current mood, provider and signal.
     pub fn show_full(&mut self, now: Instant) {
         let mut f = FaceView::new(self.pal, Detail::Full, self.safe, now);
