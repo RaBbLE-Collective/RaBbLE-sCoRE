@@ -408,6 +408,9 @@ class RabbleApp(App):
             self.header.park_eta = None
         if clear or not resume:
             self.entropy = None  # a new session starts from its model's baseline
+            setter = getattr(self.face, "set_signal", None)
+            if setter:
+                setter(100, 100)  # and the face forgets the old session's noise and breaking
         if clear or parked or (resume and not keep):
             await self.transcript.clear_all()
         if parked:
@@ -513,7 +516,7 @@ class RabbleApp(App):
 
     def _poll_usage(self) -> None:
         self.header.usage = usage.read()
-        self.header.refresh_info()
+        self._sync_header()
 
     def _sync_header(self) -> None:
         self.header.mode = self.mode
@@ -524,7 +527,9 @@ class RabbleApp(App):
             self.header.capability, self.header.categories = self.entropy.capability, self.entropy.categories
             self.header.local = self.entropy.local
             self.header.stability = self.entropy.stability
-        else:  # before the engine reports: the model's own numbers
+        else:  # before the engine reports (or after /clear): no score, the model's own numbers
+            self.header.entropy = None
+            self.header.stability = None
             base = Entropy(self._model_for_entropy())
             self.header.capability, self.header.categories, self.header.local = base.capability(), base.capabilities(), base.local
         self._sync_face()
