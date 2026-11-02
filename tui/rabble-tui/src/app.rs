@@ -2164,6 +2164,8 @@ mod tests {
         let (r1, c1) = at("first");
         let m = |kind, column, row| Event::Mouse(MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE });
         a.on_input(m(Down(Left), c2 + 5, r2));
+        a.on_input(m(Drag(Left), c2 + 2, r2));
+        screen(&mut a, 60, 20); // a layout while the head is still in the anchor's entry
         a.on_input(m(Drag(Left), c1, r1));
         screen(&mut a, 60, 20); // a layout between events must not drop the anchor
         assert!(a.t.sel.has() && a.t.sel.dragging());
