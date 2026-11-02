@@ -18,7 +18,8 @@ from ui import face as F  # noqa: E402
 from ui.prng import SplitMix64  # noqa: E402
 
 OUT = ROOT / "tests" / "fixtures" / "face" / "golden.json"
-PAL_KEYS = ("bg", "text", "cyan", "magenta", "violet", "pink", "muted")
+PAL_KEYS = ("bg", "text", "cyan", "magenta", "violet", "pink", "muted", "brand_anthropic", "brand_google_right", "brand_google_bottom",
+            "brand_google_left", "brand_google_top", "brand_openai")
 
 
 def hexrow(cells, idx):

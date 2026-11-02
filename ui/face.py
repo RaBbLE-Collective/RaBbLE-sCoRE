@@ -303,13 +303,13 @@ def _noise(seed, x):
 # ── the entity ──────────────────────────────────────────────────────────────
 
 # ── provider aura ───────────────────────────────────────────────────────────
-# The halo around the eyes takes a faint tint from the model's provider. These are the providers' own brand
-# colours (not RaBbLE palette values); each is pulled toward the palette's violet before it is drawn.
-# A tuple of colours is a ring, read clockwise from the right (Google's four).
+# The halo around the eyes takes a faint tint from the model's provider. The providers' own brand colours live
+# in the palette file (brand_*), not here; each is pulled toward the palette's violet before it is drawn.
+# Google's four are a ring, read clockwise from the right. A palette without them leaves the poles standing.
 PROVIDER_AURA = {
-    "anthropic": ((217, 119, 87),),
-    "google": ((66, 133, 244), (52, 168, 83), (251, 188, 5), (234, 67, 53)),   # right, bottom, left, top
-    "openai": ((16, 163, 127),),
+    "anthropic": ("brand_anthropic",),
+    "google": ("brand_google_right", "brand_google_bottom", "brand_google_left", "brand_google_top"),
+    "openai": ("brand_openai",),
 }
 PROVIDER_MUTE = 0.35   # share of palette violet mixed into the provider colour
 
@@ -397,7 +397,8 @@ class Face:
 
     def _aura_ring(self):
         """The provider's colours, muted toward the palette violet; () when the poles stand alone."""
-        return tuple(mix(c, self.P["violet"], PROVIDER_MUTE) for c in PROVIDER_AURA.get(self.provider, ()))
+        violet = self.P["violet"]
+        return tuple(mix(self.P.get(n, violet), violet, PROVIDER_MUTE) for n in PROVIDER_AURA.get(self.provider, ()))
 
     # mesh nodes are fixed per instance; they shimmer, not move
     def _build_mesh(self):

@@ -51,9 +51,10 @@ pub fn now() -> f64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
 }
 
-/// `2026-11-02T21:49:59.859611+00:00` (or `Z`, or no offset = UTC) -> epoch seconds.
+/// `2026-11-02T21:49:59.859611+00:00` (`T` or a space; offset `+hh:mm`, `+hhmm`, `+hh` or `Z`; none = UTC) -> epoch
+/// seconds. The tracker always writes an offset, so the UTC reading of a bare time is never exercised.
 pub fn parse_iso(s: &str) -> Option<f64> {
-    let (date, rest) = s.split_once('T')?;
+    let (date, rest) = s.split_once(['T', ' '])?;
     let mut d = date.split('-').map(|x| x.parse::<i64>().ok());
     let (y, m, day) = (d.next()??, d.next()??, d.next()??);
     let (time, off) = match rest.find(['+', '-', 'Z']) {
@@ -65,8 +66,11 @@ pub fn parse_iso(s: &str) -> Option<f64> {
     let sec = t.next().map_or(Some(0.0), |x| x.parse::<f64>().ok())?;
     let off_s = match off.as_bytes().first() {
         Some(&sign @ (b'+' | b'-')) => {
-            let (oh, om) = off[1..].split_once(':').unwrap_or((&off[1..], "0"));
-            let v = oh.parse::<f64>().ok()? * 3600.0 + om.parse::<f64>().ok()? * 60.0;
+            let digits: String = off[1..].chars().filter(|c| *c != ':').collect();
+            if digits.len() < 2 || digits.len() > 4 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            let v = digits[..2].parse::<f64>().ok()? * 3600.0 + digits.get(2..).filter(|m| !m.is_empty()).map_or(Some(0.0), |m| m.parse::<f64>().ok())? * 60.0;
             if sign == b'-' { -v } else { v }
         }
         _ => 0.0,
@@ -121,6 +125,10 @@ mod tests {
     fn iso_with_offset_matches_python() {
         assert_eq!(parse_iso("1970-01-02T00:00:00+00:00"), Some(86400.0));
         assert_eq!(parse_iso("1970-01-01T01:00:00+01:00"), Some(0.0));
+        assert_eq!(parse_iso("1970-01-01T05:30:00+0530"), Some(0.0));
+        assert_eq!(parse_iso("1970-01-01 01:00:00+01"), Some(0.0));
+        assert_eq!(parse_iso("1970-01-01T00:00:00-0000"), Some(0.0));
+        assert_eq!(parse_iso("1970-01-01T00:00:00+xx"), None);
         let t = parse_iso("2026-11-02T21:49:59.5Z").unwrap();
         assert!((t - 1793656199.5).abs() < 1e-6, "{t}");
     }

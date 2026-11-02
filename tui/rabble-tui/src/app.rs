@@ -220,30 +220,37 @@ impl App {
 
     /// When the run loop should next call `tick_face` (faces that are on screen only).
     pub fn face_due(&self) -> Option<Instant> {
-        self.face.as_ref().and_then(|f| f.due())
+        // without colour the face is a static word: no frames to compute, nothing to wake for
+        self.face.as_ref().filter(|_| self.th.color).and_then(|f| f.due())
     }
 
     /// When the flowing divider and border next need a frame (and the usage cache a re-read).
     pub fn flow_due(&self) -> Option<Instant> {
-        self.th.animates().then_some(self.flow_next)
+        let usage = self.usage_at.map_or_else(Instant::now, |t| t + USAGE_EVERY);
+        Some(if self.th.animates() { self.flow_next.min(usage) } else { usage })
     }
 
     pub fn tick_flow(&mut self, now: Instant) {
-        if now < self.flow_next || !self.th.animates() {
-            return;
-        }
-        self.flow_next = now + FLOW_EVERY;
-        self.dirty = true;
-        if self.usage_at.is_none_or(|t| now.duration_since(t) >= USAGE_EVERY) {
+        if self.usage_at.is_none_or(|t| now.saturating_duration_since(t) >= USAGE_EVERY) {
             self.usage_at = Some(now);
             self.header.usage = Some(crate::usage::read());
+            self.dirty = true; // the reset countdowns move with the clock, with or without colour
+        }
+        if self.th.animates() && now >= self.flow_next {
+            self.flow_next = now + FLOW_EVERY;
+            self.dirty = true;
         }
     }
 
     /// Compute due face frames; a paint is requested only if a cell changed. The run loop calls this on
     /// iterations that carried no input, so it never sits in front of a key or a wheel notch.
+    #[cfg(test)]
+    fn hub_full_cells_empty(&self) -> bool {
+        self.face.as_ref().and_then(|h| h.full.as_ref()).is_none_or(|f| f.cells.is_empty())
+    }
+
     pub fn tick_face(&mut self, now: Instant) {
-        if self.face.is_none() {
+        if self.face.is_none() || !self.th.color {
             return;
         }
         self.sync_face();
@@ -659,6 +666,9 @@ impl App {
         self.asks.clear();
         self.overlay = Overlay::None;
         self.turn_open = false;
+        // the old session's in-flight tools and stream never finish in the new one (Python clears both here)
+        self.streaming = false;
+        self.busy.clear();
         self.max_seq = 0;
         self.park_pending = false;
         self.park_warned = false;
@@ -1122,6 +1132,7 @@ impl App {
         let phase = self.flow_t0.elapsed().as_secs_f64() * crate::theme::FLOW_SPEED;
         if self.header.usage.is_none() {
             self.header.usage = Some(crate::usage::read());
+            self.usage_at = Some(Instant::now());
         }
         let (ha, da) = (Rect { height: hh, ..a }, Rect { y: a.y + hh, height: 1, ..a });
         let ta = Rect { y: a.y + top, height: tr_h, ..a };
@@ -1142,7 +1153,9 @@ impl App {
             }
             hub.full_visible = false;
             if let (Some(full), Some((rect, skip))) = (&mut hub.full, self.t.face_rect(ta)) {
-                full.fit(a.width as usize, self.t.face_rows());
+                if full.fit(a.width as usize, self.t.face_rows()) {
+                    full.tick(Instant::now()); // a refit (composer grew, window resized) must not paint one blank frame
+                }
                 hub.full_visible = true;
                 full.draw(rect, buf, &self.th, skip);
             }
@@ -1750,6 +1763,47 @@ mod tests {
         let small = paint_face(&mut b, 50, 18);
         assert!(small[(0, 0)].symbol() == "R", "a small pane keeps the two-row header: {:?}", small[(0, 0)].symbol());
         assert_eq!(b.face_due(), None, "a hidden mark costs nothing");
+    }
+
+    #[test]
+    fn a_restart_forgets_the_old_sessions_tools_and_stream() {
+        let (mut a, _rx) = face_app();
+        ev(&mut a, r#"{"type":"TextDelta","organ":"rabble","text":"hi"}"#);
+        ev(&mut a, r#"{"type":"ToolCall","organ":"rabble","id":"t1","name":"Bash","input":{"command":"ls"}}"#);
+        assert_eq!(mood(&a), Mood::Working);
+        say(&mut a, "/clear");
+        assert!(!a.streaming && a.busy.is_empty());
+        assert_eq!(mood(&a), Mood::Idle, "a fresh session does not inherit the old one's work");
+    }
+
+    #[test]
+    fn without_colour_usage_still_refreshes_and_the_face_costs_nothing() {
+        let pal = rabble_theme::Palette::parse(
+            "  bg: \"#0a0010\"\n  surface: \"#101018\"\n  text: \"#e8e6f0\"\n  muted: \"#6b6880\"\n  magenta: \"#ff2bd6\"\n  cyan: \"#00f5ff\"\n  violet: \"#8a4dff\"\n  pink: \"#ff7ab8\"\n",
+        );
+        let (h, _rx) = Handle::detached();
+        let cfg = Config { cwd: "/w".into(), start: Start::New { resume: None }, client: CLIENT.into() };
+        let mut a = App::new(cfg, Theme::new(Some(&pal), true, Glyphs::FANCY), Settings::default(), h);
+        assert_eq!(a.face_due(), None, "a static word needs no frames");
+        let frames = a.face.as_ref().unwrap().mini.frames;
+        a.tick_face(Instant::now() + Duration::from_secs(5));
+        assert_eq!(a.face.as_ref().unwrap().mini.frames, frames);
+        let due = a.flow_due().expect("usage still has a wake time");
+        a.dirty = false;
+        a.tick_flow(due + Duration::from_secs(31));
+        assert!(a.dirty && a.header.usage.is_some(), "usage is re-read and repainted with no colour");
+    }
+
+    #[test]
+    fn a_refit_face_never_paints_blank() {
+        let (mut a, _rx) = face_app();
+        say(&mut a, "/face");
+        let mut t = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        t.draw(|f| a.draw(f)).unwrap();
+        type_in(&mut a, "x");
+        a.composer.insert_str("\n\n\nmore"); // the composer grows, the transcript shrinks, the face refits
+        t.draw(|f| a.draw(f)).unwrap();
+        assert!(!a.hub_full_cells_empty(), "cells are ready on the very paint that refit");
     }
 
     #[test]

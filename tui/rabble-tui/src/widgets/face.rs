@@ -54,13 +54,16 @@ impl FaceView {
     }
 
     /// Resize: the face is rebuilt on the next tick (the mesh depends on the size).
-    pub fn fit(&mut self, cols: usize, rows: usize) {
-        if self.size != (cols, rows) {
+    /// Returns true when the size changed (the caller computes a frame at once so the new size never paints blank).
+    pub fn fit(&mut self, cols: usize, rows: usize) -> bool {
+        let changed = self.size != (cols, rows);
+        if changed {
             self.size = (cols, rows);
             (self.face, self.base, self.layer) = (None, None, None);
             self.cells.clear();
             self.next = self.t0; // due at once
         }
+        changed
     }
 
     pub fn set_mood(&mut self, mood: Mood, now: Instant) {

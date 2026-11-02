@@ -139,12 +139,13 @@ impl Provider {
     pub fn from_name(n: &str) -> Option<Provider> {
         [Provider::Anthropic, Provider::Google, Provider::OpenAi].into_iter().find(|p| p.name() == n)
     }
-    /// The providers' own brand colours (not palette values), read clockwise from the right.
-    fn brand(self) -> &'static [Rgb] {
+    /// The providers' own brand colours, from the palette file's `brand_*` entries, read clockwise from the
+    /// right. A palette without them leaves the aura in plain violet.
+    fn brand(self, pal: &FacePalette) -> Vec<Rgb> {
         match self {
-            Provider::Anthropic => &[Rgb(217, 119, 87)],
-            Provider::Google => &[Rgb(66, 133, 244), Rgb(52, 168, 83), Rgb(251, 188, 5), Rgb(234, 67, 53)],
-            Provider::OpenAi => &[Rgb(16, 163, 127)],
+            Provider::Anthropic => vec![pal.brand_anthropic],
+            Provider::Google => pal.brand_google.to_vec(),
+            Provider::OpenAi => vec![pal.brand_openai],
         }
     }
 }
@@ -189,11 +190,21 @@ pub struct FacePalette {
     pub violet: Rgb,
     pub pink: Rgb,
     pub muted: Rgb,
+    pub brand_anthropic: Rgb,
+    pub brand_google: [Rgb; 4],
+    pub brand_openai: Rgb,
 }
 
 impl FacePalette {
     pub fn from_palette(p: &Palette) -> FacePalette {
-        FacePalette { bg: p.req("bg"), text: p.req("text"), cyan: p.req("cyan"), magenta: p.req("magenta"), violet: p.req("violet"), pink: p.req("pink"), muted: p.req("muted") }
+        let violet = p.req("violet");
+        let brand = |n: &str| p.get(n).unwrap_or(violet);
+        FacePalette {
+            bg: p.req("bg"), text: p.req("text"), cyan: p.req("cyan"), magenta: p.req("magenta"), violet, pink: p.req("pink"), muted: p.req("muted"),
+            brand_anthropic: brand("brand_anthropic"),
+            brand_google: [brand("brand_google_right"), brand("brand_google_bottom"), brand("brand_google_left"), brand("brand_google_top")],
+            brand_openai: brand("brand_openai"),
+        }
     }
     fn eyes(&self) -> EyePalette {
         EyePalette::new(self.bg, self.text, self.cyan, self.magenta)
@@ -337,7 +348,7 @@ impl Face {
     }
 
     fn aura_ring(&self) -> Vec<Rgb> {
-        self.provider.map_or(Vec::new(), |p| p.brand().iter().map(|&c| mix(c, self.pal.violet, PROVIDER_MUTE)).collect())
+        self.provider.map_or(Vec::new(), |p| p.brand(&self.pal).into_iter().map(|c| mix(c, self.pal.violet, PROVIDER_MUTE)).collect())
     }
 
     fn env_h(&self, x: f64) -> f64 {
