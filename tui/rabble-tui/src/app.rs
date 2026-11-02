@@ -151,6 +151,109 @@ pub struct App {
     busy: HashSet<String>,
     flash: Option<(Mood, Instant)>,
     local: bool,
+    gz: gaze::Steer,
+}
+
+/// Where RaBbLE's eyes go. The pointer wins while it moves; when it idles the entity picks what is most
+/// interesting (`choose`), and with nothing to look at the face's own seeded saccades take over.
+/// TUNING: every knob Mark may want is a `pub const` here.
+mod gaze {
+    use std::time::{Duration, Instant};
+
+    /// Cadence of gaze updates (they ride the face tick; a gaze never repaints by itself).
+    pub const EVERY: Duration = Duration::from_millis(100);
+    /// The pointer counts as active this long after its last motion; the target then lapses over `POINTER_TTL`.
+    pub const POINTER_ACTIVE: Duration = Duration::from_millis(2000);
+    pub const POINTER_TTL: Duration = Duration::from_millis(1800);
+    /// How often the entity re-chooses what to look at (low, so it never jitters), and how long it must stay
+    /// on one thing before it may switch (hysteresis).
+    pub const ATTN_EVERY: Duration = Duration::from_millis(500);
+    pub const ATTN_HOLD: Duration = Duration::from_millis(1500);
+    pub const ATTN_TTL: Duration = Duration::from_millis(1000);
+    /// How long after the last keystroke the composer stays interesting, and after a card changed the card does.
+    pub const TYPING_HOLD: Duration = Duration::from_millis(2000);
+    pub const CARD_HOLD: Duration = Duration::from_millis(2500);
+    /// Cells of offset from a face's centre that turn the eyes fully (x columns, y rows).
+    pub const RANGE_COLS: f64 = 40.0;
+    pub const RANGE_ROWS: f64 = 12.0;
+
+    pub type Cell = (f64, f64);
+
+    /// What it is looking at, most interesting first.
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    pub enum Focus {
+        Modal,
+        Typing,
+        Card,
+        Text,
+    }
+
+    #[derive(Default)]
+    pub struct Scene {
+        pub modal: Option<Cell>,
+        pub typing: bool,
+        pub cursor: Cell,
+        pub card: bool,
+        pub streaming: bool,
+        pub newest: Option<Cell>,
+    }
+
+    /// App state -> the screen cell worth looking at, if any.
+    pub fn choose(s: &Scene) -> Option<(Focus, Cell)> {
+        if let Some(c) = s.modal {
+            return Some((Focus::Modal, c));
+        }
+        if s.typing {
+            return Some((Focus::Typing, s.cursor));
+        }
+        match (s.card, s.streaming, s.newest) {
+            (true, _, Some(c)) => Some((Focus::Card, c)),
+            (_, true, Some(c)) => Some((Focus::Text, c)),
+            _ => None,
+        }
+    }
+
+    /// A screen cell seen from a face centre -> the face's normalized target.
+    pub fn aim(target: Cell, centre: Cell) -> Cell {
+        (((target.0 - centre.0) / RANGE_COLS).clamp(-1.0, 1.0), ((target.1 - centre.1) / RANGE_ROWS).clamp(-1.0, 1.0))
+    }
+
+    #[derive(Default)]
+    pub struct Steer {
+        pub pointer: Option<((u16, u16), Instant)>,
+        pub typed_at: Option<Instant>,
+        pub card_at: Option<Instant>,
+        pub cursor: (u16, u16),
+        pub modal: Option<Cell>,
+        /// Face centres on screen: mini, full.
+        pub centres: [Option<Cell>; 2],
+        pub next: Option<Instant>,
+        pub attn_next: Option<Instant>,
+        cur: Option<(Focus, Cell)>,
+        since: Option<Instant>,
+        /// What was last sent to each face (None = handed back to the saccades).
+        pub aimed: [Option<Cell>; 2],
+    }
+
+    impl Steer {
+        pub fn current(&self) -> Option<Cell> {
+            self.cur.map(|(_, c)| c)
+        }
+
+        /// Hysteresis: the same focus follows its target; a different one (or none) waits out `ATTN_HOLD`.
+        pub fn pick(&mut self, want: Option<(Focus, Cell)>, now: Instant) -> Option<Cell> {
+            match (self.cur, want) {
+                (Some((a, _)), Some((b, c))) if a == b => self.cur = Some((b, c)),
+                (cur, want) => {
+                    if cur.is_none() || self.since.is_none_or(|t| now.saturating_duration_since(t) >= ATTN_HOLD) {
+                        self.cur = want;
+                        self.since = Some(now);
+                    }
+                }
+            }
+            self.cur.map(|(_, c)| c)
+        }
+    }
 }
 
 /// The palette names the face reads; a palette without them gets no face.
@@ -174,7 +277,7 @@ impl App {
             sdk_session: None, started: false, live: vec![], parking: None, park_pending: false, park_warned: false, park_blocked: false, seed: None,
             continue_once: false, entropy_trust: None, caps_line: String::new(), focused: true,
             post: None, connector: None, quit_reason: None, create_id: None, reconnecting: false, reconnect_running: false,
-            face: None, streaming: false, busy: HashSet::new(), flash: None, local: false,
+            face: None, streaming: false, busy: HashSet::new(), flash: None, local: false, gz: gaze::Steer::default(),
         }.with_face()
     }
 
@@ -259,8 +362,52 @@ impl App {
             return;
         }
         self.sync_face();
+        self.steer_gaze(now);
         if self.face.as_mut().is_some_and(|f| f.tick(now)) {
             self.dirty = true;
+        }
+    }
+
+    /// Point the faces at the pointer while it moves, else at what the entity finds interesting, else hand the
+    /// gaze back to the saccades. Runs on the face tick at `gaze::EVERY`; it never sets `dirty` itself, so a
+    /// gaze only shows on the next face frame. Re-applying each time also reaches a `/face` opened later.
+    fn steer_gaze(&mut self, now: Instant) {
+        if self.gz.next.is_some_and(|t| now < t) {
+            return;
+        }
+        self.gz.next = Some(now + gaze::EVERY);
+        let pointer = self.gz.pointer.filter(|(_, at)| now.saturating_duration_since(*at) < gaze::POINTER_ACTIVE);
+        let (target, ttl) = if let Some(((x, y), _)) = pointer {
+            (Some((x as f64 + 0.5, y as f64 + 0.5)), gaze::POINTER_TTL)
+        } else {
+            if self.gz.attn_next.is_none_or(|t| now >= t) {
+                self.gz.attn_next = Some(now + gaze::ATTN_EVERY);
+                let want = gaze::choose(&self.gaze_scene(now));
+                self.gz.pick(want, now);
+            }
+            (self.gz.current(), gaze::ATTN_TTL)
+        };
+        let centres = self.gz.centres;
+        let Some(hub) = &mut self.face else { return };
+        let aim = |i: usize| target.zip(centres[i]).map(|(t, c)| gaze::aim(t, c));
+        let aimed = [aim(0), aim(1)];
+        hub.mini.set_gaze(aimed[0], Some(ttl), now);
+        if let Some(f) = &mut hub.full {
+            f.set_gaze(aimed[1], Some(ttl), now);
+        }
+        self.gz.aimed = aimed;
+    }
+
+    fn gaze_scene(&self, now: Instant) -> gaze::Scene {
+        let within = |t: Option<Instant>, d: Duration| t.is_some_and(|t| now.saturating_duration_since(t) < d);
+        let r = self.tr_rect;
+        gaze::Scene {
+            modal: self.gz.modal,
+            typing: within(self.gz.typed_at, gaze::TYPING_HOLD),
+            cursor: (self.gz.cursor.0 as f64 + 0.5, self.gz.cursor.1 as f64 + 0.5),
+            card: within(self.gz.card_at, gaze::CARD_HOLD),
+            streaming: self.streaming,
+            newest: self.t.newest_line().map(|(row, w)| ((r.x as usize + w) as f64, (r.y + row) as f64 + 0.5)),
         }
     }
 
@@ -464,11 +611,13 @@ impl App {
             Down::Thinking { .. } => self.t.thinking(),
             Down::ToolCall { organ, id, name, input } => {
                 self.streaming = false;
+                self.gz.card_at = Some(Instant::now());
                 self.busy.insert(id.clone());
                 self.t.tool_call(&organ, &id, &name, &input)
             }
             Down::ToolResult { id, ok, summary, .. } => {
                 self.busy.remove(&id);
+                self.gz.card_at = Some(Instant::now());
                 self.t.tool_result(&id, ok, &summary)
             }
             Down::UserSaid { text, client, .. } => {
@@ -599,6 +748,7 @@ impl App {
         }
         if let Some(a) = self.asks.pop_front() {
             self.overlay = Overlay::Permission(Box::new(Permission::new(a)));
+            self.gz.card_at = Some(Instant::now());
         }
     }
 
@@ -794,6 +944,8 @@ impl App {
         // pointer motion, clicks and drags change nothing here: no repaint, and (in the loop) no stalled face frame
         if let Event::Mouse(m) = &e {
             if !matches!(m.kind, MouseEventKind::ScrollDown | MouseEventKind::ScrollUp) {
+                // remembered for the next face tick only: no repaint, not typing
+                self.gz.pointer = Some(((m.column, m.row), Instant::now()));
                 if matches!(self.overlay, Overlay::None) && self.select_mouse(*m) {
                     self.dirty = true;
                 }
@@ -886,6 +1038,9 @@ impl App {
     }
 
     fn on_key(&mut self, k: crossterm::event::KeyEvent) {
+        if matches!(self.overlay, Overlay::None) {
+            self.gz.typed_at = Some(Instant::now());
+        }
         match &mut self.overlay {
             Overlay::Permission(p) => {
                 if let Some(r) = p.key(k) {
@@ -1239,8 +1394,13 @@ impl App {
         self.header.draw(ha, buf, &self.th, face_on);
         draw_divider(da, buf, &self.th, self.busy_label(), phase);
         ratatui::widgets::Widget::render(View(&self.t), ta, buf);
+        self.gz.centres = [None, None];
+        self.gz.modal = None;
         if let Some(hub) = &mut self.face {
             hub.mini_visible = face_on;
+            if face_on {
+                self.gz.centres[0] = Some((ha.x as f64 + crate::widgets::FACE_SLOT_WIDTH.min(a.width) as f64 / 2.0, ha.y as f64 + FACE_ROWS as f64 / 2.0));
+            }
             if face_on {
                 hub.mini.draw(Rect { width: crate::widgets::FACE_SLOT_WIDTH.min(a.width), height: FACE_ROWS, ..ha }, buf, &self.th, 0);
             }
@@ -1254,11 +1414,18 @@ impl App {
                     full.tick(Instant::now()); // a refit (composer grew, window resized) must not paint one blank frame
                 }
                 hub.full_visible = true;
+                let (cols, rows) = full.size();
+                self.gz.centres[1] = Some((rect.x as f64 + cols as f64 / 2.0, rect.y as f64 - skip as f64 + rows as f64 / 2.0));
                 full.draw(rect, buf, &self.th, skip);
             }
         }
         let focused = matches!(self.overlay, Overlay::None);
         let cursor = self.composer.draw(ca, buf, &self.th, focused, phase);
+        self.gz.cursor = cursor;
+        if matches!(self.overlay, Overlay::Permission(_)) {
+            let m = Rect { y: a.y + top, height: a.height - top, ..a };
+            self.gz.modal = Some((m.x as f64 + m.width as f64 / 2.0, m.y as f64 + m.height as f64 / 2.0));
+        }
         if self.composer.completing() && focused {
             let n = self.composer.dropdown.len().min(8) as u16;
             let drop = Rect { y: ca.y.saturating_sub(n).max(ta.y), height: n.min(tr_h), ..a };
@@ -2198,6 +2365,97 @@ mod tests {
         assert!(a.t.sel.has());
         let n = a.t.selected_text().expect("copy is not empty").lines().count();
         assert!(n > 10, "{n} lines selected");
+    }
+
+    // ---- gaze ----
+    #[test]
+    fn the_chooser_has_one_answer_per_branch_and_a_priority() {
+        use gaze::{choose, Focus, Scene};
+        assert_eq!(choose(&Scene::default()), None, "nothing interesting: saccades");
+        let base = Scene { cursor: (3.0, 4.0), newest: Some((9.0, 8.0)), ..Default::default() };
+        assert_eq!(choose(&Scene { streaming: true, ..Scene { newest: base.newest, ..Default::default() } }), Some((Focus::Text, (9.0, 8.0))));
+        assert_eq!(choose(&Scene { newest: base.newest, ..Default::default() }), None, "a finished reply is not interesting");
+        assert_eq!(choose(&Scene { card: true, newest: base.newest, ..Default::default() }), Some((Focus::Card, (9.0, 8.0))));
+        assert_eq!(choose(&Scene { typing: true, cursor: base.cursor, newest: base.newest, card: true, streaming: true, ..Default::default() }), Some((Focus::Typing, (3.0, 4.0))));
+        assert_eq!(choose(&Scene { modal: Some((1.0, 1.0)), typing: true, card: true, ..Default::default() }), Some((Focus::Modal, (1.0, 1.0))));
+    }
+
+    #[test]
+    fn attention_does_not_jitter_between_foci() {
+        use gaze::{Focus::*, Steer, ATTN_HOLD};
+        let (mut s, t0) = (Steer::default(), Instant::now());
+        assert_eq!(s.pick(Some((Text, (1.0, 1.0))), t0), Some((1.0, 1.0)), "first focus is taken at once");
+        assert_eq!(s.pick(Some((Text, (2.0, 2.0))), t0 + Duration::from_millis(100)), Some((2.0, 2.0)), "same focus tracks its target");
+        assert_eq!(s.pick(Some((Typing, (5.0, 5.0))), t0 + Duration::from_millis(200)), Some((2.0, 2.0)), "a new focus waits");
+        assert_eq!(s.pick(None, t0 + Duration::from_millis(300)), Some((2.0, 2.0)), "and so does losing interest");
+        assert_eq!(s.pick(Some((Typing, (5.0, 5.0))), t0 + ATTN_HOLD + Duration::from_millis(1)), Some((5.0, 5.0)));
+        assert_eq!(s.pick(None, t0 + ATTN_HOLD * 3), None, "after the hold it lets go");
+    }
+
+    #[test]
+    fn aim_is_relative_to_the_face_and_clamped() {
+        assert_eq!(gaze::aim((50.0, 10.0), (50.0, 10.0)), (0.0, 0.0));
+        let (x, y) = gaze::aim((10.0, 30.0), (50.0, 10.0));
+        assert!(x <= -1.0 + 1e-9 && y > 0.0 && y <= 1.0, "{x} {y}");
+        let (x, _) = gaze::aim((60.0, 10.0), (50.0, 10.0));
+        assert!(x > 0.0 && x < 1.0);
+    }
+
+    #[test]
+    fn the_pointer_steers_both_faces_without_a_repaint_and_lapses() {
+        use crossterm::event::MouseEventKind::Moved;
+        let (mut a, _rx) = face_app();
+        say(&mut a, "/face");
+        a.gz.typed_at = None; // the command itself was typed
+        screen(&mut a, 100, 40);
+        let t0 = Instant::now();
+        a.dirty = false;
+        a.on_input(Event::Mouse(MouseEvent { kind: Moved, column: 2, row: 30, modifiers: KeyModifiers::NONE }));
+        assert!(!a.dirty, "motion is not a repaint");
+        assert!(a.gz.typed_at.is_none(), "motion is not typing");
+        a.tick_face(t0 + Duration::from_millis(10));
+        let [mini, full] = a.gz.aimed;
+        let (mini, full) = (mini.expect("mini follows"), full.expect("a /face view follows too"));
+        assert!(mini.0 < 0.0 && mini.1 > 0.0, "{mini:?}: the pointer is below-left of the mark");
+        assert!(full.0 < 0.0);
+        a.tick_face(t0 + gaze::POINTER_ACTIVE + Duration::from_millis(500));
+        assert_eq!(a.gz.aimed, [None, None], "the pointer idled and nothing else is interesting: saccades");
+    }
+
+    #[test]
+    fn a_face_opened_after_the_pointer_moved_gets_the_gaze() {
+        use crossterm::event::MouseEventKind::Moved;
+        let (mut a, _rx) = face_app();
+        screen(&mut a, 100, 40);
+        a.on_input(Event::Mouse(MouseEvent { kind: Moved, column: 90, row: 5, modifiers: KeyModifiers::NONE }));
+        let t0 = Instant::now();
+        a.tick_face(t0);
+        assert!(a.gz.aimed[0].is_some() && a.gz.aimed[1].is_none());
+        say(&mut a, "/face");
+        screen(&mut a, 100, 40);
+        a.tick_face(t0 + gaze::EVERY + Duration::from_millis(1));
+        assert!(a.gz.aimed[1].is_some_and(|g| g.0 > 0.0), "re-applied on the next gaze tick");
+    }
+
+    #[test]
+    fn the_entity_looks_at_streaming_text_and_the_composer_then_lets_go() {
+        let (mut a, _rx) = face_app();
+        screen(&mut a, 100, 40);
+        let t0 = Instant::now();
+        a.tick_face(t0);
+        assert_eq!(a.gz.aimed[0], None, "idle: random saccades");
+        ev(&mut a, r#"{"type":"TextDelta","organ":"rabble","text":"hello there"}"#);
+        screen(&mut a, 100, 40);
+        a.tick_face(t0 + Duration::from_secs(1));
+        assert!(a.gz.aimed[0].is_some_and(|g| g.1 > 0.0), "looks down at the newest line: {:?}", a.gz.aimed);
+        ev(&mut a, r#"{"type":"TextBlock","organ":"rabble","text":"hello there"}"#);
+        type_in(&mut a, "x");
+        screen(&mut a, 100, 40);
+        let at = Instant::now();
+        a.tick_face(at + gaze::ATTN_HOLD + Duration::from_millis(600));
+        assert!(a.gz.aimed[0].is_some(), "typing keeps its interest");
+        a.tick_face(at + gaze::TYPING_HOLD + gaze::ATTN_HOLD * 3);
+        assert_eq!(a.gz.aimed[0], None, "nothing left to look at");
     }
 
     #[test]

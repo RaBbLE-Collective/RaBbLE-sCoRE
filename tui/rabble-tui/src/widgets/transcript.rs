@@ -167,6 +167,17 @@ impl Transcript {
         Some((Rect { x: area.x, y: area.y + (lo - top) as u16, width: area.width, height: (hi - lo) as u16 }, (lo - e.start) as u16))
     }
 
+    /// The newest non-blank line: (row in the view, cells of text), clamped into the view. Where text is appearing.
+    pub fn newest_line(&self) -> Option<(u16, usize)> {
+        if self.stale || self.total == 0 || self.view_h == 0 {
+            return None;
+        }
+        let i = (0..self.total).rev().take(4).find(|&i| self.line_at(i).is_some_and(|l| select::width(l) > 0))?;
+        let top = self.offset.min(self.max);
+        let row = i.saturating_sub(top).min(self.view_h as usize - 1) as u16;
+        Some((row, self.line_at(i).map_or(0, select::width)))
+    }
+
     // content ------------------------------------------------------------------------------
     pub fn user(&mut self, text: &str) {
         self.drop_transient();
