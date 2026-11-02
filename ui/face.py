@@ -17,7 +17,6 @@ import asyncio
 import functools
 import math
 import os
-import random
 import re
 import threading
 import time
@@ -30,6 +29,7 @@ from textual.strip import Strip
 from textual.widget import Widget
 
 from ui import eyes, theme
+from ui.prng import SplitMix64
 
 # ── face rig (alive-backend.js, face units) ─────────────────────────────────
 EYE_RX, EYE_RY, POR_RX, POR_RY, EYE_X, POR_OFF = 43.5, 136, 117, 35, 92, 126
@@ -286,7 +286,7 @@ def _edge_y(cx, cy, rx, ry, rot, x, lower):
 
 @functools.lru_cache(maxsize=4096)
 def _lattice(seed, i):
-    return random.Random(seed * 7919 + i).random()
+    return SplitMix64(seed * 7919 + i).random()
 
 
 def _noise(seed, x):
@@ -401,7 +401,7 @@ class Face:
 
     # mesh nodes are fixed per instance; they shimmer, not move
     def _build_mesh(self):
-        rng = random.Random(self.seed)
+        rng = SplitMix64(self.seed)
         nodes, edges = [], []
         for side in (-1, 1):
             start = len(nodes)
@@ -663,7 +663,7 @@ class Face:
             for x, y in _ellipse_pts(cx, y0, rx, rx * 0.12, 0, 0, math.pi):
                 cv.dot(x, y, mix(self._side(x), P["bg"], dim), 0.3)
         # motes inside
-        rng = random.Random(self.seed + 1)
+        rng = SplitMix64(self.seed + 1)
         for i in range(int(R * 1.6)):
             a, r = rng.uniform(0, 2 * math.pi), R * math.sqrt(rng.random()) * 0.95
             drift = t * 0.4 * (0.5 + rng.random())
@@ -739,7 +739,7 @@ class Life:
     """Drives blink and gaze over time so the face never sits still."""
 
     def __init__(self, seed=3):
-        self.rng = random.Random(seed)
+        self.rng = SplitMix64(seed)
         self.next_blink, self.blink_t, self.double = 2.5, -1.0, False
         self.gaze, self.target, self.next_sacc = [0.0, 0.0], [0.0, 0.0], 1.0
         self.speed = 1.0  # >1 = quicker saccades (the "working" mood)
@@ -913,7 +913,7 @@ class FaceWidget(Widget):
         self._timer = None
         self._revert = None
         self.noise = self.breaking = 0.0
-        self._rng = random.Random(11)
+        self._rng = SplitMix64(11)
         self._glitch = {}
         self._bg_cost = self._eye_cost = 0.0
         self._base, self._bg_busy, self._bg_started = None, False, 0.0   # the cached background layer (full face)
