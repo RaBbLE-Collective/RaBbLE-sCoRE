@@ -29,6 +29,7 @@ use crate::{
         face::{safe_glyphs, FaceHub},
         header::{draw_divider, HeaderState},
         modal::{Ask, Permission, Picked, Picker, Reply},
+        crew::{CrewView, ViewAction, PANEL_MIN_AREA, PANEL_WIDTH},
         transcript::{Transcript, View},
         FACE_COMPACT_MIN_AREA, FACE_COMPACT_ROWS, FACE_COMPACT_SLOT_WIDTH, FACE_MIN_AREA, FACE_ROWS, FACE_SLOT_WIDTH,
     },
@@ -39,7 +40,7 @@ pub const QUIT_WINDOW_MS: u128 = 2000;
 pub const FLASH: Duration = Duration::from_millis(2500);
 pub const HELP: [(&str, &str); 14] = [
     ("/model", "pick the model (or /model opus|sonnet|haiku|fable|default|<id>)"),
-    ("/crew", "organs on/off: /crew on|off (off = solo, no agents, cheapest)"),
+    ("/crew", "organs: /crew on|off (off = solo, cheapest) · /crew view = panel, then transcripts (Ctrl-G cycles)"),
     ("/trust", "auto-approve level: /trust strict|standard|trusted|auto (auto = earned from session entropy)"),
     ("/mode", "permission mode: /mode default|acceptEdits|plan|auto (Shift+Tab cycles)"),
     ("/status", "model, crew, trust and mode at a glance"),
@@ -94,6 +95,7 @@ pub enum Overlay {
     Permission(Box<Permission>),
     Model(Picker),
     Sessions(Picker),
+    Crew(CrewView),
 }
 
 const FLOW_EVERY: Duration = Duration::from_millis(125); // 8 fps, like the Python divider
@@ -106,6 +108,9 @@ pub struct App {
     pub header: HeaderState,
     pub settings: Settings,
     pub overlay: Overlay,
+    pub crew: crate::crew::Crew,
+    /// The crew side panel, when the pane is wide enough for it.
+    pub crew_panel: bool,
     pub quit: bool,
     /// Set with `quit` by `/reload`: leave the terminal, then `exec` the (rebuilt) binary on this session.
     pub reload: bool,
@@ -126,6 +131,7 @@ pub struct App {
     last_ctrl_c: Option<Instant>,
     /// Where the transcript was last painted; mouse selection maps cells through it.
     tr_rect: Rect,
+    last_width: u16,
     sdk_session: Option<String>,
     started: bool,
     live: Vec<SessionInfo>,
@@ -275,8 +281,8 @@ impl App {
         let header = HeaderState { model: settings.model.clone().unwrap_or_default(), mode: settings.mode.clone(), trust: settings.trust.clone().unwrap_or_default(), crew: settings.crew, cwd: cfg.cwd.clone(), connected: true, ..Default::default() };
         let composer = Composer::new(&cfg.cwd, base_commands());
         App {
-            th, t: Transcript::new(), composer, header, settings, overlay: Overlay::None, quit: false, reload: false, dirty: true, flow_t0: Instant::now(), flow_next: Instant::now(), usage_at: None, effects: vec![], malformed: 0,
-            session: None, max_seq: 0, turn_open: false, engine_ok: true, cfg, out, asks: VecDeque::new(), seen_asks: HashSet::new(), last_ctrl_c: None, tr_rect: Rect::default(),
+            th, t: Transcript::new(), composer, header, settings, overlay: Overlay::None, crew: crate::crew::Crew::new(), crew_panel: false, quit: false, reload: false, dirty: true, flow_t0: Instant::now(), flow_next: Instant::now(), usage_at: None, effects: vec![], malformed: 0,
+            session: None, max_seq: 0, turn_open: false, engine_ok: true, cfg, out, asks: VecDeque::new(), seen_asks: HashSet::new(), last_ctrl_c: None, tr_rect: Rect::default(), last_width: 0,
             sdk_session: None, started: false, live: vec![], parking: None, park_pending: false, park_warned: false, park_blocked: false, seed: None,
             continue_once: false, entropy_trust: None, caps_line: String::new(), focused: true,
             post: None, connector: None, quit_reason: None, create_id: None, reconnecting: false, reconnect_running: false,
@@ -561,6 +567,7 @@ impl App {
         }
         match f.msg {
             Down::Attached { role, gap, snapshot } => {
+                self.crew.clear(); // the replay that follows refills it
                 if role == "observer" {
                     self.notice("attached as observer: you can read but not send", false);
                 }
@@ -604,21 +611,25 @@ impl App {
                 }
             }
             Down::TextDelta { organ, text } => {
+                self.crew.delta(&organ, &text);
                 self.streaming = true;
                 self.t.delta(&organ, &text)
             }
             Down::TextBlock { organ, text } => {
+                self.crew.block(&organ, &text);
                 self.streaming = false;
                 self.t.block(&organ, &text)
             }
             Down::Thinking { .. } => self.t.thinking(),
             Down::ToolCall { organ, id, name, input } => {
+                self.crew.tool_call(&organ, &id, &name, &input);
                 self.streaming = false;
                 self.gz.card_at = Some(Instant::now());
                 self.busy.insert(id.clone());
                 self.t.tool_call(&organ, &id, &name, &input)
             }
             Down::ToolResult { id, ok, summary, .. } => {
+                self.crew.tool_result(&id, ok, &summary);
                 self.busy.remove(&id);
                 self.gz.card_at = Some(Instant::now());
                 self.t.tool_result(&id, ok, &summary)
@@ -636,11 +647,13 @@ impl App {
             }
             Down::PermissionAsk { id, organ, tool, input, title, description, blocked_path, .. } => {
                 if self.seen_asks.insert(id.clone()) {
+                    self.crew.ask(&organ, &id, &tool);
                     self.asks.push_back(Ask { id, organ, tool, input, title, description, blocked_path });
                     self.next_ask();
                 }
             }
             Down::PermissionResolved { id, decision, by } => {
+                self.crew.resolved(&id, &format!("{decision:?}").to_lowercase());
                 self.asks.retain(|a| a.id != id);
                 self.seen_asks.insert(id.clone());
                 if matches!(&self.overlay, Overlay::Permission(p) if p.ask.id == id) {
@@ -652,11 +665,13 @@ impl App {
                     self.next_ask();
                 }
             }
-            Down::OrganStarted { organ, brief, .. } => {
+            Down::OrganStarted { organ, brief, task_id, .. } => {
+                self.crew.started(&organ, task_id, &brief);
                 self.busy.insert(format!("organ:{organ}"));
                 self.notice(&format!("{organ} started: {brief}"), false)
             }
-            Down::OrganDone { organ, status, .. } => {
+            Down::OrganDone { organ, status, result, .. } => {
+                self.crew.done(&organ, &status, &result);
                 self.busy.remove(&format!("organ:{organ}"));
                 let (word, err) = match status {
                     OrganStatus::Completed => ("completed", false),
@@ -666,7 +681,8 @@ impl App {
                 };
                 self.notice(&format!("{organ} {word}"), err);
             }
-            Down::OrganProgress { .. } => {}
+            Down::OrganProgress { organ, usage, last_tool_name, .. } => self.crew.progress(&organ, usage.as_ref(), last_tool_name.as_deref()),
+            Down::Narration { organ, text, .. } => self.crew.note(&organ, &text),
             Down::ModelUsed { model } => self.header.model = model,
             Down::EntropyChanged { score, band, trust, reason, base, stability, local, capability, categories, .. } => {
                 self.local = local;
@@ -744,8 +760,31 @@ impl App {
         self.sync_header();
     }
 
+    /// Ctrl-G: hidden -> side panel -> transcripts -> hidden.
+    fn cycle_crew_view(&mut self) {
+        if matches!(self.overlay, Overlay::Crew(_)) {
+            self.overlay = Overlay::None;
+            self.crew_panel = false;
+        } else if !matches!(self.overlay, Overlay::None) {
+        } else if self.crew_panel || self.cfg_narrow() {
+            self.crew_panel = false;
+            self.overlay = Overlay::Crew(CrewView::new(self.crew.members.iter().position(|m| m.state.live() && m.name != crate::crew::LEAD).unwrap_or(0)));
+        } else {
+            self.crew_panel = true;
+        }
+        self.dirty = true;
+    }
+
+    /// Too narrow for the panel: skip straight to the viewer.
+    fn cfg_narrow(&self) -> bool {
+        self.last_width < PANEL_MIN_AREA
+    }
+
     // ---- permissions -------------------------------------------------------------------------
     fn next_ask(&mut self) {
+        if matches!(self.overlay, Overlay::Crew(_)) && !self.asks.is_empty() {
+            self.overlay = Overlay::None; // an approval outranks reading
+        }
         if !matches!(self.overlay, Overlay::None) {
             return;
         }
@@ -829,6 +868,7 @@ impl App {
         }
         self.asks.clear();
         self.overlay = Overlay::None;
+        self.crew.clear();
         self.turn_open = false;
         // the old session's in-flight tools and stream never finish in the new one (Python clears both here)
         self.streaming = false;
@@ -988,6 +1028,7 @@ impl App {
                     match &mut self.overlay {
                         Overlay::None => self.t.wheel(down),
                         Overlay::Permission(p) => p.wheel(down),
+                        Overlay::Crew(v) => v.wheel(down),
                         _ => {}
                     }
                 }
@@ -1080,6 +1121,17 @@ impl App {
                 }
                 return;
             }
+            Overlay::Crew(v) => {
+                match v.key(k, &self.crew) {
+                    ViewAction::Close => self.overlay = Overlay::None,
+                    ViewAction::Stop(id) => {
+                        self.to_session("stop", |s| Up::StopTask { session: s, task_id: id });
+                        self.brief("stopping that organ", false);
+                    }
+                    ViewAction::None => {}
+                }
+                return;
+            }
             Overlay::None => {}
         }
         let (ctrl, shift) = (k.modifiers.contains(KeyModifiers::CONTROL), k.modifiers.contains(KeyModifiers::SHIFT));
@@ -1103,6 +1155,7 @@ impl App {
         }
         match k.code {
             KeyCode::Char('o') if ctrl => self.t.toggle_cards(),
+            KeyCode::Char('g') if ctrl => self.cycle_crew_view(),
             KeyCode::PageUp => self.t.page(false),
             KeyCode::PageDown => self.t.page(true),
             KeyCode::Home if ctrl => self.t.jump_top(),
@@ -1199,8 +1252,11 @@ impl App {
             }
             "/crew" => {
                 let a = arg.to_lowercase();
+                if a == "view" || a == "panel" || a == "log" {
+                    return self.cycle_crew_view();
+                }
                 if a != "on" && a != "off" {
-                    return self.notice(&format!("crew is {}; usage: /crew on|off", if self.settings.crew { "on" } else { "off" }), !a.is_empty());
+                    return self.notice(&format!("crew is {}; usage: /crew on|off|view", if self.settings.crew { "on" } else { "off" }), !a.is_empty());
                 }
                 let want = a == "on";
                 if want == self.settings.crew {
@@ -1388,6 +1444,7 @@ impl App {
         let compact = has_face && !face_on && a.width >= FACE_COMPACT_MIN_AREA.0 && a.height >= FACE_COMPACT_MIN_AREA.1;
         let hh = if face_on { FACE_ROWS } else if compact { FACE_COMPACT_ROWS } else { 2 };
         let (mark_w, mark_h) = if face_on { (FACE_SLOT_WIDTH, FACE_ROWS) } else { (FACE_COMPACT_SLOT_WIDTH, FACE_COMPACT_ROWS) };
+        self.last_width = a.width;
         let top = hh + 1;
         let comp_h = self.composer.height(a.width).min(a.height.saturating_sub(top + 1));
         let tr_h = a.height.saturating_sub(top + comp_h);
@@ -1398,10 +1455,16 @@ impl App {
             self.usage_at = Some(Instant::now());
         }
         let (ha, da) = (Rect { height: hh, ..a }, Rect { y: a.y + hh, height: 1, ..a });
-        let ta = Rect { y: a.y + top, height: tr_h, ..a };
+        let mut ta = Rect { y: a.y + top, height: tr_h, ..a };
+        // the crew panel takes the right edge of the transcript's rows
+        let panel_on = self.crew_panel && matches!(self.overlay, Overlay::None | Overlay::Permission(_)) && a.width >= PANEL_MIN_AREA;
+        let pa = Rect { x: (a.x + a.width).saturating_sub(PANEL_WIDTH), width: PANEL_WIDTH.min(a.width), ..ta };
+        if panel_on {
+            ta.width = a.width.saturating_sub(PANEL_WIDTH + 1);
+        }
         self.tr_rect = ta;
         let ca = Rect { y: a.y + top + tr_h, height: comp_h, ..a };
-        self.t.layout(&self.th, a.width, tr_h);
+        self.t.layout(&self.th, ta.width, tr_h);
         self.gz.newest = self.t.newest_line();
         let buf = f.buffer_mut();
         // the micro mark is all eye, so its text keeps one more column of air than the full mark's
@@ -1409,6 +1472,9 @@ impl App {
         self.header.draw(ha, buf, &self.th, text_slot, face_on, phase);
         draw_divider(da, buf, &self.th, self.busy_label(), phase);
         ratatui::widgets::Widget::render(View(&self.t), ta, buf);
+        if panel_on {
+            crate::widgets::crew::panel(&self.crew, pa, buf, &self.th, self.turn_open);
+        }
         self.gz.centres = [None, None];
         self.gz.modal = None;
         if let Some(hub) = &mut self.face {
@@ -1452,6 +1518,10 @@ impl App {
         match &self.overlay {
             Overlay::Permission(p) => p.draw(Rect { y: a.y + top, height: a.height - top, ..a }, buf, &self.th),
             Overlay::Model(p) | Overlay::Sessions(p) => p.draw(a, buf, &self.th),
+            Overlay::Crew(v) => {
+                v.draw(&self.crew, Rect { y: a.y + top, height: tr_h, ..a }, buf, &self.th, self.turn_open);
+                f.set_cursor_position(cursor);
+            }
             Overlay::None => f.set_cursor_position(cursor),
         }
     }
@@ -1642,6 +1712,43 @@ mod tests {
         a.on_net(Net::Closed("eof".into()));
         let s = screen(&mut a, 100, 30);
         assert!(s.contains("no engine session yet") && s.contains("boom 2") && s.contains("could not read") && s.contains("connection lost") && s.contains("offline"), "{s}");
+    }
+
+    fn ctrl(c: char) -> Event {
+        Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL))
+    }
+
+    #[test]
+    fn organ_events_fill_the_crew_and_ctrl_g_walks_panel_viewer_hidden() {
+        let (mut a, rx) = live();
+        ev(&mut a, r#"{"type":"OrganStarted","organ":"gobble","tool_use_id":"u","task_id":"k9","brief":"map it"}"#);
+        ev(&mut a, r#"{"type":"ToolCall","organ":"gobble","id":"t1","name":"Grep","input":{"pattern":"x"}}"#);
+        assert_eq!((a.crew.active(), a.crew.get("gobble").unwrap().last_tool.as_str()), (1, "Grep x"));
+        let wide = screen(&mut a, 120, 30);
+        assert!(!wide.contains("FLOW") && !a.crew_panel, "hidden until asked");
+        a.on_input(ctrl('g'));
+        let s = screen(&mut a, 120, 30);
+        assert!(a.crew_panel && s.contains("CREW  1 working") && s.contains("map it"), "{s}");
+        a.on_input(ctrl('g'));
+        assert!(matches!(a.overlay, Overlay::Crew(_)) && !a.crew_panel);
+        assert!(screen(&mut a, 120, 30).contains("Grep x"));
+        // x stops the selected, running organ
+        a.on_input(key(KeyCode::Char('x')));
+        let out = sent(&rx);
+        assert!(out.iter().any(|m| m["type"] == "stop_task" && m["task_id"] == "k9"), "{out:?}");
+        a.on_input(ctrl('g'));
+        assert!(matches!(a.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn an_approval_pulls_the_reader_out_of_the_crew_viewer_and_a_narrow_pane_skips_the_panel() {
+        let (mut a, _rx) = live();
+        let _ = screen(&mut a, 70, 24);
+        a.on_input(ctrl('g'));
+        assert!(matches!(a.overlay, Overlay::Crew(_)), "narrow: straight to the viewer");
+        ev(&mut a, &ask("a1"));
+        assert!(matches!(&a.overlay, Overlay::Permission(p) if p.ask.id == "a1"));
+        assert_eq!(a.crew.waiting(), 0, "the lead's own ask does not make an organ wait");
     }
 
     #[test]

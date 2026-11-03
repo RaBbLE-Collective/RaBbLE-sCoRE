@@ -1,4 +1,5 @@
 pub mod composer;
+pub mod crew;
 pub mod face;
 pub mod header;
 pub mod select;

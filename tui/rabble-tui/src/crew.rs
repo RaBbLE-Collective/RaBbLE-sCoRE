@@ -8,7 +8,7 @@ use std::{
 };
 
 use rabble_proto::OrganStatus;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 pub const LEAD: &str = "rabble";
 const LOG_CAP: usize = 500;
@@ -110,7 +110,7 @@ pub struct Crew {
 }
 
 /// The one input value worth showing beside a tool name.
-fn gist(input: &Value) -> String {
+fn gist(input: &Map<String, Value>) -> String {
     for k in ["command", "file_path", "path", "pattern", "url", "query", "description", "prompt"] {
         if let Some(v) = input.get(k).and_then(Value::as_str) {
             return v.lines().next().unwrap_or("").to_owned();
@@ -192,7 +192,7 @@ impl Crew {
         self.at(organ).push(Kind::Note, text.to_owned());
     }
 
-    pub fn tool_call(&mut self, organ: &str, id: &str, name: &str, input: &Value) {
+    pub fn tool_call(&mut self, organ: &str, id: &str, name: &str, input: &Map<String, Value>) {
         let g = gist(input);
         self.tool_owner.insert(id.to_owned(), if organ.is_empty() { LEAD } else { organ }.to_owned());
         let m = self.at(organ);
@@ -221,7 +221,7 @@ impl Crew {
         self.hop(LEAD, organ, Flow::Spawn, brief);
     }
 
-    pub fn progress(&mut self, organ: &str, usage: Option<&Value>, last_tool: Option<&str>) {
+    pub fn progress(&mut self, organ: &str, usage: Option<&Map<String, Value>>, last_tool: Option<&str>) {
         let m = self.at(organ);
         if let Some(u) = usage {
             m.tokens = u.get("total_tokens").and_then(Value::as_u64).unwrap_or(m.tokens);
@@ -278,6 +278,10 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn m(v: Value) -> Map<String, Value> {
+        v.as_object().unwrap().clone()
+    }
+
     #[test]
     fn the_lead_is_always_there_and_organs_join_when_briefed() {
         let mut c = Crew::new();
@@ -305,8 +309,8 @@ mod tests {
     #[test]
     fn tools_and_results_land_on_the_organ_that_called_them() {
         let mut c = Crew::new();
-        c.tool_call("cobble", "t1", "Grep", &json!({"pattern": "fn main"}));
-        c.tool_call("gobble", "t2", "Bash", &json!({"command": "ls\nsecond line"}));
+        c.tool_call("cobble", "t1", "Grep", &m(json!({"pattern": "fn main"})));
+        c.tool_call("gobble", "t2", "Bash", &m(json!({"command": "ls\nsecond line"})));
         c.tool_result("t1", false, "no match");
         let cob = c.get("cobble").unwrap();
         assert_eq!(cob.last_tool, "Grep fn main");
@@ -348,7 +352,7 @@ mod tests {
     fn progress_takes_usage_and_the_logs_are_capped() {
         let mut c = Crew::new();
         c.started("gobble", None, "x");
-        c.progress("gobble", Some(&json!({"total_tokens": 1234, "tool_uses": 5})), Some("Read"));
+        c.progress("gobble", Some(&m(json!({"total_tokens": 1234, "tool_uses": 5}))), Some("Read"));
         let g = c.get("gobble").unwrap();
         assert_eq!((g.tokens, g.tools, g.last_tool.as_str()), (1234, 5, "Read"));
         for i in 0..LOG_CAP + 50 {
