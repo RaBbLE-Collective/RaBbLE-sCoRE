@@ -17,13 +17,13 @@ from ui.widgets.divider import flow_colour
 FACE_SLOT_WIDTH = 24
 FACE_ROWS = 6
 FACE_MIN_AREA = (56, 22)
-FACE_COMPACT_SLOT_WIDTH = 8
+FACE_COMPACT_SLOT_WIDTH = 7
 FACE_COMPACT_ROWS = 2
 FACE_COMPACT_MIN_AREA = (30, 10)
 
 
 def tier_for(width: int, height: int, has_face: bool = True) -> str:
-    """"full" (6-row mark and info lines), "compact" (8x2 mark, 2-row header) or "plain" (2-row text, no mark)."""
+    """"full" (6-row mark and info lines), "compact" (7x2 mark, 2-row header) or "plain" (2-row text, no mark)."""
     if has_face and width >= FACE_MIN_AREA[0] and height >= FACE_MIN_AREA[1]:
         return "full"
     if has_face and width >= FACE_COMPACT_MIN_AREA[0] and height >= FACE_COMPACT_MIN_AREA[1]:

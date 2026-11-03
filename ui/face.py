@@ -961,10 +961,79 @@ def blend_pose(a, b, p):
     return {part: {k: a[part][k] + (b[part][k] - a[part][k]) * p for k in a[part]} for part in a}
 
 
-def compact_mark(pal, cols=8, rows=2):
-    """The header's small-tier mark. Today the mini face scaled to cols x rows (2:1 cells); this is the one hook
-    to swap for the dedicated micro glyph the Rust shell is getting."""
-    return Face(cols, rows, pal, detail="mini")
+MICRO_COLS, MICRO_ROWS = 7, 2
+_MICRO_W, _MICRO_H, _MICRO_EYE_W, _MICRO_EYE_H = MICRO_COLS * 2, MICRO_ROWS * 4, 3, 6
+_MICRO_SLOTS = (0, 8)
+_MICRO_PILL = {6: (1, 3, 3, 3, 3, 1), 4: (1, 3, 3, 1), 2: (3, 3)}
+
+
+def micro_pixels(blink, gaze):
+    """The micro mark's eye pixels, [y][x] (tui/rabble-face/src/micro.rs `pixels`). blink 0..1 (1 = shut) squashes
+    each pill about its middle; gaze x, y in -1..1 slides it inside its slot."""
+    gx, gy = max(-1.0, min(1.0, gaze[0])), max(-1.0, min(1.0, gaze[1]))
+    dx = int(max(0, min(3, _round_half_away(1.4 + gx * 1.6))))
+    dy = int(max(0, min(2, _round_half_away(1.0 + gy))))
+    blink = max(0.0, min(1.0, blink))
+    h = 6 if blink < 0.3 else 4 if blink < 0.55 else 2 if blink < 0.8 else 1
+    px = [[False] * _MICRO_W for _ in range(_MICRO_H)]
+    for i, slot in enumerate(_MICRO_SLOTS):
+        ex = min(dx + 1, 3) if i == 1 else dx   # the right eye rests a pixel further in
+        for r, w in enumerate(_MICRO_PILL.get(h, (3,))):
+            y = dy + (_MICRO_EYE_H - h) // 2 + r
+            x0 = slot + ex + (_MICRO_EYE_W - w) // 2
+            for x in range(x0, x0 + w):
+                px[y][x] = True
+    return px
+
+
+def _round_half_away(x):
+    return math.floor(x + 0.5) if x >= 0 else -math.floor(-x + 0.5)
+
+
+def micro_cells(pal, blink, gaze, safe=False):
+    """(char, fg, bg) grid of the micro mark (micro.rs `micro`): cyan left eye, magenta right, void = palette bg."""
+    px = micro_pixels(blink, gaze)
+    out = []
+    for cy in range(MICRO_ROWS):
+        row = []
+        for cx in range(MICRO_COLS):
+            bits = 0
+            for r in range(4):
+                for c in range(2):
+                    on = lambda rr, cc: px[cy * 4 + rr][cx * 2 + cc]
+                    lit = (on(r & ~1, c) or on(r | 1, c)) if safe else on(r, c)
+                    if lit:
+                        bits |= 1 << (r * 2 + c)
+            fg = pal["cyan"] if cx < 3 else pal["magenta"]
+            row.append((_OCTANT[bits], pal["bg"] if bits == 0 else fg, pal["bg"]))
+        out.append(row)
+    return out
+
+
+class MicroMark:
+    """Stands in for Face on the header's compact tier: same surface FaceWidget._tick uses (pose, expr, block,
+    set_provider, frame(...).cells()), but it draws two eye pills instead of downscaling a face."""
+
+    def __init__(self, pal, safe=None):
+        self.pal = pal
+        self.safe = SAFE_GLYPHS if safe is None else safe
+        self.pose = self.expr = self.block = self.provider = None
+        self._cells = []
+
+    def set_provider(self, provider):
+        self.provider = provider
+
+    def frame(self, t=0.0, blink=0.0, gaze=(0.0, 0.0)):
+        self._cells = micro_cells(self.pal, blink, gaze, self.safe)
+        return self
+
+    def cells(self):
+        return self._cells
+
+
+def compact_mark(pal, cols=MICRO_COLS, rows=MICRO_ROWS):
+    """The header's small-tier mark: the dedicated micro mark (7x2 cells), as in the Rust shell."""
+    return MicroMark(pal)
 
 
 class FaceWidget(Widget):

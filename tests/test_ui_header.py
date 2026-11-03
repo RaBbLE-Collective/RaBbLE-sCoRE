@@ -15,6 +15,7 @@ pytest.importorskip("claude_agent_sdk")
 from orchestra.backend import ReplayBackend  # noqa: E402
 from ui import theme  # noqa: E402
 from ui.app import RabbleApp  # noqa: E402
+from ui.face import MICRO_COLS  # noqa: E402
 from ui.widgets import header as hdr  # noqa: E402
 
 FIX = Path(__file__).parent / "fixtures" / "orchestra"
@@ -28,7 +29,8 @@ def test_constants_match_rust():
     src = (Path(__file__).parent.parent / "tui/rabble-tui/src/widgets/mod.rs").read_text()
     for name, val in (("FACE_COMPACT_SLOT_WIDTH", hdr.FACE_COMPACT_SLOT_WIDTH), ("FACE_COMPACT_ROWS", hdr.FACE_COMPACT_ROWS),
                       ("FACE_SLOT_WIDTH", hdr.FACE_SLOT_WIDTH), ("FACE_ROWS", hdr.FACE_ROWS)):
-        assert f"pub const {name}: u16 = {val};" in src
+        assert f"pub const {name}: u16 = {val};" in src or (name == "FACE_COMPACT_SLOT_WIDTH" and val == MICRO_COLS
+                                                          and f"pub const {name}: u16 = rabble_face::micro::MICRO_COLS as u16;" in src)
     assert f"FACE_COMPACT_MIN_AREA: (u16, u16) = {hdr.FACE_COMPACT_MIN_AREA};" in src
     assert f"FACE_MIN_AREA: (u16, u16) = {hdr.FACE_MIN_AREA};" in src
 
@@ -60,8 +62,8 @@ def test_wordmark_flow_and_fallback(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("size,tier,rows,mark,centre", [((100, 40), "full", 6, (24, 6), (12, 3)),
-                                                         ((40, 12), "compact", 2, (8, 2), (4, 1)),
-                                                         ((30, 10), "compact", 2, (8, 2), (4, 1)),
+                                                         ((40, 12), "compact", 2, (7, 2), (3.5, 1.0)),
+                                                         ((30, 10), "compact", 2, (7, 2), (3.5, 1.0)),
                                                          ((28, 18), "plain", 2, None, None),
                                                          ((80, 9), "plain", 2, None, None)])
 async def test_tiers_in_the_app(tmp_path, size, tier, rows, mark, centre):
@@ -92,7 +94,7 @@ async def test_wordmark_identical_across_tiers_and_reflow(tmp_path, capsys):
                 seen[(app.header.tier, phase)] = mark_colours(app.header._text())
             if app.header.tier == "compact":
                 lines = app.header._text().plain.split("\n")
-                assert lines[0].startswith("RaBbLE") and all(len(l) <= 40 - 9 for l in lines)   # reflowed to width - 9
+                assert lines[0].startswith("RaBbLE") and all(len(l) <= 40 - 8 for l in lines)   # reflowed to width - 8
         app = make(tmp_path)
     for phase in (0.0, 0.3):
         assert seen[("full", phase)] == seen[("compact", phase)] == seen[("plain", phase)]
@@ -105,8 +107,45 @@ async def test_compact_reflow_narrower_than_full_and_flow_follows_divider(tmp_pa
     async with app.run_test(size=(30, 10)) as pilot:
         await pilot.pause(0.3)
         for l in app.header._text().plain.split("\n"):
-            assert len(l) <= 30 - 9
+            assert len(l) <= 30 - 8
         assert app.header.flow in app.divider.follow
         before = app.header.phase
         await pilot.pause(0.4)
         assert app.header.phase != before   # moved on the divider's tick
+
+
+# ── the micro mark (tui/rabble-face/src/micro.rs tests) ──
+
+from ui.face import micro_cells, micro_pixels  # noqa: E402
+
+PAL = {"bg": (10, 0, 16), "cyan": (0, 245, 255), "magenta": (255, 43, 214)}
+
+
+def _ascii(blink, gaze):
+    return ["".join("#" if p else "." for p in r) for r in micro_pixels(blink, gaze)]
+
+
+def test_micro_neutral_pins_pixels_and_glyphs():
+    assert _ascii(0.0, (0.0, 0.0)) == ["..............", "..#........#..", ".###......###.", ".###......###.", ".###......###.",
+                                       ".###......###.", "..#........#..", ".............."]
+    g = micro_cells(PAL, 0.0, (0.0, 0.0))
+    assert ["".join(c[0] for c in r) for r in g] == ["▗\U0001CDDE   \U0001CDE1▖", "▝\U0001CD17   \U0001CD26▘"]
+    assert g[0][1][1:] == (PAL["cyan"], PAL["bg"])
+    assert g[0][5][1] == PAL["magenta"]
+    assert g[0][3] == (" ", PAL["bg"], PAL["bg"])
+
+
+def test_micro_gaze_blink_and_gap():
+    at = lambda g: _ascii(0.0, g)  # noqa: E731
+    for g in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        assert at((0.0, 0.0)) != at(g)
+    lit = lambda b: sum(map(sum, micro_pixels(b, (0.0, 0.0))))  # noqa: E731
+    assert lit(0.0) > lit(0.4) > lit(0.7) > lit(1.0) > 0
+    for gx in (-1.0, 0.0, 1.0):
+        for gy in (-1.0, 0.0, 1.0):
+            assert all(r[3][0] == " " for r in micro_cells(PAL, 0.0, (gx, gy))), (gx, gy)
+
+
+def test_micro_safe_is_quadrants_only():
+    g = micro_cells(PAL, 0.0, (0.0, 0.0), safe=True)
+    assert all(c[0] == " " or "\u2580" <= c[0] <= "\u259f" for r in g for c in r), g
