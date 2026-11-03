@@ -4,7 +4,6 @@
 
 use ratatui::{buffer::Buffer, layout::Rect, text::{Line, Span}};
 
-use super::FACE_SLOT_WIDTH;
 use crate::{theme::Theme, usage::{self, Usage}, wrap::{clean, spans_width, str_width}};
 
 #[derive(Debug, Default, Clone)]
@@ -34,6 +33,15 @@ fn home_short(cwd: &str) -> String {
     }
 }
 
+/// The wordmark, one span per character on the same cyan/magenta flow as the divider (`phase` drifts it);
+/// every header tier draws this. Without colour it is the accent, bold.
+fn wordmark(th: &Theme, phase: f64) -> Vec<Span<'static>> {
+    let bold = ratatui::style::Modifier::BOLD;
+    "RaBbLE".chars().enumerate()
+        .map(|(i, ch)| Span::styled(ch.to_string(), th.flow(i, 6, phase, th.accent).add_modifier(bold)))
+        .collect()
+}
+
 impl HeaderState {
     fn bar(&self, th: &Theme, pct: f64, band: u8, width: usize) -> Vec<Span<'static>> {
         let filled = ((pct / 100.0 * width as f64).round().max(0.0) as usize).min(width);
@@ -46,12 +54,9 @@ impl HeaderState {
 
     /// The six lines Python's header shows beside the mark: wordmark and cwd, model/mode/tier/crew,
     /// capability bars, entropy and context, provider usage, limit and cost.
-    pub fn rich_lines(&self, th: &Theme, width: usize, now: f64) -> Vec<Line<'static>> {
+    pub fn rich_lines(&self, th: &Theme, width: usize, now: f64, phase: f64) -> Vec<Line<'static>> {
         let bold = ratatui::style::Modifier::BOLD;
-        let mark = "RaBbLE";
-        let n = mark.chars().count() - 1;
-        let mut l1: Vec<Span<'static>> = mark.chars().enumerate()
-            .map(|(i, ch)| Span::styled(ch.to_string(), th.blend("magenta", "cyan", i, n).unwrap_or(th.accent.add_modifier(bold)))).collect();
+        let mut l1 = wordmark(th, phase);
         l1.push(Span::styled(format!("  {}", clean(&home_short(&self.cwd))), th.muted));
         if !self.connected {
             l1.push(Span::styled("  offline", th.error));
@@ -128,9 +133,9 @@ impl HeaderState {
         }).collect()
     }
 
-    pub fn lines(&self, th: &Theme, width: usize) -> [Line<'static>; 2] {
+    pub fn lines(&self, th: &Theme, width: usize, phase: f64) -> [Line<'static>; 2] {
         let sep = || Span::styled(format!(" {} ", th.glyphs.bullet), th.muted);
-        let mut a = vec![Span::styled("RaBbLE", th.accent.add_modifier(ratatui::style::Modifier::BOLD))];
+        let mut a = wordmark(th, phase);
         a.push(sep());
         a.push(Span::styled(if self.model.is_empty() { "default".to_owned() } else { clean(&self.model) }, th.secondary));
         a.push(sep());
@@ -172,12 +177,12 @@ impl HeaderState {
         [clipw(a), clipw(b)]
     }
 
-    /// `face_slot`: leave the left `FACE_SLOT_WIDTH` columns (and a one-column gap) to the face mark and
-    /// centre the two lines against it.
-    pub fn draw(&self, area: Rect, buf: &mut Buffer, th: &Theme, face_slot: bool) {
-        let slot = if face_slot { (FACE_SLOT_WIDTH + 1).min(area.width) } else { 0 };
+    /// `face_slot`: leave the left `face_slot` columns (and a one-column gap) to the face mark (0 = no mark);
+    /// `rich`: the full mark's six info lines, else the two-line header.
+    pub fn draw(&self, area: Rect, buf: &mut Buffer, th: &Theme, face_slot: u16, rich: bool, phase: f64) {
+        let slot = if face_slot > 0 { (face_slot + 1).min(area.width) } else { 0 };
         let (x0, w) = (area.x + slot, area.width.saturating_sub(slot));
-        let lines: Vec<Line<'static>> = if face_slot { self.rich_lines(th, w as usize, usage::now()) } else { self.lines(th, w as usize).into() };
+        let lines: Vec<Line<'static>> = if rich { self.rich_lines(th, w as usize, usage::now(), phase) } else { self.lines(th, w as usize, phase).into() };
         for (i, l) in lines.iter().enumerate().take(area.height as usize) {
             buf.set_line(x0, area.y + i as u16, l, w);
         }
@@ -206,12 +211,39 @@ mod tests {
     use crate::theme::Glyphs;
 
     #[test]
+    fn a_narrower_slot_gives_the_lines_the_rest_and_the_wordmark_flows_at_every_size() {
+        let pal = rabble_theme::Palette::parse("  bg: \"#0a0010\"\n  surface: \"#101018\"\n  text: \"#e8e6f0\"\n  muted: \"#6b6880\"\n  magenta: \"#ff2bd6\"\n  cyan: \"#00f5ff\"\n  violet: \"#8a4dff\"\n  pink: \"#ff7ab8\"\n");
+        let th = Theme::new(Some(&pal), false, Glyphs::FANCY);
+        let h = HeaderState { model: "opus".into(), mode: "default".into(), trust: "strict".into(), cwd: "/x".into(), connected: true, ..Default::default() };
+        let area = Rect::new(0, 0, 40, 6);
+        let colours = |slot: u16, rich: bool, phase: f64| {
+            let mut buf = Buffer::empty(area);
+            h.draw(Rect { height: 2, ..area }, &mut buf, &th, slot, rich, phase);
+            let x0 = if slot > 0 { slot + 1 } else { 0 };
+            let row: String = (0..40).map(|x| buf[(x, 0)].symbol().to_owned()).collect();
+            assert_eq!(&row[x0 as usize..x0 as usize + 6], "RaBbLE", "{slot}/{rich}: {row:?}");
+            ((0..6).map(|i| buf[(x0 + i, 0)].fg).collect::<Vec<_>>(), row)
+        };
+        for phase in [0.0, 0.3] {
+            let (full, _) = colours(24, true, phase);
+            let (compact, crow) = colours(8, false, phase);
+            let (plain, prow) = colours(0, false, phase);
+            assert_eq!(compact, full, "compact wordmark colours match the full tier at phase {phase}");
+            assert_eq!(plain, full, "plain wordmark colours match the full tier at phase {phase}");
+            assert_ne!(full[0], full[5], "the blend runs along the letters");
+            assert!(crow.starts_with("         RaBbLE") && prow.starts_with("RaBbLE"));
+            assert!(crow.contains("opus") && crow.len() == prow.len());
+        }
+        assert_ne!(colours(0, false, 0.0).0, colours(0, false, 0.3).0, "the flow moves with the phase");
+    }
+
+    #[test]
     fn narrow_headers_drop_trailing_fields_not_wrap() {
         let th = Theme::new(None, true, Glyphs::SAFE);
         let h = HeaderState { model: "opus".into(), mode: "default".into(), trust: "strict".into(), cwd: "/x".into(), context_pct: Some(91.0), cost: Some(1.5), connected: true, ..Default::default() };
-        let wide: String = h.lines(&th, 100)[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        let wide: String = h.lines(&th, 100, 0.0)[1].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(wide.contains("ctx 91%") && wide.contains("$1.50"));
-        let narrow = h.lines(&th, 8);
+        let narrow = h.lines(&th, 8, 0.0);
         assert!(spans_width(&narrow[0].spans) <= 8 || narrow[0].spans.len() == 1);
     }
 
@@ -219,7 +251,7 @@ mod tests {
     fn offline_is_flagged() {
         let th = Theme::new(None, true, Glyphs::SAFE);
         let h = HeaderState::default();
-        let a: String = h.lines(&th, 100)[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        let a: String = h.lines(&th, 100, 0.0)[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(a.contains("offline"));
     }
 }

@@ -30,7 +30,7 @@ use crate::{
         header::{draw_divider, HeaderState},
         modal::{Ask, Permission, Picked, Picker, Reply},
         transcript::{Transcript, View},
-        FACE_MIN_AREA, FACE_ROWS,
+        FACE_COMPACT_MIN_AREA, FACE_COMPACT_ROWS, FACE_COMPACT_SLOT_WIDTH, FACE_MIN_AREA, FACE_ROWS, FACE_SLOT_WIDTH,
     },
 };
 
@@ -1377,8 +1377,12 @@ impl App {
             return;
         }
         // the header grows to the mark's six rows when the pane is big enough for it
-        let face_on = self.face.is_some() && a.width >= FACE_MIN_AREA.0 && a.height >= FACE_MIN_AREA.1;
+        let has_face = self.face.is_some();
+        let face_on = has_face && a.width >= FACE_MIN_AREA.0 && a.height >= FACE_MIN_AREA.1;
+        // smaller panes keep a compact mark in the two-row header; tiny ones drop it
+        let compact = has_face && !face_on && a.width >= FACE_COMPACT_MIN_AREA.0 && a.height >= FACE_COMPACT_MIN_AREA.1;
         let hh = if face_on { FACE_ROWS } else { 2 };
+        let (mark_w, mark_h) = if face_on { (FACE_SLOT_WIDTH, FACE_ROWS) } else { (FACE_COMPACT_SLOT_WIDTH, FACE_COMPACT_ROWS) };
         let top = hh + 1;
         let comp_h = self.composer.height(a.width).min(a.height.saturating_sub(top + 1));
         let tr_h = a.height.saturating_sub(top + comp_h);
@@ -1395,18 +1399,20 @@ impl App {
         self.t.layout(&self.th, a.width, tr_h);
         self.gz.newest = self.t.newest_line();
         let buf = f.buffer_mut();
-        self.header.draw(ha, buf, &self.th, face_on);
+        self.header.draw(ha, buf, &self.th, if face_on || compact { mark_w } else { 0 }, face_on, phase);
         draw_divider(da, buf, &self.th, self.busy_label(), phase);
         ratatui::widgets::Widget::render(View(&self.t), ta, buf);
         self.gz.centres = [None, None];
         self.gz.modal = None;
         if let Some(hub) = &mut self.face {
-            hub.mini_visible = face_on;
-            if face_on {
-                self.gz.centres[0] = Some((ha.x as f64 + crate::widgets::FACE_SLOT_WIDTH.min(a.width) as f64 / 2.0, ha.y as f64 + FACE_ROWS as f64 / 2.0));
-            }
-            if face_on {
-                hub.mini.draw(Rect { width: crate::widgets::FACE_SLOT_WIDTH.min(a.width), height: FACE_ROWS, ..ha }, buf, &self.th, 0);
+            hub.mini_visible = face_on || compact;
+            if face_on || compact {
+                // the mark is rebuilt only when the tier flips; a refit must not paint one blank frame
+                if hub.mini.fit(mark_w as usize, mark_h as usize) {
+                    hub.mini.tick(Instant::now());
+                }
+                self.gz.centres[0] = Some((ha.x as f64 + mark_w.min(a.width) as f64 / 2.0, ha.y as f64 + mark_h as f64 / 2.0));
+                hub.mini.draw(Rect { width: mark_w.min(a.width), height: mark_h, ..ha }, buf, &self.th, 0);
             }
             // the full face (`/face`) fills the room reserved for it in the transcript
             if !self.t.has_face() {
@@ -2033,9 +2039,36 @@ mod tests {
         let row = |y: u16| -> String { (0..60).map(|x| big[(25 + x, y)].symbol().to_owned()).collect() };
         assert!(row(2).contains("capability") && row(4).contains("usage") && row(5).contains("API equiv"), "Python's six info lines: {:?}", (2..6).map(row).collect::<Vec<_>>());
         let (mut b, _rx) = face_app();
-        let small = paint_face(&mut b, 50, 18);
-        assert!(small[(0, 0)].symbol() == "R", "a small pane keeps the two-row header: {:?}", small[(0, 0)].symbol());
+        let tiny = paint_face(&mut b, 28, 18);
+        assert!(tiny[(0, 0)].symbol() == "R", "a tiny pane keeps the plain two-row header: {:?}", tiny[(0, 0)].symbol());
         assert_eq!(b.face_due(), None, "a hidden mark costs nothing");
+        let (mut c, _rx) = face_app();
+        let short = paint_face(&mut c, 80, 9);
+        assert!(short[(0, 0)].symbol() == "R" && c.face_due().is_none(), "too short for even the compact mark");
+    }
+
+    fn mark_cells(buf: &ratatui::buffer::Buffer, w: u16, h: u16) -> usize {
+        (0..w).flat_map(|x| (0..h).map(move |y| (x, y))).filter(|&(x, y)| buf[(x, y)].symbol() != " ").count()
+    }
+
+    #[test]
+    fn a_small_pane_gets_the_compact_mark_and_the_full_tier_is_unchanged() {
+        let (mut a, _rx) = face_app();
+        let small = paint_face(&mut a, 40, 12);
+        assert!(mark_cells(&small, 8, 2) > 4, "compact mark in the 8x2 slot");
+        let row: String = (0..30).map(|x| small[(9 + x, 0)].symbol().to_owned()).collect();
+        assert!(row.starts_with("RaBbLE"), "text reflows beside it: {row:?}");
+        assert!(a.face_due().is_some());
+        assert_eq!(a.gz.centres[0], Some((4.0, 1.0)), "gaze centre follows the compact slot");
+        assert_eq!(a.tr_rect.y, 3, "two header rows + divider, as before");
+        let (mut b, _rx) = face_app();
+        let edge = paint_face(&mut b, 30, 10);
+        assert!(mark_cells(&edge, 8, 2) > 4, "minimum compact pane");
+        let (mut c, _rx) = face_app();
+        let big = paint_face(&mut c, 100, 40);
+        assert!(mark_cells(&big, 24, 6) > 20 && c.gz.centres[0] == Some((12.0, 3.0)) && c.tr_rect.y == 7);
+        // dump for the report
+        for y in 0..2 { eprintln!("COMPACT|{}", (0..40).map(|x| small[(x, y)].symbol().to_owned()).collect::<String>()); }
     }
 
     #[test]
