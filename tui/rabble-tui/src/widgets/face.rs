@@ -61,6 +61,8 @@ fn query_cell_aspect() -> f64 {
 /// One face (mini or full) with its clock, eased pose, caches and the latest cells.
 pub struct FaceView {
     detail: Detail,
+    /// The two-row header tier: `rabble_face::micro` draws two eye pills instead of a downscaled face.
+    micro: bool,
     pal: FacePalette,
     safe: bool,
     face: Option<Face>,
@@ -81,7 +83,7 @@ pub struct FaceView {
 impl FaceView {
     pub fn new(pal: FacePalette, detail: Detail, safe: bool, now: Instant) -> FaceView {
         FaceView {
-            detail, pal, safe, face: None, size: (0, 0), aspect: 2.0, fixed_aspect: None, driver: Driver::new(), t0: now, provider: None, base: None, base_at: f64::NEG_INFINITY,
+            detail, micro: false, pal, safe, face: None, size: (0, 0), aspect: 2.0, fixed_aspect: None, driver: Driver::new(), t0: now, provider: None, base: None, base_at: f64::NEG_INFINITY,
             layer: None, cells: Vec::new(), next: now, frames: 0,
         }
     }
@@ -114,6 +116,18 @@ impl FaceView {
             (self.face, self.base, self.layer) = (None, None, None);
             self.cells.clear();
             self.next = self.t0; // due at once
+        }
+        changed
+    }
+
+    /// Switch the micro mark on or off. Returns true when it changed (cells are dropped, the caller ticks at once).
+    pub fn set_micro(&mut self, on: bool) -> bool {
+        let changed = self.micro != on;
+        if changed {
+            self.micro = on;
+            (self.face, self.base, self.layer) = (None, None, None);
+            self.cells.clear();
+            self.next = self.t0;
         }
         changed
     }
@@ -155,6 +169,16 @@ impl FaceView {
     pub fn tick(&mut self, now: Instant) -> bool {
         self.next = now + Duration::from_secs_f64(1.0 / self.fps());
         let (cols, rows) = self.size;
+        if self.micro {
+            let t = now.saturating_duration_since(self.t0).as_secs_f64();
+            let (blink, gaze) = self.driver.tick(t, t);
+            let raw = rabble_face::micro::micro(&self.pal, blink, gaze, self.safe);
+            let cells = degrade(&raw, self.driver.breaking, &self.pal, &mut self.driver.rng, &mut self.driver.glitch, self.driver.noise);
+            self.frames += 1;
+            let changed = cells != self.cells;
+            self.cells = cells;
+            return changed;
+        }
         if self.face.is_none() {
             if self.detail == Detail::Full && (cols < 4 || rows < 2) || cols == 0 || rows == 0 {
                 return false;

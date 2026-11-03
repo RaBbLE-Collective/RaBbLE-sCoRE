@@ -6,6 +6,7 @@ pub mod degrade;
 pub mod driver;
 pub mod eyes;
 pub mod face;
+pub mod micro;
 pub mod prng;
 
 pub use canvas::{ansi, Canvas, Cell, Grid};

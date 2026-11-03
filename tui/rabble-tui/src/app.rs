@@ -1408,7 +1408,8 @@ impl App {
             hub.mini_visible = face_on || compact;
             if face_on || compact {
                 // the mark is rebuilt only when the tier flips; a refit must not paint one blank frame
-                if hub.mini.fit(mark_w as usize, mark_h as usize) {
+                let flipped = hub.mini.set_micro(!face_on);
+                if hub.mini.fit(mark_w as usize, mark_h as usize) || flipped {
                     hub.mini.tick(Instant::now());
                 }
                 self.gz.centres[0] = Some((ha.x as f64 + mark_w.min(a.width) as f64 / 2.0, ha.y as f64 + mark_h as f64 / 2.0));
@@ -2055,15 +2056,15 @@ mod tests {
     fn a_small_pane_gets_the_compact_mark_and_the_full_tier_is_unchanged() {
         let (mut a, _rx) = face_app();
         let small = paint_face(&mut a, 40, 12);
-        assert!(mark_cells(&small, 8, 2) > 4, "compact mark in the 8x2 slot");
-        let row: String = (0..30).map(|x| small[(9 + x, 0)].symbol().to_owned()).collect();
+        assert!(mark_cells(&small, 7, 2) > 4, "compact mark in the 7x2 slot");
+        let row: String = (0..30).map(|x| small[(8 + x, 0)].symbol().to_owned()).collect();
         assert!(row.starts_with("RaBbLE"), "text reflows beside it: {row:?}");
         assert!(a.face_due().is_some());
-        assert_eq!(a.gz.centres[0], Some((4.0, 1.0)), "gaze centre follows the compact slot");
+        assert_eq!(a.gz.centres[0], Some((3.5, 1.0)), "gaze centre follows the compact slot");
         assert_eq!(a.tr_rect.y, 3, "two header rows + divider, as before");
         let (mut b, _rx) = face_app();
         let edge = paint_face(&mut b, 30, 10);
-        assert!(mark_cells(&edge, 8, 2) > 4, "minimum compact pane");
+        assert!(mark_cells(&edge, 7, 2) > 4, "minimum compact pane");
         let (mut c, _rx) = face_app();
         let big = paint_face(&mut c, 100, 40);
         assert!(mark_cells(&big, 24, 6) > 20 && c.gz.centres[0] == Some((12.0, 3.0)) && c.tr_rect.y == 7);
