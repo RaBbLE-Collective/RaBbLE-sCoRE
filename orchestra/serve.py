@@ -13,7 +13,7 @@ protocol v1.1 freeze: HANDOFF-S295-RaBbLE-UI-Rust-Phase2-Parallel.md.
   up:    hello{version,client}, list_sessions, create_session{cwd,resume,continue,model,mode,
          crew,trust,provider}, attach{session,since_seq?}, detach{session}, close_session{session},
          grant{session,principal,role}, revoke{session,principal}, send{session,text},
-         interrupt, answer{ask_id,decision,reason}, set_model{model}, set_permission_mode{mode},
+         interrupt, answer{ask_id,decision,reason,answers?}, set_model{model}, set_permission_mode{mode},
          set_trust{profile}, stop_task{task_id}
 
 Versioning: additive changes never bump `version` (hello.features says what this engine has); an
@@ -560,7 +560,9 @@ class Server:
             decision = msg.get("decision")
             if decision not in DECISIONS:
                 return self.error(conn, f"decision must be one of {', '.join(DECISIONS)}", s.id, rid)
-            reply = ev.PermissionReply(decision, str(msg.get("reason", "")))
+            raw = msg.get("answers")
+            answers = {str(k): str(v) for k, v in raw.items()} if isinstance(raw, dict) else None
+            reply = ev.PermissionReply(decision, str(msg.get("reason", "")), answers)
             if b.answer(str(msg["ask_id"]), reply):
                 s.publish(ev.PermissionResolved(str(msg["ask_id"]), reply.decision, conn.principal.id))
             else:

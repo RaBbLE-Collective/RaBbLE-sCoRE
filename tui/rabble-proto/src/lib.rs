@@ -340,6 +340,8 @@ pub enum Up {
         ask_id: String,
         decision: Decision,
         #[serde(default, skip_serializing_if = "String::is_empty")] reason: String,
+        /// AskUserQuestion: question text → the chosen label (several joined by ", ").
+        #[serde(default, skip_serializing_if = "Option::is_none")] answers: Option<std::collections::BTreeMap<String, String>>,
     },
     SetModel { session: String, model: Option<String> },
     SetPermissionMode { session: String, mode: String },
@@ -504,7 +506,7 @@ mod tests {
         assert_eq!(Up::Hello { version: PROTOCOL, client: "rabble-tui".into() }.to_line(), "{\"type\":\"hello\",\"version\":1,\"client\":\"rabble-tui\"}\n");
         let create = Up::CreateSession { cwd: Some("/w".into()), resume: None, continue_last: Some(true), model: None, mode: None, crew: None, trust: None, provider: None };
         assert_eq!(create.to_line(), "{\"type\":\"create_session\",\"cwd\":\"/w\",\"continue\":true}\n");
-        let a = Up::Answer { session: "s1".into(), ask_id: "a1".into(), decision: Decision::AllowSession, reason: String::new() };
+        let a = Up::Answer { session: "s1".into(), ask_id: "a1".into(), decision: Decision::AllowSession, reason: String::new(), answers: None };
         assert_eq!(a.to_line(), "{\"type\":\"answer\",\"session\":\"s1\",\"ask_id\":\"a1\",\"decision\":\"allow_session\"}\n");
         assert_eq!(Up::ListSessions {}.to_line(), "{\"type\":\"list_sessions\"}\n");
         assert_eq!(serde_json::from_str::<Up>(&Up::SetTrust { session: "s".into(), profile: None }.to_line()).unwrap(), Up::SetTrust { session: "s".into(), profile: None });

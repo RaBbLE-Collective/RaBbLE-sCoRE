@@ -214,7 +214,8 @@ class RemoteBackend(_Queued):
         self._cmd("interrupt")
 
     def answer(self, ask_id: str, reply: ev.PermissionReply) -> bool:
-        self._cmd("answer", ask_id=ask_id, decision=reply.decision, reason=reply.reason)
+        self._cmd("answer", ask_id=ask_id, decision=reply.decision, reason=reply.reason,
+                  **({"answers": reply.answers} if reply.answers else {}))
         return True                                  # the first answer wins engine-side; PermissionResolved follows
 
     async def set_model(self, model: str | None) -> None:

@@ -80,7 +80,7 @@ impl Handle {
     }
 
     pub fn deny(&self, session: &str, ask_id: &str) {
-        self.send(&Up::Answer { session: session.into(), ask_id: ask_id.into(), decision: Decision::Deny, reason: "rabble-tui probe denies".into() });
+        self.send(&Up::Answer { session: session.into(), ask_id: ask_id.into(), decision: Decision::Deny, reason: "rabble-tui probe denies".into(), answers: None });
     }
 }
 

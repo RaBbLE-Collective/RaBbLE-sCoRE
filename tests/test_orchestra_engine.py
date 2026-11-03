@@ -158,6 +158,19 @@ def test_permission_ask_round_trip():
     asyncio.run(go())
 
 
+def test_a_question_answer_rides_back_in_the_tool_input():
+    async def go():
+        perms = Permissions(lambda e: None, lambda a: ev.LEAD)
+        qs = {"questions": [{"question": "Which db?", "options": []}]}
+        task = asyncio.create_task(perms.can_use_tool("AskUserQuestion", qs, ctx()))
+        await asyncio.sleep(0)
+        perms.answer("t1", ev.PermissionReply("allow", "", {"Which db?": "sqlite"}))
+        res = await task
+        assert isinstance(res, sdk.PermissionResultAllow)
+        assert res.updated_input == {**qs, "answers": {"Which db?": "sqlite"}}
+    asyncio.run(go())
+
+
 def test_deny_all_releases_every_ask():
     async def go():
         perms = Permissions(lambda e: None, lambda a: ev.LEAD)

@@ -758,7 +758,7 @@ impl App {
     fn answer(&mut self, r: Reply) {
         let Overlay::Permission(p) = std::mem::replace(&mut self.overlay, Overlay::None) else { return };
         let (id, decision) = (p.ask.id.clone(), r.decision.clone());
-        self.to_session("answer", |s| Up::Answer { session: s, ask_id: id, decision: r.decision, reason: r.reason });
+        self.to_session("answer", |s| Up::Answer { session: s, ask_id: id, decision: r.decision, reason: r.reason, answers: r.answers });
         if decision == Decision::Deny {
             self.flash(Mood::Denied);
             self.notice(&format!("denied {}", p.ask.tool), true);

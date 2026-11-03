@@ -69,6 +69,9 @@ class Permissions:
             reply: ev.PermissionReply = await future
         finally:
             self._pending.pop(ask_id, None)
+        if tool == "AskUserQuestion" and reply.decision != "deny":
+            # the answers ride back inside the tool input; without them Claude never hears the reply
+            return PermissionResultAllow(updated_input={**tool_input, "answers": reply.answers or {}})
         if reply.decision == "allow":
             return PermissionResultAllow()
         if reply.decision == "allow_session":

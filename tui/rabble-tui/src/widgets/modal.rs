@@ -3,7 +3,7 @@
 //! opens so a keystroke meant for the composer cannot answer an ask nobody has read; Esc (deny)
 //! is never held back.
 
-use std::{cell::Cell, time::{Duration, Instant}};
+use std::{cell::Cell, collections::BTreeMap, time::{Duration, Instant}};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use rabble_proto::Decision;
@@ -29,6 +29,151 @@ pub struct Ask {
 pub struct Reply {
     pub decision: Decision,
     pub reason: String,
+    /// AskUserQuestion: question text → chosen label(s).
+    pub answers: Option<BTreeMap<String, String>>,
+}
+
+/// One AskUserQuestion question as the shell walks it.
+#[derive(Debug, Clone, PartialEq)]
+struct Q {
+    question: String,
+    header: String,
+    options: Vec<(String, String)>, // (label, description)
+    multi: bool,
+}
+
+/// The AskUserQuestion walk: one question at a time; the last row of each is "Other" (typed).
+#[derive(Debug, Clone, PartialEq)]
+struct Qs {
+    qs: Vec<Q>,
+    at: usize,
+    cursor: usize,
+    checked: Vec<bool>, // multi-select ticks, options only
+    other: Option<String>, // Some = typing a free answer
+    done: Vec<String>,  // answers to qs[..at]
+}
+
+impl Qs {
+    fn parse(i: &Map<String, Value>) -> Option<Qs> {
+        let qs: Vec<Q> = i.get("questions")?.as_array()?.iter().filter_map(|q| {
+            let q = q.as_object()?;
+            let options = q.get("options").and_then(Value::as_array).map(|o| o.iter().filter_map(|o| match o {
+                Value::String(l) => Some((l.clone(), String::new())),
+                Value::Object(m) => Some((s(m, "label").to_owned(), s(m, "description").to_owned())),
+                _ => None,
+            }).collect()).unwrap_or_default();
+            Some(Q { question: s(q, "question").to_owned(), header: s(q, "header").to_owned(), options, multi: q.get("multiSelect").and_then(Value::as_bool).unwrap_or(false) })
+        }).filter(|q| !q.question.is_empty()).collect();
+        (!qs.is_empty()).then(|| Qs { checked: vec![false; qs[0].options.len()], qs, at: 0, cursor: 0, other: None, done: Vec::new() })
+    }
+
+    fn rows(&self) -> usize {
+        self.qs[self.at].options.len() + 1 // + Other
+    }
+
+    /// Record an answer and move on; Some when the last question is answered.
+    fn finish(&mut self, ans: String) -> Option<Reply> {
+        self.done.push(ans);
+        self.at += 1;
+        self.cursor = 0;
+        self.other = None;
+        if self.at < self.qs.len() {
+            self.checked = vec![false; self.qs[self.at].options.len()];
+            return None;
+        }
+        let answers = self.qs.iter().map(|q| q.question.clone()).zip(self.done.iter().cloned()).collect();
+        Some(Reply { decision: Decision::Allow, reason: String::new(), answers: Some(answers) })
+    }
+
+    fn key(&mut self, k: KeyEvent) -> Option<Reply> {
+        let q = self.qs[self.at].clone();
+        let n = q.options.len();
+        if let Some(o) = &mut self.other {
+            match k.code {
+                KeyCode::Enter if !o.trim().is_empty() => {
+                    let typed = o.trim().to_owned();
+                    let ans = if q.multi {
+                        let mut v: Vec<String> = q.options.iter().zip(&self.checked).filter(|(_, c)| **c).map(|((l, _), _)| l.clone()).collect();
+                        v.push(typed);
+                        v.join(", ")
+                    } else {
+                        typed
+                    };
+                    return self.finish(ans);
+                }
+                KeyCode::Backspace => {
+                    if o.pop().is_none() {
+                        self.other = None; // empty: back to the list
+                    }
+                }
+                KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) => o.push(c),
+                _ => {}
+            }
+            return None;
+        }
+        let pick = |me: &mut Qs, i: usize| -> Option<Reply> {
+            if i == n {
+                me.other = Some(String::new());
+                None
+            } else if q.multi {
+                me.checked[i] = !me.checked[i];
+                None
+            } else {
+                me.finish(q.options[i].0.clone())
+            }
+        };
+        match k.code {
+            KeyCode::Up | KeyCode::Char('k') => self.cursor = self.cursor.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => self.cursor = (self.cursor + 1).min(self.rows() - 1),
+            KeyCode::Char(' ') if q.multi && self.cursor < n => self.checked[self.cursor] = !self.checked[self.cursor],
+            KeyCode::Char(c @ '1'..='9') if (c as usize - '1' as usize) < self.rows() => {
+                let i = c as usize - '1' as usize;
+                self.cursor = i;
+                return pick(self, i);
+            }
+            KeyCode::Enter if q.multi && self.cursor < n => {
+                // Enter confirms a multi-select once something is ticked; before that it ticks
+                if self.checked.iter().any(|c| *c) {
+                    let ans = q.options.iter().zip(&self.checked).filter(|(_, c)| **c).map(|((l, _), _)| l.clone()).collect::<Vec<_>>().join(", ");
+                    return self.finish(ans);
+                }
+                self.checked[self.cursor] = true;
+            }
+            KeyCode::Enter => return pick(self, self.cursor),
+            KeyCode::Left | KeyCode::Char('b') if self.at > 0 => {
+                self.at -= 1;
+                self.done.pop();
+                self.cursor = 0;
+                self.checked = vec![false; self.qs[self.at].options.len()];
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// The question as wrapped lines, and the line the cursor sits on.
+    fn lines(&self, inner: usize, th: &Theme) -> (Vec<Line<'static>>, usize) {
+        let q = &self.qs[self.at];
+        let mut out: Vec<Line<'static>> = Vec::new();
+        let head = if q.header.is_empty() { format!("Question {}/{}", self.at + 1, self.qs.len()) } else { format!("{} ({}/{})", q.header, self.at + 1, self.qs.len()) };
+        out.push(Line::from(Span::styled(clean(&head), th.accent)));
+        out.extend(wrap::wrap(&[Span::styled(clean(&q.question), th.heading)], inner, &[], &[]));
+        out.push(Line::default());
+        let mut cur = 0;
+        for i in 0..self.rows() {
+            let (label, desc) = q.options.get(i).cloned().unwrap_or(("Other (type your own answer)".to_owned(), String::new()));
+            let mark = if q.multi && i < q.options.len() { if self.checked[i] { "[x]" } else { "[ ]" } } else { "   " };
+            let st = if i == self.cursor { th.select } else { th.text };
+            if i == self.cursor {
+                cur = out.len();
+            }
+            out.push(Line::from(Span::styled(format!("{mark} {}. {}", i + 1, clean(&label)), st)));
+            if !desc.is_empty() {
+                out.extend(wrap::wrap(&[Span::styled(clean(&desc), th.muted)], inner.saturating_sub(7), &[Span::raw("       ")], &[Span::raw("       ")]));
+            }
+        }
+        (out, cur)
+    }
 }
 
 pub struct Permission {
@@ -41,6 +186,8 @@ pub struct Permission {
     /// refused until the whole body has been shown, so a prompt cannot be approved unread.
     scroll: Cell<usize>,
     max_scroll: Cell<usize>,
+    /// Some for an AskUserQuestion: the prompt is answered by picking, not by allow/deny.
+    qs: Option<Qs>,
 }
 
 fn s<'a>(m: &'a Map<String, Value>, k: &str) -> &'a str {
@@ -75,7 +222,8 @@ pub fn body_lines(ask: &Ask) -> Vec<String> {
 
 impl Permission {
     pub fn new(ask: Ask) -> Self {
-        Permission { ask, armed_at: Instant::now() + ARM, reason: None, scroll: Cell::new(0), max_scroll: Cell::new(0) }
+        let qs = if ask.tool == "AskUserQuestion" { Qs::parse(&ask.input) } else { None };
+        Permission { ask, armed_at: Instant::now() + ARM, reason: None, scroll: Cell::new(0), max_scroll: Cell::new(0), qs }
     }
 
     pub fn armed(&self) -> bool {
@@ -101,13 +249,16 @@ impl Permission {
 
     /// `key` with an explicit clock (tests drive time without sleeping).
     pub fn key_at(&mut self, k: KeyEvent, now: Instant) -> Option<Reply> {
-        let deny = |reason: &str| Some(Reply { decision: Decision::Deny, reason: reason.to_owned() });
+        let deny = |reason: &str| Some(Reply { decision: Decision::Deny, reason: reason.to_owned(), answers: None });
         if k.code == KeyCode::Esc {
             return deny(""); // deny is never held back
         }
         if now < self.armed_at {
             self.armed_at = now + ARM; // somebody is typing: wait for quiet
             return None;
+        }
+        if let Some(qs) = &mut self.qs {
+            return qs.key(k);
         }
         if let Some(r) = &mut self.reason {
             match k.code {
@@ -127,8 +278,8 @@ impl Permission {
             KeyCode::PageUp => self.scroll.set(self.scroll.get().saturating_sub(page)),
             KeyCode::PageDown => self.scroll.set((self.scroll.get() + page).min(self.max_scroll.get())),
             KeyCode::Char('n' | '3') => self.reason = Some(String::new()),
-            KeyCode::Char('y' | '1') if self.read_to_the_end() => return Some(Reply { decision: Decision::Allow, reason: String::new() }),
-            KeyCode::Char('a' | '2') if self.read_to_the_end() => return Some(Reply { decision: Decision::AllowSession, reason: String::new() }),
+            KeyCode::Char('y' | '1') if self.read_to_the_end() => return Some(Reply { decision: Decision::Allow, reason: String::new(), answers: None }),
+            KeyCode::Char('a' | '2') if self.read_to_the_end() => return Some(Reply { decision: Decision::AllowSession, reason: String::new(), answers: None }),
             _ => {}
         }
         None
@@ -152,11 +303,26 @@ impl Permission {
             top.push(Line::from(Span::styled(format!("path: {}", clean(p)), th.warn)));
         }
         let mut body: Vec<Line<'static>> = Vec::new();
-        for l in body_lines(&self.ask) {
+        let mut cursor_line = None;
+        if let Some(qs) = &self.qs {
+            let (l, c) = qs.lines(inner, th);
+            body = l;
+            cursor_line = Some(c);
+        }
+        for l in if self.qs.is_some() { Vec::new() } else { body_lines(&self.ask) } {
             let st = if l.starts_with('-') && self.ask.tool.contains("Edit") { th.error } else if l.starts_with('+') && self.ask.tool.contains("Edit") { th.ok } else { th.code };
             body.extend(wrap::wrap(&[Span::styled(clean(&l), st)], inner, &[], &[Span::raw("  ")]));
         }
-        let controls = if let Some(r) = &self.reason {
+        let controls = if let Some(qs) = &self.qs {
+            if !self.armed() {
+                vec![Line::from(Span::styled("read it first ...", th.muted))]
+            } else if let Some(o) = &qs.other {
+                vec![Line::from(vec![Span::styled("your answer> ", th.accent), Span::styled(format!("{}_", clean(o)), th.text)]), Line::from(Span::styled("Enter sends, Backspace on empty goes back, Esc declines", th.muted))]
+            } else {
+                let more = if qs.qs[qs.at].multi { "Space tick  Enter confirm" } else { "Enter pick" };
+                vec![Line::from(Span::styled(format!("Up/Down move  1-9 jump  {more}  Left back  Esc decline"), th.muted))]
+            }
+        } else if let Some(r) = &self.reason {
             vec![Line::from(vec![Span::styled("reason> ", th.accent), Span::styled(format!("{}_", clean(r)), th.text)]), Line::from(Span::styled("Enter denies with this reason, Esc denies", th.muted))]
         } else if !self.armed() {
             vec![Line::from(Span::styled("read it first ...", th.muted))]
@@ -173,6 +339,14 @@ impl Permission {
         let max = body.len().saturating_sub(rows);
         self.max_scroll.set(max);
         self.scroll.set(self.scroll.get().min(max));
+        if let Some(c) = cursor_line {
+            // the cursor row is always on screen
+            if c < self.scroll.get() {
+                self.scroll.set(c);
+            } else if rows > 0 && c >= self.scroll.get() + rows {
+                self.scroll.set(c + 1 - rows);
+            }
+        }
         let from = self.scroll.get();
         let mut shown: Vec<Line<'static>> = body.into_iter().skip(from).take(rows).collect();
         if marker {
@@ -338,7 +512,7 @@ mod tests {
         keys.iter().find_map(|k| p.key(key(*k)))
     }
     fn rep(d: Decision, r: &str) -> Option<Reply> {
-        Some(Reply { decision: d, reason: r.into() })
+        Some(Reply { decision: d, reason: r.into(), answers: None })
     }
     fn bash() -> Ask {
         ask("Bash", serde_json::json!({"command": "ls"}))
@@ -539,5 +713,49 @@ mod tests {
         let mut b = Buffer::empty(area);
         armed(a).draw(area, &mut b, &th());
         assert!(b.content().iter().all(|c| !c.symbol().chars().any(char::is_control)));
+    }
+
+    fn asking() -> Ask {
+        ask("AskUserQuestion", serde_json::json!({"questions": [
+            {"question": "Which db?", "header": "DB", "multiSelect": false, "options": [{"label": "sqlite", "description": "local"}, {"label": "postgres", "description": "server"}]},
+            {"question": "Which extras?", "header": "Extras", "multiSelect": true, "options": [{"label": "tests", "description": ""}, {"label": "docs", "description": ""}]}
+        ]}))
+    }
+
+    #[test]
+    fn a_question_is_answered_by_picking_and_the_answers_go_back() {
+        let mut p = armed(asking());
+        assert_eq!(drive(&mut p, &[KeyCode::Char('y')]), None, "y does not answer a question");
+        let keys = [KeyCode::Down, KeyCode::Enter, KeyCode::Char(' '), KeyCode::Down, KeyCode::Char(' '), KeyCode::Enter];
+        let r = drive(&mut p, &keys).expect("answered");
+        assert_eq!(r.decision, Decision::Allow);
+        let a = r.answers.unwrap();
+        assert_eq!(a["Which db?"], "postgres");
+        assert_eq!(a["Which extras?"], "tests, docs");
+    }
+
+    #[test]
+    fn a_number_picks_and_other_takes_typed_text_and_esc_declines() {
+        let mut p = armed(asking());
+        p.key(key(KeyCode::Char('1')));
+        let mut keys = vec![KeyCode::Char('3')];
+        keys.extend("ok".chars().map(KeyCode::Char));
+        keys.push(KeyCode::Enter);
+        let a = drive(&mut p, &keys).unwrap().answers.unwrap();
+        assert_eq!((a["Which db?"].as_str(), a["Which extras?"].as_str()), ("sqlite", "ok"));
+        let mut p = armed(asking());
+        assert_eq!(drive(&mut p, &[KeyCode::Esc]), rep(Decision::Deny, ""));
+    }
+
+    #[test]
+    fn a_question_draws_its_options_and_keeps_the_cursor_on_screen() {
+        let mut p = armed(asking());
+        let text = screen(&p, 80, 20).join("\n");
+        assert!(text.contains("Which db?") && text.contains("1. sqlite") && text.contains("Other"), "{text}");
+        p.key(key(KeyCode::Down));
+        p.key(key(KeyCode::Down));
+        for rows in [20u16, 9, 8] {
+            assert!(screen(&p, 80, rows).join("\n").contains("3. Other"), "cursor visible at {rows} rows");
+        }
     }
 }

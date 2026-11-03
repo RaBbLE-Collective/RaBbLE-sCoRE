@@ -180,6 +180,7 @@ class PermissionReply:
     """The face's answer to a PermissionAsk. Not an event: it flows face → engine."""
     decision: Decision
     reason: str = ""
+    answers: dict[str, str] | None = None   # AskUserQuestion: question text → chosen label(s)
 
 
 # ── organs ──────────────────────────────────────────────────────────────────
