@@ -961,6 +961,12 @@ def blend_pose(a, b, p):
     return {part: {k: a[part][k] + (b[part][k] - a[part][k]) * p for k in a[part]} for part in a}
 
 
+def compact_mark(pal, cols=8, rows=2):
+    """The header's small-tier mark. Today the mini face scaled to cols x rows (2:1 cells); this is the one hook
+    to swap for the dedicated micro glyph the Rust shell is getting."""
+    return Face(cols, rows, pal, detail="mini")
+
+
 class FaceWidget(Widget):
     """RaBbLE's face. "mini" is a fixed 24x6 mark; "full" fills its container."""
 
@@ -972,6 +978,7 @@ class FaceWidget(Widget):
     def __init__(self, detail="mini", *, name=None, id=None, classes=None):
         super().__init__(name=name, id=id, classes=classes)
         self.detail = detail
+        self.mark = (24, 6)   # the mini mark's cells (cols, rows); the header refits it per tier
         if detail == "full":
             self.add_class("-full")
         self._pal = load_palette()
@@ -1022,9 +1029,22 @@ class FaceWidget(Widget):
             self._aspect = cell_aspect()
             face = Face(cols, rows, self._pal, detail="full", cell_aspect=self._aspect)
         else:
-            face = Face(24, 6, self._pal, detail="mini")
+            face = compact_mark(self._pal, *self.mark) if self.mark != (24, 6) else Face(24, 6, self._pal, detail="mini")
         face.set_provider(self.provider)
         return face
+
+    def fit(self, cols, rows):
+        """Resize the mini mark to cols x rows cells (the header's tiers); geometry derives from rows at the 2:1
+        cell shape. Rebuilt only when the size changes, and ticked once at once so no blank frame is shown.
+        Returns whether it changed."""
+        if self.detail == "full" or self.mark == (cols, rows):
+            return False
+        self.mark = (cols, rows)
+        self.styles.width, self.styles.height = cols, rows
+        self.face, self._base, self._layer = None, None, None
+        if self._loop is not None:
+            self._tick()
+        return True
 
     def on_mount(self):
         self._loop = asyncio.get_running_loop()
@@ -1058,6 +1078,8 @@ class FaceWidget(Widget):
         return self._to_expr if self._blend > 0.5 else self._from_expr
 
     def _tick(self):
+        if not self.display:
+            return   # a hidden mark costs nothing
         now = time.monotonic()
         t, dt = now - self._t0, now - self._last
         self._last = now

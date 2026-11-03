@@ -24,6 +24,20 @@ def _rgb(hex_):
     return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
 
 
+_T0 = time.monotonic()   # one clock for every flowing thing (the divider, the header wordmark), so they move in step
+
+
+def phase_now() -> float:
+    return (time.monotonic() - _T0) * SPEED
+
+
+def flow_colour(a, b, x: int, width: int, phase: float) -> tuple[int, int, int]:
+    """Colour of column x of width on the cyan(a) -> magenta(b) -> cyan bounce: a cosine, so no hard seam.
+    The Rust twin is `Theme::flow`."""
+    w = 0.5 - 0.5 * math.cos(math.tau * (x / max(width, 1) * CYCLES - phase))
+    return tuple(round(p + (q - p) * w) for p, q in zip(a, b))
+
+
 class Divider(Widget):
     DEFAULT_CSS = "Divider { height: 1; width: 1fr; }"
 
@@ -31,20 +45,21 @@ class Divider(Widget):
         super().__init__(**kw)
         pal = theme.load_palette()
         self._a, self._b = _rgb(pal["cyan"]), _rgb(pal["magenta"])
-        self._t0 = time.monotonic()
         self._phase = 0.0
+        self.follow = []   # callables(phase): repainted on this tick, so the wordmark flows with the line
 
     def on_mount(self) -> None:
         self.set_interval(1 / FPS, self._tick)
 
     def _tick(self) -> None:
-        self._phase = (time.monotonic() - self._t0) * SPEED
+        self._phase = phase_now()
         self.refresh()
+        for fn in self.follow:
+            fn(self._phase)
 
     def colour(self, x: int, width: int, phase: float) -> tuple[int, int, int]:
         """Colour of column x: a cosine bounce between the two poles, so no hard seam anywhere."""
-        w = 0.5 - 0.5 * math.cos(math.tau * (x / max(width, 1) * CYCLES - phase))
-        return tuple(round(a + (b - a) * w) for a, b in zip(self._a, self._b))
+        return flow_colour(self._a, self._b, x, width, phase)
 
     def render_line(self, y: int) -> Strip:
         width = self.size.width

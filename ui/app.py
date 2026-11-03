@@ -28,7 +28,7 @@ from ui import gaze  # noqa: E402
 from ui.prefs import MODELS, MODES as PREF_MODES, Settings, resolve_model  # noqa: E402
 from ui.widgets.composer import Composer, Prompt, copy_to_system  # noqa: E402
 from ui.widgets.divider import Divider  # noqa: E402
-from ui.widgets.header import Header  # noqa: E402
+from ui.widgets.header import Header, tier_for  # noqa: E402
 from ui.widgets.transcript import Transcript  # noqa: E402
 
 MODES = list(PREF_MODES)
@@ -121,8 +121,10 @@ class RabbleApp(App):
         self.transcript = Transcript(self.organ_color)
         self.caps: ev.Capabilities | None = None
         self.prompt = Prompt(self.cwd, sorted(COMMANDS))
+        self.divider = Divider()
+        self.divider.follow.append(self.header.flow)   # the wordmark flows on the divider's tick
         yield self.header
-        yield Divider()
+        yield self.divider
         yield self.transcript
         yield self.prompt
 
@@ -130,7 +132,15 @@ class RabbleApp(App):
     def composer(self) -> Composer:
         return self.prompt.composer
 
+    def on_resize(self, event) -> None:
+        self._fit_header(event.size.width, event.size.height)
+
+    def _fit_header(self, width: int, height: int) -> None:
+        h = self.header
+        h.set_tier(tier_for(width, height, hasattr(self.face, "fit")), width)
+
     async def on_mount(self) -> None:
+        self._fit_header(self.size.width, self.size.height)
         self._poll_usage()
         self._usage_timer = self.set_interval(USAGE_EVERY, self._poll_usage)
         self._gaze_timer = self.set_interval(gaze.EVERY, self._gaze_tick)
@@ -738,7 +748,7 @@ class RabbleApp(App):
 
     async def _rebuild_ui(self) -> None:
         keep = (self.header.export_state(), list(self.transcript.shown), self.composer.text, list(self.composer._history))
-        for w in (self.header, self.transcript, self.prompt):
+        for w in (self.header, self.divider, self.transcript, self.prompt):
             await w.remove()
         palette = _optional("ui.theme", "load_palette")
         self.palette = palette() if palette else {}
@@ -750,6 +760,7 @@ class RabbleApp(App):
         await self.mount(*widgets)
         state, log, draft, history = keep
         self.header.import_state(state)
+        self._fit_header(self.size.width, self.size.height)
         self._sync_header()
         await self.transcript.replay(log)
         self.composer._history = history
