@@ -1,0 +1,53 @@
+# RaBbLE thinking-words bank. One gerund phrase per line, shown in the divider while RaBbLE works.
+# '#' lines and blanks are ignored. No em dashes. Clinical whimsy: patterns, loops, the Grimoire, the Crew.
+Observing
+Inferring intent
+Pattern-hunting
+Cross-referencing the Grimoire
+Reading the room
+Tuning entropy
+Weighing the vertical
+Braiding magenta and cyan
+Splicing portals
+Collapsing the wave
+Consulting the Crew
+Sifting the signal
+Folding the context
+Listening sideways
+Tracing the loop
+Mapping the seam
+Stirring the cauldron
+Calibrating the gaze
+Untangling threads
+Following the thread
+Checking the edges
+Sharpening the question
+Counting the unknowns
+Scrying the diff
+Reconciling twins
+Rehearsing the next move
+Warming the lattice
+Chasing a hunch
+Dusting the spellbook
+Aligning the eyes
+Distilling the gist
+Sketching the shape of it
+Hunting the root cause
+Testing the floor
+Naming the pattern
+Mending the seam
+Rolling the idea around
+Letting it settle
+Gathering the pieces
+Pulling the loose thread
+Finding the quiet path
+Tasting the architecture
+Walking the graph
+Humming over the details
+Peering through the portal
+Weaving a plan
+Probing the dark corners
+Listening to the code
+Bending toward the answer
+Triangulating
+Ruminating
