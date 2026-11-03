@@ -1384,9 +1384,9 @@ impl App {
         // the header grows to the mark's six rows when the pane is big enough for it
         let has_face = self.face.is_some();
         let face_on = has_face && a.width >= FACE_MIN_AREA.0 && a.height >= FACE_MIN_AREA.1;
-        // smaller panes keep a compact mark in the two-row header; tiny ones drop it
+        // smaller panes keep a compact mark in a three-row header; tiny ones drop it (and the third line) for two text rows
         let compact = has_face && !face_on && a.width >= FACE_COMPACT_MIN_AREA.0 && a.height >= FACE_COMPACT_MIN_AREA.1;
-        let hh = if face_on { FACE_ROWS } else { 2 };
+        let hh = if face_on { FACE_ROWS } else if compact { FACE_COMPACT_ROWS } else { 2 };
         let (mark_w, mark_h) = if face_on { (FACE_SLOT_WIDTH, FACE_ROWS) } else { (FACE_COMPACT_SLOT_WIDTH, FACE_COMPACT_ROWS) };
         let top = hh + 1;
         let comp_h = self.composer.height(a.width).min(a.height.saturating_sub(top + 1));
@@ -1404,7 +1404,9 @@ impl App {
         self.t.layout(&self.th, a.width, tr_h);
         self.gz.newest = self.t.newest_line();
         let buf = f.buffer_mut();
-        self.header.draw(ha, buf, &self.th, if face_on || compact { mark_w } else { 0 }, face_on, phase);
+        // the micro mark is all eye, so its text keeps one more column of air than the full mark's
+        let text_slot = if face_on { mark_w } else if compact { mark_w + 1 } else { 0 };
+        self.header.draw(ha, buf, &self.th, text_slot, face_on, phase);
         draw_divider(da, buf, &self.th, self.busy_label(), phase);
         ratatui::widgets::Widget::render(View(&self.t), ta, buf);
         self.gz.centres = [None, None];
@@ -2061,20 +2063,22 @@ mod tests {
     fn a_small_pane_gets_the_compact_mark_and_the_full_tier_is_unchanged() {
         let (mut a, _rx) = face_app();
         let small = paint_face(&mut a, 40, 12);
-        assert!(mark_cells(&small, 7, 2) > 4, "compact mark in the 7x2 slot");
-        let row: String = (0..30).map(|x| small[(8 + x, 0)].symbol().to_owned()).collect();
-        assert!(row.starts_with("RaBbLE"), "text reflows beside it: {row:?}");
+        assert!(mark_cells(&small, 9, 3) > 4, "compact mark in the 9x3 slot");
+        let row: String = (0..25).map(|x| small[(11 + x, 0)].symbol().to_owned()).collect();
+        assert!(row.starts_with("RaBbLE"), "text reflows beside it with two columns of air: {row:?}");
         assert!(a.face_due().is_some());
-        assert_eq!(a.gz.centres[0], Some((3.5, 1.0)), "gaze centre follows the compact slot");
-        assert_eq!(a.tr_rect.y, 3, "two header rows + divider, as before");
+        assert_eq!(a.gz.centres[0], Some((4.5, 1.5)), "gaze centre follows the compact slot");
+        assert_eq!(a.tr_rect.y, 4, "three header rows + divider");
+        let usage: String = (0..25).map(|x| small[(11 + x, 2)].symbol().to_owned()).collect();
+        assert!(usage.starts_with("usage"), "the third header line is usage: {usage:?}");
         let (mut b, _rx) = face_app();
         let edge = paint_face(&mut b, 30, 10);
-        assert!(mark_cells(&edge, 7, 2) > 4, "minimum compact pane");
+        assert!(mark_cells(&edge, 9, 3) > 4, "minimum compact pane");
         let (mut c, _rx) = face_app();
         let big = paint_face(&mut c, 100, 40);
         assert!(mark_cells(&big, 24, 6) > 20 && c.gz.centres[0] == Some((12.0, 3.0)) && c.tr_rect.y == 7);
         // dump for the report
-        for y in 0..2 { eprintln!("COMPACT|{}", (0..40).map(|x| small[(x, y)].symbol().to_owned()).collect::<String>()); }
+        for y in 0..3 { eprintln!("COMPACT|{}", (0..40).map(|x| small[(x, y)].symbol().to_owned()).collect::<String>()); }
     }
 
     #[test]

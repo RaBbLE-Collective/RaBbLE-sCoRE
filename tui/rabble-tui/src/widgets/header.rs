@@ -1,6 +1,6 @@
-//! Header (two rows of text, or the six Python info lines beside the mark) and the divider under it. With the face mark showing, the header is
-//! `FACE_ROWS` tall: the left `FACE_SLOT_WIDTH` columns belong to the mark and the two text lines sit
-//! beside it, vertically centred.
+//! Header (two or three rows of text, or the six Python info lines beside the mark) and the divider under it. With the face mark
+//! showing, the header is `FACE_ROWS` (full) or `FACE_COMPACT_ROWS` (micro) tall: the left columns belong to the mark and the
+//! text lines sit beside it.
 
 use ratatui::{buffer::Buffer, layout::Rect, text::{Line, Span}};
 
@@ -50,6 +50,27 @@ impl HeaderState {
             Span::styled(th.glyphs.bar[0].to_string().repeat(filled), st),
             Span::styled(th.glyphs.bar[1].to_string().repeat(width - filled), th.muted),
         ]
+    }
+
+    /// `usage 5h ▓▓░░ 38% ↺2h  wk ...`, or why there is none: the rich header's fifth line, and the compact one's third.
+    fn usage_spans(&self, th: &Theme, now: f64) -> Vec<Span<'static>> {
+        let mut l = vec![Span::styled("usage ", th.muted)];
+        match self.usage.filter(|u| !u.is_empty()) {
+            None => l.push(Span::styled("-- (OS tracker not reporting)", th.muted)),
+            Some(u) => {
+                for (label, w) in [("5h", u.five_hour), ("wk", u.week)] {
+                    let Some(w) = w else { continue };
+                    l.push(Span::styled(format!("{label} "), th.muted));
+                    l.extend(self.bar(th, w.pct, w.band(), 8));
+                    l.push(Span::raw(format!(" {:.0}%", w.pct)));
+                    l.push(Span::styled(format!(" ↺{}  ", usage::fmt_remaining(w.resets_in(now))), th.muted));
+                }
+                if u.stale() {
+                    l.push(Span::styled(format!("stale {}", usage::fmt_remaining(u.age)), th.warn));
+                }
+            }
+        }
+        l
     }
 
     /// The six lines Python's header shows beside the mark: wordmark and cwd, model/mode/tier/crew,
@@ -102,22 +123,7 @@ impl HeaderState {
             }
         }
 
-        let mut l5 = vec![Span::styled("usage ", th.muted)];
-        match self.usage.filter(|u| !u.is_empty()) {
-            None => l5.push(Span::styled("-- (OS tracker not reporting)", th.muted)),
-            Some(u) => {
-                for (label, w) in [("5h", u.five_hour), ("wk", u.week)] {
-                    let Some(w) = w else { continue };
-                    l5.push(Span::styled(format!("{label} "), th.muted));
-                    l5.extend(self.bar(th, w.pct, w.band(), 8));
-                    l5.push(Span::raw(format!(" {:.0}%", w.pct)));
-                    l5.push(Span::styled(format!(" ↺{}  ", usage::fmt_remaining(w.resets_in(now))), th.muted));
-                }
-                if u.stale() {
-                    l5.push(Span::styled(format!("stale {}", usage::fmt_remaining(u.age)), th.warn));
-                }
-            }
-        }
+        let l5 = self.usage_spans(th, now);
 
         let mut l6 = vec![match self.limit.as_deref() {
             None => Span::styled("limits ok", th.muted),
@@ -133,7 +139,8 @@ impl HeaderState {
         }).collect()
     }
 
-    pub fn lines(&self, th: &Theme, width: usize, phase: f64) -> [Line<'static>; 2] {
+    /// The compact tier's text: the model line, the cwd line, and (when the header has the room) the usage line.
+    pub fn lines(&self, th: &Theme, width: usize, phase: f64) -> [Line<'static>; 3] {
         let sep = || Span::styled(format!(" {} ", th.glyphs.bullet), th.muted);
         let mut a = wordmark(th, phase);
         a.push(sep());
@@ -174,7 +181,8 @@ impl HeaderState {
             }
             Line::from(v)
         };
-        [clipw(a), clipw(b)]
+        let c = self.usage_spans(th, usage::now());
+        [clipw(a), clipw(b), clipw(c)]
     }
 
     /// `face_slot`: leave the left `face_slot` columns (and a one-column gap) to the face mark (0 = no mark);
@@ -218,7 +226,7 @@ mod tests {
         let area = Rect::new(0, 0, 40, 6);
         let colours = |slot: u16, rich: bool, phase: f64| {
             let mut buf = Buffer::empty(area);
-            h.draw(Rect { height: 2, ..area }, &mut buf, &th, slot, rich, phase);
+            h.draw(Rect { height: 3, ..area }, &mut buf, &th, slot, rich, phase);
             let x0 = if slot > 0 { slot + 1 } else { 0 };
             let row: String = (0..40).map(|x| buf[(x, 0)].symbol().to_owned()).collect();
             assert_eq!(&row[x0 as usize..x0 as usize + 6], "RaBbLE", "{slot}/{rich}: {row:?}");
