@@ -104,4 +104,23 @@ Differences, on purpose:
 - Palette-background cells draw with the terminal's default background (translucent terminals show through), where Python resolves to the header's background.
 - `/face` without a palette: a notice (`RaBbLE`), nothing to draw.
 - Dropped, because: the stepped drawing path (`fine_eyes=False`, `_eye_and_portal`, `_in_pill`: dead code, never enabled); constructor knobs only tests used (`eye_h`, `eye_w`, `aura`, `rim`, `rim_tips`, `spread`); `/reload` of `ui.prng` (compiled); the style cache and `Strip` merging (ratatui diffs cells).
-- Not done: T6 (cell aspect read from the terminal; Python assumes square sub-pixels too); the native fixes the plan asked for where Python could not (dark stair-stepped halo, black portal fill, specks on the mini mark): parity first, the goldens pin Python's pixels, so any fix is a deliberate golden regeneration with Mark's eye.
+- Not done: the native fixes the plan asked for where Python could not (dark stair-stepped halo, black portal fill, specks on the mini mark): parity first, the goldens pin Python's pixels, so any fix is a deliberate golden regeneration with Mark's eye.
+
+## Gaze (S303): `ui/gaze.py`, the gaze parts of `ui/app.py`, `ui/face.py`, `tests/test_ui_gaze.py`
+The Python twin looks where the Rust shell looks. Rust: `mod gaze` in `src/app.rs` (`steer_gaze`, `gaze_scene`), `widgets/face.rs` (`cell_aspect`).
+| Behaviour | Python | Rust |
+|---|---|---|
+| constants (`EVERY`, `POINTER_ACTIVE`, `POINTER_TTL`, `ATTN_EVERY`, `ATTN_HOLD`, `ATTN_TTL`, `TYPING_HOLD`, `CARD_HOLD`, `RANGE_COLS/ROWS`) | `ui/gaze.py`, pinned to the Rust source text by `test_constants_match_rust` | `mod gaze` |
+| `choose()` priority modal > typing > card > streaming text; `aim()`; hysteresis (`pick`) | `gaze.choose/aim/Steer.pick`; `test_choose_priority`, `test_aim_is_relative_and_clamped`, `test_hysteresis` | `gaze::choose/aim/Steer::pick` tests |
+| pointer steers the header mark and every `/face`; no repaint; motion is not typing; lapses over `POINTER_TTL` | `RabbleApp.on_mouse_move/down/up`, `_gaze_tick`; `test_pointer_steers_both_faces_without_a_repaint_and_is_not_typing`, `test_step_pointer_then_lapse_then_saccades` | `the_pointer_steers_both_faces_without_a_repaint_and_lapses` |
+| entity attention when the pointer idled 2 s; re-pick every 500 ms | `Steer.step`; `test_step_rechooses_only_every_attn_every` | `steer_gaze` |
+| modal / composer cursor / newest line after a card / end of streaming text, else saccades; follows real loop order past `ATTN_HOLD`; a failed measure keeps the last good newest line | `_gaze_scene`, `_measure_newest` (returns `gaze.MISS`, so `Steer.newest` is kept); `test_entity_follows_streaming_text_in_real_loop_order_past_attn_hold`, `test_modal_wins_and_a_key_in_the_composer_counts_as_typing` | `the_entity_looks_at_streaming_text_and_the_composer_then_lets_go`, `gz.newest` cache (45315fa) |
+| cell aspect cached until resize; `RABBLE_CELL_ASPECT` parsed like `f64::from_str` (rejects `" 2.3"`, `"2_3"`, fullwidth digits) | `face.cell_aspect/reset_cell_aspect`, `FaceWidget.on_resize`; `test_cell_aspect_env_is_strict`, `test_cell_aspect_is_cached_until_reset` | `widgets/face.rs` |
+
+Differences, on purpose:
+- The gaze tick is a Textual 10 Hz timer (`gaze.EVERY`); Rust rides its face tick. Same cadence, same "never repaints by itself" (`Life.set_gaze` only stores a target).
+- Any key in the focused composer counts as typing (as in Rust); the permission modal is a separate Textual screen, so keys there never do.
+- Face centres come from each widget's screen `region`; a `/face` scrolled out of view has no centre and falls back to saccades (Rust: `full_visible`). Several `/face` widgets each aim from their own centre.
+- The newest line is measured from the last transcript leaf widget (up to 4 rows from its bottom, text end via `render_line`), only while streaming or a card is fresh, and cached; Rust reads `Transcript::newest_line` at layout.
+- Other overlays (model/session pickers) are not looked at, as in Rust (only the permission prompt is).
+- Python's `FaceWidget.-full` min-height is 2, as the Rust floor.

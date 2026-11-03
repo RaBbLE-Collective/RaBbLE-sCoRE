@@ -11,6 +11,7 @@ import time
 from collections import deque
 from pathlib import Path
 
+from rich.cells import cell_len
 from textual import work
 from textual.app import App
 from textual.widgets import Static
@@ -23,6 +24,7 @@ for _p in (SCORE_ROOT, SCORE_ROOT / "crew"):
 from orchestra import events as ev  # noqa: E402
 from orchestra import park, trust, usage  # noqa: E402
 from orchestra.entropy import Entropy  # noqa: E402
+from ui import gaze  # noqa: E402
 from ui.prefs import MODELS, MODES as PREF_MODES, Settings, resolve_model  # noqa: E402
 from ui.widgets.composer import Composer, Prompt, copy_to_system  # noqa: E402
 from ui.widgets.divider import Divider  # noqa: E402
@@ -35,7 +37,7 @@ FLASH = 2.5
 # dependency order; ui.app last. app-level CSS/BINDINGS and the engine (orchestra/) need a real restart.
 RELOAD_MODULES = ("ui.theme", "ui.eyes", "ui.face", "ui.prefs", "ui.widgets.models", "ui.widgets.tool_card",
                   "ui.widgets.permission", "ui.widgets.sessions", "ui.widgets.transcript", "ui.widgets.header",
-                  "ui.widgets.composer", "ui.widgets.divider", "ui.app")
+                  "ui.widgets.composer", "ui.widgets.divider", "ui.gaze", "ui.app")
 USAGE_EVERY = 30.0   # seconds between reads of the OS tracker's cache
 HELP = {
     "/model": "pick the model (or /model opus|sonnet|haiku|fable|default|<id>)",
@@ -94,6 +96,7 @@ class RabbleApp(App):
         self._streaming = False
         self._busy_ids: set[str] = set()
         self._typing = False
+        self._gz = gaze.Steer()   # where the eyes look (ui/gaze.py; the Rust twin is `mod gaze` in app.rs)
         self._closing = False
         self._turn_open = False  # a turn we sent is still running
         self._bloat = park.Bloat()  # context size and fill rate, per turn
@@ -130,6 +133,7 @@ class RabbleApp(App):
     async def on_mount(self) -> None:
         self._poll_usage()
         self._usage_timer = self.set_interval(USAGE_EVERY, self._poll_usage)
+        self._gaze_timer = self.set_interval(gaze.EVERY, self._gaze_tick)
         self.composer.focus()
         if Path(self.cwd).resolve().is_relative_to(SCORE_ROOT):
             await self.transcript.notice(
@@ -180,6 +184,87 @@ class RabbleApp(App):
     def on_text_area_changed(self, event) -> None:
         self._set_mood()
 
+    # gaze: pointer motion and keys are only remembered (no repaint, and motion is not typing); the 10 Hz tick
+    # below decides where the eyes go, as the Rust shell does on its face tick
+    def on_mouse_move(self, event) -> None:
+        self._gz.pointer = ((event.screen_x, event.screen_y), time.monotonic())
+
+    on_mouse_down = on_mouse_up = on_mouse_move
+
+    def note_typing(self) -> None:
+        """The composer saw a key (any key, as in the Rust shell)."""
+        self._gz.typed_at = time.monotonic()
+
+    def _face_widgets(self) -> list:
+        faces = [self.face]
+        transcript = getattr(self, "transcript", None)
+        if transcript is not None and transcript.is_attached:
+            faces += list(transcript.query("FaceWidget"))
+        return [w for w in faces if hasattr(w, "set_gaze")]
+
+    @staticmethod
+    def _centre(w):
+        """Screen centre of a face widget, None when it is not showing."""
+        try:
+            r = w.region
+            if not w.is_attached or not w.display or r.width <= 0 or r.height <= 0:
+                return None
+            return (r.x + r.width / 2, r.y + r.height / 2)
+        except Exception:
+            return None
+
+    def _measure_newest(self):
+        """Screen cell at the end of the newest non-blank transcript line, None when there is no text, or
+        gaze.MISS when it cannot be measured now (mid-layout): the last good value is then kept."""
+        t = self.transcript
+        try:
+            view = t.content_region
+            if view.height <= 0:
+                return gaze.MISS
+            kids = [c for c in t.children if c not in t.transient and c.region.height > 0]
+            if not kids:
+                return None
+            leaf = kids[-1]
+            while leaf.children and leaf.children[-1].region.height > 0:
+                leaf = leaf.children[-1]
+            r = leaf.region
+            for i in range(r.height - 1, max(r.height - 5, -1), -1):
+                text = leaf.render_line(i).text.rstrip()
+                if text:
+                    return (r.x + cell_len(text), max(view.y, min(view.bottom - 1, r.y + i)) + 0.5)
+            return (r.x + r.width / 2, max(view.y, min(view.bottom - 1, r.bottom - 1)) + 0.5)
+        except Exception:
+            return gaze.MISS
+
+    def _gaze_scene(self, now: float) -> gaze.Scene:
+        gz = self._gz
+        card = gz.within(gz.card_at, gaze.CARD_HOLD, now)
+        if self._streaming or card:
+            m = self._measure_newest()
+            if m is not gaze.MISS:
+                gz.newest = m
+        modal = None
+        if self._ask_open:
+            top = self.transcript.region.y
+            modal = (self.size.width / 2, top + (self.size.height - top) / 2)
+        try:
+            c = self.composer.cursor_screen_offset
+            cursor = (c.x + 0.5, c.y + 0.5)
+        except Exception:
+            cursor = (0.0, 0.0)
+        return gaze.Scene(modal=modal, typing=gz.within(gz.typed_at, gaze.TYPING_HOLD, now), cursor=cursor,
+                          card=card, streaming=self._streaming, newest=gz.newest)
+
+    def _gaze_tick(self, now: float | None = None) -> None:
+        now = time.monotonic() if now is None else now
+        faces = self._face_widgets()
+        out = self._gz.step(now, lambda: self._gaze_scene(now), [self._centre(w) for w in faces])
+        if out is None:
+            return
+        aimed, ttl = out
+        for w, a in zip(faces, aimed):
+            w.set_gaze(a, ttl)
+
     # events
     async def _handle(self, e: ev.Event) -> None:
         t, h = self.transcript, self.header
@@ -214,9 +299,11 @@ class RabbleApp(App):
             case ev.ToolCall():
                 self._streaming = False
                 self._busy_ids.add(e.id)
+                self._gz.card_at = time.monotonic()
                 await t.tool_call(e.organ, e.id, e.name, e.input)
             case ev.ToolResult():
                 self._busy_ids.discard(e.id)
+                self._gz.card_at = time.monotonic()
                 t.tool_result(e.id, e.ok, e.summary)
             case ev.PermissionAsk():
                 self._asks.append(e)
@@ -284,6 +371,7 @@ class RabbleApp(App):
             self._flash_mood("denied")
             return self._next_ask()
         self._ask_open = True
+        self._gz.card_at = time.monotonic()
 
         def done(reply) -> None:
             self._ask_open = False
@@ -668,6 +756,8 @@ class RabbleApp(App):
         self.composer.load_text(draft)
         self._usage_timer.stop()
         self._usage_timer = self.set_interval(USAGE_EVERY, self._poll_usage)
+        self._gaze_timer.stop()
+        self._gaze_timer = self.set_interval(gaze.EVERY, self._gaze_tick)
         self.composer.focus()
         await self.transcript.notice("UI reloaded; the session carries on")
 

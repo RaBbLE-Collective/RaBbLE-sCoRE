@@ -117,18 +117,34 @@ _glyphs = os.environ.get("RABBLE_GLYPHS", "").lower()
 SAFE_GLYPHS = _glyphs == "safe" or (_glyphs != "octant" and os.environ.get("TERM_PROGRAM") == "vscode")
 
 
+_NUMBER = re.compile(r"[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?", re.ASCII)
+_ASPECT = None   # cached until a resize, like the Rust twin
+
+
+def reset_cell_aspect():
+    """Forget the cached aspect: the next cell_aspect() asks the terminal again (a resize, a font change)."""
+    global _ASPECT
+    _ASPECT = None
+
+
 def cell_aspect():
     """A terminal cell's height over its width in pixels: from the window's pixel size when the terminal reports it
-    (TIOCGWINSZ), else 2.0. RABBLE_CELL_ASPECT overrides; implausible values fall back to 2 (the Rust twin does
-    the same)."""
+    (TIOCGWINSZ), else 2.0. RABBLE_CELL_ASPECT overrides (parsed as strictly as Rust's f64::from_str: no spaces, no
+    underscores); implausible values fall back to 2 (the Rust twin does the same). Cached until reset_cell_aspect()."""
+    global _ASPECT
+    if _ASPECT is None:
+        _ASPECT = _query_cell_aspect()
+    return _ASPECT
+
+
+def _query_cell_aspect():
     def sane(a):
         return math.isfinite(a) and 1.0 <= a <= 4.0
-    try:
-        a = float(os.environ.get("RABBLE_CELL_ASPECT", ""))
+    env = os.environ.get("RABBLE_CELL_ASPECT", "")
+    if _NUMBER.fullmatch(env):
+        a = float(env)
         if sane(a):
             return a
-    except ValueError:
-        pass
     try:
         import fcntl
         import struct
@@ -1003,7 +1019,8 @@ class FaceWidget(Widget):
             cols, rows = self.size
             if cols < 4 or rows < 2:
                 return None
-            face = Face(cols, rows, self._pal, detail="full", cell_aspect=cell_aspect())
+            self._aspect = cell_aspect()
+            face = Face(cols, rows, self._pal, detail="full", cell_aspect=self._aspect)
         else:
             face = Face(24, 6, self._pal, detail="mini")
         face.set_provider(self.provider)
@@ -1014,6 +1031,7 @@ class FaceWidget(Widget):
         self._timer = self.set_interval(1 / (FULL_FPS if self.detail == "full" else FPS), self._tick)
 
     def on_resize(self, event):
+        reset_cell_aspect()
         self.face, self._base, self._layer = None, None, None  # rebuilt on the next tick at the new size
 
     def on_unmount(self):
@@ -1046,6 +1064,8 @@ class FaceWidget(Widget):
         self._blend += (1 - self._blend) * min(1, dt * SPRING)
         if self._blend > 0.995:
             self._blend = 1.0
+        if self.face is not None and self.detail == "full" and cell_aspect() != self._aspect:
+            self.face, self._base, self._layer = None, None, None   # the cell shape changed under us
         if self.face is None:
             self.face = self._make_face()
             if self.face is not None:

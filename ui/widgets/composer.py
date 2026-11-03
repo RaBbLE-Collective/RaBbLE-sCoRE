@@ -142,6 +142,9 @@ class Composer(TextArea):
 
     async def _on_key(self, event) -> None:
         key = event.key
+        note = getattr(self.app, "note_typing", None)
+        if note:
+            note()   # the eyes come to the composer while keys arrive
         handled = True
         if key == "enter" and self.completing and self._slash:
             self._accept()
