@@ -12,6 +12,8 @@ use std::{sync::Arc, time::{Duration, Instant}};
 use rabble_face::{
     degrade, driver::{BG_FPS, FPS, FULL_FPS}, Detail, Driver, Face, FacePalette, Grid, Layer, Mood, Provider,
 };
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use rabble_theme::Rgb;
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 
@@ -26,6 +28,23 @@ pub fn safe_glyphs() -> bool {
 /// The terminal cell's height over its width in pixels: from the window's pixel size when the terminal reports
 /// it (TIOCGWINSZ via crossterm), else 2.0. `RABBLE_CELL_ASPECT` overrides. Implausible values fall back to 2.
 pub fn cell_aspect() -> f64 {
+    let bits = CELL_ASPECT.load(Ordering::Relaxed);
+    if bits != 0 {
+        return f64::from_bits(bits);
+    }
+    let a = query_cell_aspect();
+    CELL_ASPECT.store(a.to_bits(), Ordering::Relaxed);
+    a
+}
+
+/// Forget the cached aspect: the next `cell_aspect()` asks the terminal again (a resize, a font change).
+pub fn reset_cell_aspect() {
+    CELL_ASPECT.store(0, Ordering::Relaxed);
+}
+
+static CELL_ASPECT: AtomicU64 = AtomicU64::new(0); // f64 bits; 0 = not asked yet
+
+fn query_cell_aspect() -> f64 {
     let sane = |a: f64| a.is_finite() && (1.0..=4.0).contains(&a);
     if let Some(a) = std::env::var("RABBLE_CELL_ASPECT").ok().and_then(|v| v.parse::<f64>().ok()).filter(|&a| sane(a)) {
         return a;

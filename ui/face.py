@@ -950,7 +950,7 @@ class FaceWidget(Widget):
 
     DEFAULT_CSS = """
     FaceWidget { width: 24; height: 6; }
-    FaceWidget.-full { width: 1fr; height: 100%; min-height: 12; }
+    FaceWidget.-full { width: 1fr; height: 100%; min-height: 2; }
     """
 
     def __init__(self, detail="mini", *, name=None, id=None, classes=None):

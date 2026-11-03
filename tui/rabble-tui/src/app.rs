@@ -227,6 +227,9 @@ mod gaze {
         pub modal: Option<Cell>,
         /// Face centres on screen: mini, full.
         pub centres: [Option<Cell>; 2],
+        /// The newest transcript line (row in the view, cells of text) as of the last layout; the face tick runs
+        /// before layout, when streaming text has the transcript stale, so it reads this instead.
+        pub newest: Option<(u16, usize)>,
         pub next: Option<Instant>,
         pub attn_next: Option<Instant>,
         cur: Option<(Focus, Cell)>,
@@ -407,7 +410,7 @@ impl App {
             cursor: (self.gz.cursor.0 as f64 + 0.5, self.gz.cursor.1 as f64 + 0.5),
             card: within(self.gz.card_at, gaze::CARD_HOLD),
             streaming: self.streaming,
-            newest: self.t.newest_line().map(|(row, w)| ((r.x as usize + w) as f64, (r.y + row) as f64 + 0.5)),
+            newest: self.gz.newest.map(|(row, w)| ((r.x as usize + w) as f64, (r.y + row) as f64 + 0.5)),
         }
     }
 
@@ -954,7 +957,7 @@ impl App {
         }
         self.dirty = true;
         match e {
-            Event::Resize(..) => {}
+            Event::Resize(..) => crate::widgets::face::reset_cell_aspect(),
             Event::FocusLost => {
                 self.focused = false;
                 self.t.blur();
@@ -1390,6 +1393,7 @@ impl App {
         self.tr_rect = ta;
         let ca = Rect { y: a.y + top + tr_h, height: comp_h, ..a };
         self.t.layout(&self.th, a.width, tr_h);
+        self.gz.newest = self.t.newest_line();
         let buf = f.buffer_mut();
         self.header.draw(ha, buf, &self.th, face_on);
         draw_divider(da, buf, &self.th, self.busy_label(), phase);
@@ -2002,6 +2006,11 @@ mod tests {
         a.session = Some("s1".into());
         (a, rx)
     }
+    /// `/face`, with the cell shape pinned so the tests do not depend on the developer's terminal.
+    fn show_face(a: &mut App) {
+        say(a, "/face");
+        a.face.as_mut().unwrap().full.as_mut().unwrap().set_cell_aspect(2.0);
+    }
     fn mood(a: &App) -> Mood {
         a.face.as_ref().unwrap().mood()
     }
@@ -2075,7 +2084,7 @@ mod tests {
     #[test]
     fn a_refit_face_never_paints_blank() {
         let (mut a, _rx) = face_app();
-        say(&mut a, "/face");
+        show_face(&mut a);
         let mut t = Terminal::new(TestBackend::new(100, 40)).unwrap();
         t.draw(|f| a.draw(f)).unwrap();
         type_in(&mut a, "x");
@@ -2200,7 +2209,7 @@ mod tests {
     #[test]
     fn slash_face_mounts_a_full_face_until_the_next_message() {
         let (mut a, rx) = face_app();
-        say(&mut a, "/face");
+        show_face(&mut a);
         assert!(a.t.has_face() && a.face.as_ref().unwrap().full.is_some());
         assert!(sent(&rx).is_empty(), "/face is local");
         let before = paint_face(&mut a, 100, 40);
@@ -2230,7 +2239,7 @@ mod tests {
     #[test]
     fn a_face_frame_is_cheap_enough_to_sit_between_keys() {
         let (mut a, _rx) = face_app();
-        say(&mut a, "/face");
+        show_face(&mut a);
         let _ = paint_face(&mut a, 220, 60);
         let mut now = Instant::now() + Duration::from_secs(1);
         let mut ms = Vec::new();
@@ -2405,7 +2414,7 @@ mod tests {
     fn the_pointer_steers_both_faces_without_a_repaint_and_lapses() {
         use crossterm::event::MouseEventKind::Moved;
         let (mut a, _rx) = face_app();
-        say(&mut a, "/face");
+        show_face(&mut a);
         a.gz.typed_at = None; // the command itself was typed
         screen(&mut a, 100, 40);
         let t0 = Instant::now();
@@ -2431,7 +2440,7 @@ mod tests {
         let t0 = Instant::now();
         a.tick_face(t0);
         assert!(a.gz.aimed[0].is_some() && a.gz.aimed[1].is_none());
-        say(&mut a, "/face");
+        show_face(&mut a);
         screen(&mut a, 100, 40);
         a.tick_face(t0 + gaze::EVERY + Duration::from_millis(1));
         assert!(a.gz.aimed[1].is_some_and(|g| g.0 > 0.0), "re-applied on the next gaze tick");
@@ -2440,19 +2449,28 @@ mod tests {
     #[test]
     fn the_entity_looks_at_streaming_text_and_the_composer_then_lets_go() {
         let (mut a, _rx) = face_app();
-        screen(&mut a, 100, 40);
+        // the run loop's order: tick the face, then paint (layout runs in paint)
         let t0 = Instant::now();
+        screen(&mut a, 100, 40);
         a.tick_face(t0);
         assert_eq!(a.gz.aimed[0], None, "idle: random saccades");
         ev(&mut a, r#"{"type":"TextDelta","organ":"rabble","text":"hello there"}"#);
         screen(&mut a, 100, 40);
         a.tick_face(t0 + Duration::from_secs(1));
         assert!(a.gz.aimed[0].is_some_and(|g| g.1 > 0.0), "looks down at the newest line: {:?}", a.gz.aimed);
+        // more text streams in; each delta makes the page stale and the tick runs before the paint
+        for k in 1..=4u64 {
+            ev(&mut a, r#"{"type":"TextDelta","organ":"rabble","text":" and more"}"#);
+            a.tick_face(t0 + gaze::ATTN_HOLD + gaze::ATTN_EVERY * k as u32 + Duration::from_secs(k));
+            screen(&mut a, 100, 40);
+        }
+        assert!(a.gz.aimed[0].is_some_and(|g| g.1 > 0.0), "still watching the stream past ATTN_HOLD: {:?}", a.gz.aimed);
         ev(&mut a, r#"{"type":"TextBlock","organ":"rabble","text":"hello there"}"#);
         type_in(&mut a, "x");
-        screen(&mut a, 100, 40);
-        let at = Instant::now();
+        let at = t0 + Duration::from_secs(20); // after the loop above, on the same virtual clock
+        a.gz.typed_at = Some(at + gaze::ATTN_HOLD); // typed just before the tick below
         a.tick_face(at + gaze::ATTN_HOLD + Duration::from_millis(600));
+        screen(&mut a, 100, 40);
         assert!(a.gz.aimed[0].is_some(), "typing keeps its interest");
         a.tick_face(at + gaze::TYPING_HOLD + gaze::ATTN_HOLD * 3);
         assert_eq!(a.gz.aimed[0], None, "nothing left to look at");
