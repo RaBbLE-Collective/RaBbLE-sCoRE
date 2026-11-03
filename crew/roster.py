@@ -133,8 +133,9 @@ CREW_RULE = (
     "Every organ is a full context window, so organs are expensive. Work alone by default. "
     "Call an organ only when the work is significant AND splits into independent parallel parts, "
     "or when you need a critic or verifier who did not write the code. One or two organs is the "
-    "norm; never more than three at once. A small edit, a lookup, a single-file fix or a question "
-    "is yours to do directly."
+    "norm; never more than three at once, launched together in one message so they run in parallel. "
+    "Organs are independent: no chatter through you, one-line crosstalk files at most. A small edit, "
+    "a lookup, a single-file fix or a question is yours to do directly."
 )
 
 
@@ -152,8 +153,8 @@ def build_ui_lead_prompt(personas, grimoire, crew):
         parts.append(
             "## The Crew roster\n\n"
             "Organs run as subagents: call the Agent tool with `subagent_type` set to the agent type below. "
-            "Models are pinned by tier: do not override them upward without the Observer asking. Ask each "
-            "organ to put its full report in its final message.\n\n"
+            "Models are pinned by tier: do not override them upward without the Observer asking. Each organ "
+            "returns a short verdict and keeps its long evidence in /tmp/rabble-crew/, so read summaries, not reports.\n\n"
             "| Organ | Agent type | Tier | Access | Job |\n|---|---|---|---|---|\n" + "\n".join(rows))
         parts.append(CREW_RULE)
     else:

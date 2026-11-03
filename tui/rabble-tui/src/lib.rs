@@ -1,5 +1,6 @@
 pub mod app;
 pub mod client;
+pub mod crew;
 pub mod glide;
 pub mod markdown;
 pub mod park;
