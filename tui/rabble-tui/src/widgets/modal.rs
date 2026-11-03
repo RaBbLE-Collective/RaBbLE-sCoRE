@@ -87,6 +87,14 @@ impl Permission {
         self.scroll.get() >= self.max_scroll.get()
     }
 
+    /// Mouse wheel over the body. Scrolling cannot answer the prompt, so it is not held by the
+    /// arming delay; reaching the end by wheel counts as reading it.
+    pub fn wheel(&mut self, down: bool) {
+        const STEP: usize = 3;
+        let at = self.scroll.get();
+        self.scroll.set(if down { (at + STEP).min(self.max_scroll.get()) } else { at.saturating_sub(STEP) });
+    }
+
     pub fn key(&mut self, k: KeyEvent) -> Option<Reply> {
         self.key_at(k, Instant::now())
     }
@@ -495,6 +503,25 @@ mod tests {
         assert!(p.read_to_the_end());
         let text: String = (0..16).map(|y| (0..100).map(|x| b[(x, y)].symbol().to_owned()).collect::<String>()).collect();
         assert!(text.contains("line 59") && text.contains("[y] allow"), "{text}");
+        assert_eq!(drive(&mut p, &[KeyCode::Char('y')]), rep(Decision::Allow, ""));
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_body_and_counts_as_reading_it() {
+        let a = ask("Bash", serde_json::json!({"command": (0..60).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n")}));
+        let mut p = armed(a);
+        let area = Rect::new(0, 0, 100, 16);
+        let mut b = Buffer::empty(area);
+        p.draw(area, &mut b, &th());
+        p.wheel(false);
+        assert_eq!(p.scroll.get(), 0, "cannot scroll above the top");
+        p.wheel(true);
+        assert_eq!(p.scroll.get(), 3);
+        for _ in 0..40 {
+            p.wheel(true);
+        }
+        p.draw(area, &mut b, &th());
+        assert!(p.read_to_the_end());
         assert_eq!(drive(&mut p, &[KeyCode::Char('y')]), rep(Decision::Allow, ""));
     }
 

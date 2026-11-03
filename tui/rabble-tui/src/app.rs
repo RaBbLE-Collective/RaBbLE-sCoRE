@@ -979,10 +979,15 @@ impl App {
                 _ => {}
             },
             Event::Mouse(m) => {
-                if matches!(self.overlay, Overlay::None) {
-                    match m.kind {
-                        MouseEventKind::ScrollDown => self.t.wheel(true),
-                        MouseEventKind::ScrollUp => self.t.wheel(false),
+                let down = match m.kind {
+                    MouseEventKind::ScrollDown => Some(true),
+                    MouseEventKind::ScrollUp => Some(false),
+                    _ => None,
+                };
+                if let Some(down) = down {
+                    match &mut self.overlay {
+                        Overlay::None => self.t.wheel(down),
+                        Overlay::Permission(p) => p.wheel(down),
                         _ => {}
                     }
                 }
