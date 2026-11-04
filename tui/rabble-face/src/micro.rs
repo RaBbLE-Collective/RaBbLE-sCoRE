@@ -64,8 +64,8 @@ impl Geo {
 }
 
 /// The pixels of one geometry, `[y][x]`, each VOID, RING, RING_R or WHITE.
-/// `gaze` x steps each eye a cell (2 px) along its portal. y (+ = down) slides the left eye out of its portal and
-/// the right eye into its own (it hangs the other way): the pill keeps its length, the far edge hides what has gone
+/// `gaze` x steps each eye a cell (2 px) along its portal. y (+ = down) brings both eyes out of their portals, up sinks both
+/// back to their far edges: the pill keeps its length, the far edge hides what has gone
 /// behind it, and the row it leaves is black. An eye sinks until only its near-edge end shows and comes out as far
 /// as the grid has room. `blink` 0..1 (1 = shut) retracts the white to half, then to nothing so the portal alone
 /// stands, then both eyes shut to a dash in the hollow.
@@ -75,9 +75,9 @@ fn grid(g: &Geo, blink: f64, gaze: (f64, f64)) -> Vec<[u8; W]> {
     let step = if gx <= -0.4 { -2 } else if gx >= 0.4 { 2 } else { 0 };
     let near = g.portal.len() as i32 - 1;
     let last = g.eye_y as i32 + g.eye_rows as i32 - 1;
-    // Both eyes move together and stop together. One goes out by `outs[m]` pixels while the other sinks m: out a
-    // pixel at most (the
-    // motion stays inside the portals), and in until only the near edge's end shows.
+    // Both eyes move together and stop together, each along its own portal: looking down brings both out by
+    // `outs[m]` pixels (a pixel at most, so the motion stays inside the portals), looking up sinks both m, until
+    // only the near edge's end shows.
     let band = |y: i32| g.row(0, y).map(|r| r / (g.h / MICRO_ROWS));
     let clear = (near + 1..).find(|&y| band(y) != band(near)).unwrap_or(near + 1);
     let outs: Vec<i32> = (0..=(g.h as i32 - 1 - g.left_top as i32 - last).clamp(0, 1)).filter(|&o| !(g.eye_y as i32 + o > near && g.eye_y as i32 + o < clear)).collect();
@@ -95,7 +95,7 @@ fn grid(g: &Geo, blink: f64, gaze: (f64, f64)) -> Vec<[u8; W]> {
             }
             continue;
         }
-        let slide = if (i == 0) == (down >= 0) { outs[down.unsigned_abs() as usize] } else { -down.abs() };
+        let slide = if down >= 0 { outs[down as usize] } else { down };
         let n = if blink < 0.3 { g.eye_rows } else if blink < 0.55 { g.half_rows } else { 0 } as i32;
         let top = g.eye_y as i32 + slide;
         // the far edge hides whatever is behind it: only own rows 1 and up are seen
