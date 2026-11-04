@@ -171,6 +171,12 @@ mod gaze {
     /// The pointer counts as active this long after its last motion; the target then lapses over `POINTER_TTL`.
     pub const POINTER_ACTIVE: Duration = Duration::from_millis(2000);
     pub const POINTER_TTL: Duration = Duration::from_millis(1800);
+    /// A pointer last seen heading off the right edge keeps being looked at, out past the edge along its heading,
+    /// this long (a terminal reports nothing once the pointer has left it).
+    pub const EXIT_HOLD: Duration = Duration::from_millis(4000);
+    /// Columns from the right edge that count as leaving, and how far beyond it the eyes aim.
+    pub const EXIT_EDGE: u16 = 2;
+    pub const EXIT_REACH: f64 = 80.0;
     /// How often the entity re-chooses what to look at (low, so it never jitters), and how long it must stay
     /// on one thing before it may switch (hysteresis).
     pub const ATTN_EVERY: Duration = Duration::from_millis(500);
@@ -227,6 +233,8 @@ mod gaze {
     #[derive(Default)]
     pub struct Steer {
         pub pointer: Option<((u16, u16), Instant)>,
+        /// Where the eyes go once the pointer has left to the right, and since when.
+        pub exit: Option<(Cell, Instant)>,
         pub typed_at: Option<Instant>,
         pub card_at: Option<Instant>,
         pub cursor: (u16, u16),
@@ -386,7 +394,10 @@ impl App {
         }
         self.gz.next = Some(now + gaze::EVERY);
         let pointer = self.gz.pointer.filter(|(_, at)| now.saturating_duration_since(*at) < gaze::POINTER_ACTIVE);
-        let (target, ttl) = if let Some(((x, y), _)) = pointer {
+        let gone = self.gz.exit.filter(|(_, at)| now.saturating_duration_since(*at) < gaze::EXIT_HOLD);
+        let (target, ttl) = if let Some((c, _)) = gone {
+            (Some(c), gaze::POINTER_TTL)
+        } else if let Some(((x, y), _)) = pointer {
             (Some((x as f64 + 0.5, y as f64 + 0.5)), gaze::POINTER_TTL)
         } else {
             if self.gz.attn_next.is_none_or(|t| now >= t) {
@@ -988,7 +999,14 @@ impl App {
         if let Event::Mouse(m) = &e {
             if !matches!(m.kind, MouseEventKind::ScrollDown | MouseEventKind::ScrollUp) {
                 // remembered for the next face tick only: no repaint, not typing
-                self.gz.pointer = Some(((m.column, m.row), Instant::now()));
+                let now = Instant::now();
+                let prev = self.gz.pointer;
+                self.gz.pointer = Some(((m.column, m.row), now));
+                // heading off the right edge: a rightward move that ends in the last columns
+                self.gz.exit = prev.filter(|((px, _), at)| m.column > *px && now.saturating_duration_since(*at) < Duration::from_millis(500) && m.column + gaze::EXIT_EDGE >= self.last_width && self.last_width > 0).map(|((px, py), _)| {
+                    let slope = ((m.row as f64 - py as f64) / (m.column as f64 - px as f64)).clamp(-1.0, 1.0);
+                    ((m.column as f64 + 0.5 + gaze::EXIT_REACH, m.row as f64 + 0.5 + slope * gaze::EXIT_REACH), now)
+                });
                 if matches!(self.overlay, Overlay::None) && self.select_mouse(*m) {
                     self.dirty = true;
                 }
@@ -2579,6 +2597,26 @@ mod tests {
         assert!(full.0 < 0.0);
         a.tick_face(t0 + gaze::POINTER_ACTIVE + Duration::from_millis(500));
         assert_eq!(a.gz.aimed, [None, None], "the pointer idled and nothing else is interesting: saccades");
+    }
+
+    #[test]
+    fn a_pointer_that_leaves_to_the_right_is_followed_out_and_then_forgotten() {
+        use crossterm::event::MouseEventKind::Moved;
+        let (mut a, _rx) = face_app();
+        screen(&mut a, 100, 40);
+        a.gz.typed_at = None;
+        let t0 = Instant::now();
+        for (col, row) in [(90, 20), (97, 22), (99, 23)] {
+            a.on_input(Event::Mouse(MouseEvent { kind: Moved, column: col, row, modifiers: KeyModifiers::NONE }));
+        }
+        a.tick_face(t0 + gaze::POINTER_ACTIVE + Duration::from_millis(500));
+        let g = a.gz.aimed[0].expect("still looking where it went");
+        assert!(g.0 > 0.9 && g.1 > 0.0, "{g:?}: out to the right, below the mark");
+        a.tick_face(t0 + gaze::EXIT_HOLD + Duration::from_millis(500));
+        assert_eq!(a.gz.aimed, [None, None], "forgotten after a while");
+        // an ordinary move near the edge, or one heading left, is not leaving
+        a.on_input(Event::Mouse(MouseEvent { kind: Moved, column: 80, row: 20, modifiers: KeyModifiers::NONE }));
+        assert!(a.gz.exit.is_none());
     }
 
     #[test]
