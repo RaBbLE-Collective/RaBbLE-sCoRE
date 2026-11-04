@@ -47,9 +47,9 @@ struct Geo {
 }
 
 /// 20 x 12: portal 8 x 4, left far edge on row 3 and right on row 8, eyes 6 rows with a black row inside the edge.
-const FINE: Geo = Geo { h: H, slots: [1, 11], portal: &[".oooooo.", "o......o", "o......o", ".oooooo."], left_top: 3, right_base: 8, eye_y: 2, eye_rows: 4, half_rows: 2 };
+const FINE: Geo = Geo { h: H, slots: [1, 11], portal: &[".oooooo.", "o......o", "o......o", ".oooooo."], left_top: 3, right_base: 8, eye_y: 2, eye_rows: 6, half_rows: 3 };
 /// 20 x 6, for quadrant glyphs: portal 8 x 3, eyes 3 rows.
-const SAFE: Geo = Geo { h: H / 2, slots: [1, 11], portal: &[".oooooo.", "o......o", ".oooooo."], left_top: 1, right_base: 4, eye_y: 2, eye_rows: 2, half_rows: 1 };
+const SAFE: Geo = Geo { h: H / 2, slots: [1, 11], portal: &[".oooooo.", "o......o", ".oooooo."], left_top: 1, right_base: 4, eye_y: 2, eye_rows: 3, half_rows: 1 };
 
 fn is_ring(k: u8) -> bool {
     k == RING || k == RING_R
@@ -185,7 +185,7 @@ mod tests {
     #[test]
     fn neutral_pose_pins_the_pixels() {
         assert_eq!(ascii(0.0, (0.0, 0.0)), [
-            "....................", "....................", "....................", "..oooooo......WW....", ".o......o.....WW....", ".o..WW..o...ooWWoo..", "..ooWWoo...o..WW..o.", "....WW.....o......o.", "....WW......oooooo..", "....................", "....................", "....................",
+            "....................", "..............WW....", "..............WW....", "..oooooo......WW....", ".o......o.....WW....", ".o..WW..o...ooWWoo..", "..ooWWoo...o..WW..o.", "....WW.....o......o.", "....WW......oooooo..", "....WW..............", "....WW..............", "....................",
         ]);
     }
 
@@ -265,8 +265,8 @@ mod tests {
             assert_eq!(&p[3][2..8], "oooooo", "left far edge stays whole at gaze {gy}");
             assert_eq!(&p[8][12..18].replace('W', "o"), "oooooo", "right far edge stays whole at gaze {gy}");
         }
-        assert_eq!(whites(&ascii(0.0, (0.0, 0.33)), 4), 8, "out by a pixel keeps four rows");
-        assert_eq!(whites(&ascii(0.0, (0.0, -1.0)), 4), 8, "sunk by a pixel the pill touches the far edge and keeps its four rows");
+        assert_eq!(whites(&ascii(0.0, (0.0, 0.33)), 4), 12, "out by a pixel keeps six rows");
+        assert_eq!(whites(&ascii(0.0, (0.0, -1.0)), 4), 12, "sunk by a pixel the pill touches the far edge and keeps its six rows");
         assert_eq!(ascii(0.0, (0.0, -1.0))[4].as_bytes()[4], b'W', "the black row is used up");
     }
 
@@ -279,7 +279,7 @@ mod tests {
 
     #[test]
     fn neutral_safe_pose_pins_the_pixels() {
-        assert_eq!(ascii_of(&SAFE, 0.0, (0.0, 0.0)), ["....................", "..oooooo......WW....", ".o......o...ooWWoo..", "..ooWWoo...o......o.", "....WW......oooooo..", "...................."]);
+        assert_eq!(ascii_of(&SAFE, 0.0, (0.0, 0.0)), ["..............WW....", "..oooooo......WW....", ".o......o...ooWWoo..", "..ooWWoo...o......o.", "....WW......oooooo..", "....WW.............."]);
     }
 
     #[test]
