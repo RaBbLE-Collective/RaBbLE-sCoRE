@@ -1,4 +1,4 @@
-//! The micro mark: two eyes drawn straight onto a 3-row cell grid (18 x 12 octant pixels), not a downscaled
+//! The micro mark: two eyes drawn straight onto a 3-row cell grid (20 x 12 octant pixels), not a downscaled
 //! face. It is the Matrix Builder's glyph (RaBbLE-NeBuLA-EyeStates.md) at this size: each eye is a slim white oval
 //! crossing its own portal, a flat ellipse eight pixels wide with the eye two wide and centred in it, the left
 //! portal along the top cell row and the right one cell row lower, the pair a cell apart. As in the face, the eye
@@ -13,8 +13,8 @@
 
 use crate::{canvas::octant_table, Cell, FacePalette, Grid};
 
-/// Cells the mark takes: four and a half per portal, the two touching.
-pub const MICRO_COLS: usize = 9;
+/// Cells the mark takes: four and a half per portal, a cell between them so no cell holds both rings.
+pub const MICRO_COLS: usize = 10;
 pub const MICRO_ROWS: usize = 3;
 const W: usize = MICRO_COLS * 2; // octant pixels across
 const H: usize = MICRO_ROWS * 4; // and down
@@ -27,92 +27,89 @@ pub const RING_R: u8 = 3;
 
 /// Pixel x where each eye's two pixels start: the right is the left mirrored about the grid's middle, so each sits
 /// on a cell edge, centred in its portal.
-const EYE_X: [usize; 2] = [4, 12];
+const EYE_X: [usize; 2] = [4, 14];
 
-/// One resolution's picture of the pair. Rows count from the left portal's far (top) edge; the right eye is
-/// drawn upside down, its far edge on row `right_base`.
+/// One resolution's picture of the pair. Each portal is drawn from its own far edge (own row 0) to its near edge;
+/// the left runs down the grid from `left_top`, the right is the same picture upside down with its far edge on
+/// `right_base`. Each far edge ends a cell, so the black row below it and the eye never share a cell with it.
 struct Geo {
     h: usize,
     /// Pixel x where each portal starts.
     slots: [usize; 2],
     portal: &'static [&'static str],
-    /// The eye's first row, just inside the far edge, and how many rows it runs (through the near edge and out).
+    left_top: usize,
+    right_base: usize,
+    /// The eye's first own row (one black row inside the far edge) and how many rows it runs.
     eye_y: usize,
     eye_rows: usize,
-    /// The eye's rows when half shut: the least that still fills the cell it shares with the far edge.
+    /// The eye's rows when half shut.
     half_rows: usize,
-    right_base: usize,
-    /// How far vertical gaze slides the whole eye along its portal: one hop in (behind the far edge) or out. The
-    /// hop is the most the eye can move and still leave its shared cell either filled or free of white.
-    hop: i32,
 }
 
-/// 18 x 12: portal 8 x 4 in the top cell row (left) and the second (right), eyes 6 rows.
-const FINE: Geo = Geo { h: H, slots: [1, 9], portal: &[".oooooo.", "o......o", "o......o", ".oooooo."], eye_y: 1, eye_rows: 6, half_rows: 3, right_base: 7, hop: 3 };
-/// 18 x 6, for quadrant glyphs: portal 8 x 3, eyes 3 rows.
-const SAFE: Geo = Geo { h: H / 2, slots: [1, 9], portal: &[".oooooo.", "o......o", ".oooooo."], eye_y: 1, eye_rows: 3, half_rows: 1, right_base: 3, hop: 2 };
+/// 20 x 12: portal 8 x 4, left far edge on row 3 and right on row 8, eyes 6 rows with a black row inside the edge.
+const FINE: Geo = Geo { h: H, slots: [1, 11], portal: &[".oooooo.", "o......o", "o......o", ".oooooo."], left_top: 3, right_base: 8, eye_y: 2, eye_rows: 6, half_rows: 3 };
+/// 20 x 6, for quadrant glyphs: portal 8 x 3, eyes 3 rows.
+const SAFE: Geo = Geo { h: H / 2, slots: [1, 11], portal: &[".oooooo.", "o......o", ".oooooo."], left_top: 1, right_base: 4, eye_y: 2, eye_rows: 3, half_rows: 1 };
 
 fn is_ring(k: u8) -> bool {
     k == RING || k == RING_R
 }
 
+impl Geo {
+    /// The grid row of own row `y` for eye `i`, if it is on the grid.
+    fn row(&self, i: usize, y: i32) -> Option<usize> {
+        let r = if i == 0 { self.left_top as i32 + y } else { self.right_base as i32 - y };
+        (0..self.h as i32).contains(&r).then(|| r as usize)
+    }
+}
+
 /// The pixels of one geometry, `[y][x]`, each VOID, RING, RING_R or WHITE.
-/// `gaze` x steps each eye a cell (2 px) along its portal, y (+ = down) slides the left eye out of its portal and
+/// `gaze` x steps each eye a cell (2 px) along its portal. y (+ = down) slides the left eye out of its portal and
 /// the right eye into its own (it hangs the other way): the pill keeps its length, the far edge hides what has gone
-/// behind it, and the hollow it left is black. `blink` 0..1 (1 = shut) retracts the white to the least that fills
-/// its shared cell, then lets the portal alone stand, then both eyes shut to a dash in the hollow.
+/// behind it, and the row it leaves is black. An eye sinks until only its near-edge end shows and comes out as far
+/// as the grid has room. `blink` 0..1 (1 = shut) retracts the white to half, then to nothing so the portal alone
+/// stands, then both eyes shut to a dash in the hollow.
 fn grid(g: &Geo, blink: f64, gaze: (f64, f64)) -> Vec<[u8; W]> {
     let blink = blink.clamp(0.0, 1.0);
     let (gx, gy) = (gaze.0.clamp(-1.0, 1.0), gaze.1.clamp(-1.0, 1.0));
     let step = if gx <= -0.4 { -2 } else if gx >= 0.4 { 2 } else { 0 };
-    let slide = (gy * g.hop as f64).round() as i32;
+    let down = (gy * 3.0).round() as i32;
+    let near = g.portal.len() as i32 - 1;
+    let last = g.eye_y as i32 + g.eye_rows as i32 - 1;
     let mut px = vec![[VOID; W]; g.h];
     for (i, (slot, eye_x)) in g.slots.into_iter().zip(EYE_X).enumerate() {
         let ring = if i == 0 { RING } else { RING_R };
-        // drawn as the left eye; the right eye is the same picture upside down
-        let flip = |y: usize| if i == 0 { y } else { g.right_base - y };
         if blink >= 0.8 {
             let dash = if g.portal.len() >= 4 { 2 } else { 1 };
             for y in (g.portal.len() - dash) / 2..(g.portal.len() + dash) / 2 {
                 for x in eye_x - 1..eye_x + 2 {
-                    px[flip(y)][x] = ring;
+                    px[g.row(i, y as i32).unwrap()][x] = ring;
                 }
             }
             continue;
         }
-        // the pill keeps its length; it is seen from the far edge's inside outwards, so what slid behind it is gone
+        // own rows the eye can slide: in until only the near edge's end shows, out until the grid ends
+        let out = if i == 0 { g.h as i32 - 1 - g.left_top as i32 } else { g.right_base as i32 } - last;
+        let slide = (if i == 0 { down } else { -down }).clamp(near - last, out.max(0));
         let n = if blink < 0.3 { g.eye_rows } else if blink < 0.55 { g.half_rows } else { 0 } as i32;
-        let top = g.eye_y as i32 + if i == 0 { slide } else { -slide };
-        let rows: Vec<usize> = (top..top + n).filter(|&y| y >= g.eye_y as i32).filter_map(|y| if i == 0 { Some(y as usize) } else { (g.right_base as i32 - y >= 0).then(|| y as usize) }).filter(|&y| flip(y) < g.h).collect();
+        let top = g.eye_y as i32 + slide;
+        // the far edge hides whatever is behind it: only own rows 1 and up are seen
+        let mut rows: Vec<i32> = (top..top + n).filter(|&y| y >= 1 && g.row(i, y).is_some()).collect();
+        // a sliver that stops short of the near edge would leave white, a gap and the edge in one cell: it is gone
+        if rows.last().is_some_and(|&y| y < near) {
+            rows.clear();
+        }
         let ex = (eye_x as i32 + step) as usize;
         for (y, row) in g.portal.iter().enumerate() {
             for (x, ch) in row.chars().enumerate() {
-                let behind_eye = rows.contains(&y) && (ex..ex + 2).contains(&(slot + x));
-                if ch == 'o' && !behind_eye {
-                    px[flip(y)][slot + x] = ring;
+                if ch == 'o' && !(rows.contains(&(y as i32)) && (ex..ex + 2).contains(&(slot + x))) {
+                    px[g.row(i, y as i32).unwrap()][slot + x] = ring;
                 }
             }
         }
         for &y in &rows {
             for x in ex..ex + 2 {
-                px[flip(y)][x] = WHITE;
-            }
-        }
-    }
-    // A pill part way out of its portal leaves a cell holding ring, white and a gap, which two colours cannot draw.
-    // The gap wins over the edge: the far edge is cut away behind the pill, so a black notch shows the pill has
-    // come off it.
-    let per = g.h / MICRO_ROWS;
-    for ex in [EYE_X[0] as i32 + step, EYE_X[1] as i32 + step].map(|x| x as usize) {
-        for band in 0..MICRO_ROWS {
-            let cell: Vec<(usize, usize)> = (band * per..(band + 1) * per).flat_map(|y| (ex..ex + 2).map(move |x| (y, x))).collect();
-            let has = |f: fn(u8) -> bool| cell.iter().any(|&(y, x)| f(px[y][x]));
-            if has(is_ring) && has(|k| k == WHITE) && has(|k| k == VOID) {
-                for &(y, x) in &cell {
-                    if is_ring(px[y][x]) {
-                        px[y][x] = VOID;
-                    }
-                }
+                px[g.row(i, y).unwrap()][x] = WHITE;
             }
         }
     }
@@ -183,7 +180,7 @@ mod tests {
     #[test]
     fn neutral_pose_pins_the_pixels() {
         assert_eq!(ascii(0.0, (0.0, 0.0)), [
-            "..oooooo..........", ".o..WW..o...WW....", ".o..WW..o...WW....", "..ooWWoo....WW....", "....WW....ooWWoo..", "....WW...o..WW..o.", "....WW...o..WW..o.", "..........oooooo..", "..................", "..................", "..................", "..................",
+            "....................", "..............WW....", "..............WW....", "..oooooo......WW....", ".o......o.....WW....", ".o..WW..o...ooWWoo..", "..ooWWoo...o..WW..o.", "....WW.....o......o.", "....WW......oooooo..", "....WW..............", "....WW..............", "....................",
         ]);
     }
 
@@ -192,7 +189,7 @@ mod tests {
         let (p, g) = (pal(), micro(&pal(), 0.0, (0.0, 0.0), false));
         let fgs = |r: usize, cols: std::ops::Range<usize>| g[r][cols].iter().filter(|c| c.ch != ' ').map(|c| c.fg).collect::<Vec<_>>();
         assert!(fgs(0, 0..3).contains(&p.cyan) && !fgs(0, 0..3).contains(&p.magenta), "top portal is the left eye's, cyan");
-        assert!(fgs(1, 4..8).contains(&p.magenta) && !fgs(1, 4..8).contains(&p.cyan), "the lower portal is the right eye's, magenta");
+        assert!(fgs(1, 5..10).contains(&p.magenta) && !fgs(1, 5..10).contains(&p.cyan), "the lower portal is the right eye's, magenta");
         assert!(g.iter().flatten().any(|c| c.fg == p.text || c.bg == p.text), "the eye is white");
         assert!(g.iter().flatten().all(|c| [p.bg, p.text, p.cyan, p.magenta].contains(&c.fg) && (c.bg == p.bg || c.bg == p.text)), "no stray colours");
     }
@@ -248,24 +245,23 @@ mod tests {
     }
 
     #[test]
-    fn looking_down_slides_the_pills_and_leaves_the_hollow_black() {
-        let out = ascii(0.0, (0.0, 1.0));
-        assert_eq!(out[1], ".o......o.........", "the left pill has left its portal, the hollow is black");
-        assert_eq!(out[3], "..oooooo..........", "the near edge is whole again");
-        assert_eq!(count_of(&out, 'W'), 2 * 6 + 2 * 3, "the left pill keeps its six rows, the right sinks behind its far edge");
-        let up = ascii(0.0, (0.0, -1.0));
-        assert_eq!(count_of(&up, 'W'), 2 * 3 + 2 * 4, "the left pill sinks to three rows behind its far edge");
+    fn neutral_leaves_one_black_row_between_each_far_edge_and_its_pill() {
+        let n = ascii(0.0, (0.0, 0.0));
+        assert_eq!((&n[3], &n[4]), (&"..oooooo......WW....".to_string(), &".o......o.....WW....".to_string()), "left: edge whole, then black");
+        assert_eq!(&n[7][11..19], "o......o", "right: black row inside the edge");
+        assert_eq!(&n[8][12..18], "oooooo", "right far edge whole");
     }
 
     #[test]
-    fn part_way_out_the_pill_keeps_its_length_and_a_black_notch_shows_in_the_far_edge() {
-        let half = ascii(0.0, (0.0, 0.33));
-        assert_eq!(half[0], "..oo..oo..........", "the far edge is cut away behind the pill");
-        assert_eq!(half[1], ".o......o.........", "black between the edge and the pill");
-        assert_eq!(&half[2][4..6], "WW");
-        let whites = |gy: f64| ascii(0.0, (0.0, gy)).iter().map(|r| r[4..6].matches('W').count()).sum::<usize>();
-        assert_eq!(whites(0.0), whites(0.33), "sliding does not change the left pill's length");
-        assert_eq!(whites(0.0), whites(0.66));
+    fn sliding_never_cuts_an_edge_and_the_pill_keeps_its_length_until_the_portal_hides_it() {
+        let whites = |rows: &[String], x: usize| rows.iter().map(|r| r[x..x + 2].matches('W').count()).sum::<usize>();
+        for gy in [-1.0, -0.66, -0.33, 0.0, 0.33, 0.66, 1.0] {
+            let p = ascii(0.0, (0.0, gy));
+            assert_eq!(&p[3][2..8], "oooooo", "left far edge stays whole at gaze {gy}");
+            assert_eq!(&p[8][12..18].replace('W', "o"), "oooooo", "right far edge stays whole at gaze {gy}");
+        }
+        assert_eq!(whites(&ascii(0.0, (0.0, 0.33)), 4), 12, "out by a pixel keeps six rows");
+        assert_eq!(whites(&ascii(0.0, (0.0, -1.0)), 4), 8, "sunk, only the part past the far edge shows");
     }
 
     fn count_of(rows: &[String], ch: char) -> usize {
@@ -274,7 +270,7 @@ mod tests {
 
     #[test]
     fn neutral_safe_pose_pins_the_pixels() {
-        assert_eq!(ascii_of(&SAFE, 0.0, (0.0, 0.0)), ["..oooooo....WW....", ".o..WW..o.ooWWoo..", "..ooWWoo.o..WW..o.", "....WW....oooooo..", "..................", ".................."]);
+        assert_eq!(ascii_of(&SAFE, 0.0, (0.0, 0.0)), ["..............WW....", "..oooooo......WW....", ".o......o...ooWWoo..", "..ooWWoo...o......o.", "....WW......oooooo..", "....WW.............."]);
     }
 
     #[test]
@@ -283,3 +279,4 @@ mod tests {
         assert!(g.iter().flatten().all(|c| c.ch == ' ' || ('\u{2580}'..='\u{259F}').contains(&c.ch)), "{:?}", g.iter().map(|r| r.iter().map(|c| c.ch).collect::<String>()).collect::<Vec<_>>());
     }
 }
+

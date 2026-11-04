@@ -2170,17 +2170,17 @@ mod tests {
     fn a_small_pane_gets_the_compact_mark_and_the_full_tier_is_unchanged() {
         let (mut a, _rx) = face_app();
         let small = paint_face(&mut a, 40, 12);
-        assert!(mark_cells(&small, 9, 3) > 4, "compact mark in the 9x3 slot");
-        let row: String = (0..25).map(|x| small[(11 + x, 0)].symbol().to_owned()).collect();
+        assert!(mark_cells(&small, 10, 3) > 4, "compact mark in the 10x3 slot");
+        let row: String = (0..25).map(|x| small[(12 + x, 0)].symbol().to_owned()).collect();
         assert!(row.starts_with("RaBbLE"), "text reflows beside it with two columns of air: {row:?}");
         assert!(a.face_due().is_some());
-        assert_eq!(a.gz.centres[0], Some((4.5, 1.5)), "gaze centre follows the compact slot");
+        assert_eq!(a.gz.centres[0], Some((5.0, 1.5)), "gaze centre follows the compact slot");
         assert_eq!(a.tr_rect.y, 4, "three header rows + divider");
-        let usage: String = (0..25).map(|x| small[(11 + x, 2)].symbol().to_owned()).collect();
+        let usage: String = (0..25).map(|x| small[(12 + x, 2)].symbol().to_owned()).collect();
         assert!(usage.starts_with("usage"), "the third header line is usage: {usage:?}");
         let (mut b, _rx) = face_app();
         let edge = paint_face(&mut b, 30, 10);
-        assert!(mark_cells(&edge, 9, 3) > 4, "minimum compact pane");
+        assert!(mark_cells(&edge, 10, 3) > 4, "minimum compact pane");
         let (mut c, _rx) = face_app();
         let big = paint_face(&mut c, 100, 40);
         assert!(mark_cells(&big, 24, 6) > 20 && c.gz.centres[0] == Some((12.0, 3.0)) && c.tr_rect.y == 7);
