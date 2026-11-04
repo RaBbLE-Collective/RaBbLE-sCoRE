@@ -65,7 +65,7 @@ fn grid(g: &Geo, blink: f64, gaze: (f64, f64)) -> Vec<[u8; W]> {
     let blink = blink.clamp(0.0, 1.0);
     let (gx, gy) = (gaze.0.clamp(-1.0, 1.0), gaze.1.clamp(-1.0, 1.0));
     let step = if gx <= -0.4 { -2 } else if gx >= 0.4 { 2 } else { 0 };
-    let slide = if gy >= 0.4 { g.hop } else if gy <= -0.4 { -g.hop } else { 0 };
+    let slide = (gy * g.hop as f64).round() as i32;
     let mut px = vec![[VOID; W]; g.h];
     for (i, (slot, eye_x)) in g.slots.into_iter().zip(EYE_X).enumerate() {
         let ring = if i == 0 { RING } else { RING_R };
@@ -96,6 +96,23 @@ fn grid(g: &Geo, blink: f64, gaze: (f64, f64)) -> Vec<[u8; W]> {
         for &y in &rows {
             for x in ex..ex + 2 {
                 px[flip(y)][x] = WHITE;
+            }
+        }
+    }
+    // A pill part way out of its portal leaves a cell holding ring, white and a gap, which two colours cannot draw.
+    // The gap wins over the edge: the far edge is cut away behind the pill, so a black notch shows the pill has
+    // come off it.
+    let per = g.h / MICRO_ROWS;
+    for ex in [EYE_X[0] as i32 + step, EYE_X[1] as i32 + step].map(|x| x as usize) {
+        for band in 0..MICRO_ROWS {
+            let cell: Vec<(usize, usize)> = (band * per..(band + 1) * per).flat_map(|y| (ex..ex + 2).map(move |x| (y, x))).collect();
+            let has = |f: fn(u8) -> bool| cell.iter().any(|&(y, x)| f(px[y][x]));
+            if has(is_ring) && has(|k| k == WHITE) && has(|k| k == VOID) {
+                for &(y, x) in &cell {
+                    if is_ring(px[y][x]) {
+                        px[y][x] = VOID;
+                    }
+                }
             }
         }
     }
@@ -219,9 +236,9 @@ mod tests {
                             }
                         }
                         if b < 0.3 {
-                            // each eye in front of its near edge hides two of its pixels; one slid clear hides none
+                            // each eye hides two pixels in front of its near edge and cuts at most two more from the far edge when part way out
                             let rings = n(&px, is_ring);
-                            assert!([0, 2, 4].map(|hid| 2 * portal - hid).contains(&rings), "a ring lost or gained pixels: {at}");
+                            assert!((2 * portal - 8..=2 * portal).contains(&rings), "a ring lost or gained pixels: {at}");
                             assert!(n(&px, |k| k == WHITE) >= 2 * 2 * g.half_rows, "an eye is shorter than its cell: {at}");
                         }
                     }
@@ -238,6 +255,17 @@ mod tests {
         assert_eq!(count_of(&out, 'W'), 2 * 6 + 2 * 3, "the left pill keeps its six rows, the right sinks behind its far edge");
         let up = ascii(0.0, (0.0, -1.0));
         assert_eq!(count_of(&up, 'W'), 2 * 3 + 2 * 4, "the left pill sinks to three rows behind its far edge");
+    }
+
+    #[test]
+    fn part_way_out_the_pill_keeps_its_length_and_a_black_notch_shows_in_the_far_edge() {
+        let half = ascii(0.0, (0.0, 0.33));
+        assert_eq!(half[0], "..oo..oo..........", "the far edge is cut away behind the pill");
+        assert_eq!(half[1], ".o......o.........", "black between the edge and the pill");
+        assert_eq!(&half[2][4..6], "WW");
+        let whites = |gy: f64| ascii(0.0, (0.0, gy)).iter().map(|r| r[4..6].matches('W').count()).sum::<usize>();
+        assert_eq!(whites(0.0), whites(0.33), "sliding does not change the left pill's length");
+        assert_eq!(whites(0.0), whites(0.66));
     }
 
     fn count_of(rows: &[String], ch: char) -> usize {
