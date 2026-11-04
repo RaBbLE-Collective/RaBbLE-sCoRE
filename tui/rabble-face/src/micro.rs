@@ -47,9 +47,9 @@ struct Geo {
 }
 
 /// 20 x 12: portal 8 x 4, left far edge on row 3 and right on row 8, eyes 6 rows with a black row inside the edge.
-const FINE: Geo = Geo { h: H, slots: [1, 11], portal: &[".oooooo.", "o......o", "o......o", ".oooooo."], left_top: 3, right_base: 8, eye_y: 2, eye_rows: 6, half_rows: 3 };
+const FINE: Geo = Geo { h: H, slots: [1, 11], portal: &[".oooooo.", "o......o", "o......o", ".oooooo."], left_top: 3, right_base: 8, eye_y: 2, eye_rows: 4, half_rows: 2 };
 /// 20 x 6, for quadrant glyphs: portal 8 x 3, eyes 3 rows.
-const SAFE: Geo = Geo { h: H / 2, slots: [1, 11], portal: &[".oooooo.", "o......o", ".oooooo."], left_top: 1, right_base: 4, eye_y: 2, eye_rows: 3, half_rows: 1 };
+const SAFE: Geo = Geo { h: H / 2, slots: [1, 11], portal: &[".oooooo.", "o......o", ".oooooo."], left_top: 1, right_base: 4, eye_y: 2, eye_rows: 2, half_rows: 1 };
 
 fn is_ring(k: u8) -> bool {
     k == RING || k == RING_R
@@ -73,9 +73,16 @@ fn grid(g: &Geo, blink: f64, gaze: (f64, f64)) -> Vec<[u8; W]> {
     let blink = blink.clamp(0.0, 1.0);
     let (gx, gy) = (gaze.0.clamp(-1.0, 1.0), gaze.1.clamp(-1.0, 1.0));
     let step = if gx <= -0.4 { -2 } else if gx >= 0.4 { 2 } else { 0 };
-    let down = (gy * 3.0).round() as i32;
     let near = g.portal.len() as i32 - 1;
     let last = g.eye_y as i32 + g.eye_rows as i32 - 1;
+    // Both eyes move together and stop together. One goes out by `outs[m]` pixels while the other sinks m: out a
+    // pixel at most (the
+    // motion stays inside the portals), and in until only the near edge's end shows.
+    let band = |y: i32| g.row(0, y).map(|r| r / (g.h / MICRO_ROWS));
+    let clear = (near + 1..).find(|&y| band(y) != band(near)).unwrap_or(near + 1);
+    let outs: Vec<i32> = (0..=(g.h as i32 - 1 - g.left_top as i32 - last).clamp(0, 1)).filter(|&o| !(g.eye_y as i32 + o > near && g.eye_y as i32 + o < clear)).collect();
+    let steps = (outs.len() as i32 - 1).min(last - near).max(0);
+    let down = (gy * steps as f64).round() as i32;
     let mut px = vec![[VOID; W]; g.h];
     for (i, (slot, eye_x)) in g.slots.into_iter().zip(EYE_X).enumerate() {
         let ring = if i == 0 { RING } else { RING_R };
@@ -88,9 +95,7 @@ fn grid(g: &Geo, blink: f64, gaze: (f64, f64)) -> Vec<[u8; W]> {
             }
             continue;
         }
-        // own rows the eye can slide: in until only the near edge's end shows, out until the grid ends
-        let out = if i == 0 { g.h as i32 - 1 - g.left_top as i32 } else { g.right_base as i32 } - last;
-        let slide = (if i == 0 { down } else { -down }).clamp(near - last, out.max(0));
+        let slide = if (i == 0) == (down >= 0) { outs[down.unsigned_abs() as usize] } else { -down.abs() };
         let n = if blink < 0.3 { g.eye_rows } else if blink < 0.55 { g.half_rows } else { 0 } as i32;
         let top = g.eye_y as i32 + slide;
         // the far edge hides whatever is behind it: only own rows 1 and up are seen
@@ -180,7 +185,7 @@ mod tests {
     #[test]
     fn neutral_pose_pins_the_pixels() {
         assert_eq!(ascii(0.0, (0.0, 0.0)), [
-            "....................", "..............WW....", "..............WW....", "..oooooo......WW....", ".o......o.....WW....", ".o..WW..o...ooWWoo..", "..ooWWoo...o..WW..o.", "....WW.....o......o.", "....WW......oooooo..", "....WW..............", "....WW..............", "....................",
+            "....................", "....................", "....................", "..oooooo......WW....", ".o......o.....WW....", ".o..WW..o...ooWWoo..", "..ooWWoo...o..WW..o.", "....WW.....o......o.", "....WW......oooooo..", "....................", "....................", "....................",
         ]);
     }
 
@@ -260,17 +265,21 @@ mod tests {
             assert_eq!(&p[3][2..8], "oooooo", "left far edge stays whole at gaze {gy}");
             assert_eq!(&p[8][12..18].replace('W', "o"), "oooooo", "right far edge stays whole at gaze {gy}");
         }
-        assert_eq!(whites(&ascii(0.0, (0.0, 0.33)), 4), 12, "out by a pixel keeps six rows");
-        assert_eq!(whites(&ascii(0.0, (0.0, -1.0)), 4), 8, "sunk, only the part past the far edge shows");
+        assert_eq!(whites(&ascii(0.0, (0.0, 0.33)), 4), 8, "out by a pixel keeps four rows");
+        assert_eq!(whites(&ascii(0.0, (0.0, -1.0)), 4), 8, "sunk by a pixel the pill touches the far edge and keeps its four rows");
+        assert_eq!(ascii(0.0, (0.0, -1.0))[4].as_bytes()[4], b'W', "the black row is used up");
     }
 
-    fn count_of(rows: &[String], ch: char) -> usize {
-        rows.iter().map(|r| r.matches(ch).count()).sum()
+    #[test]
+    fn the_pills_stop_together() {
+        let (a, b) = (ascii(0.0, (0.0, 0.8)), ascii(0.0, (0.0, 1.0)));
+        assert_eq!(a, b, "both pills have reached the end of their travel, neither goes on moving");
+        assert_eq!(ascii(0.0, (0.0, -0.8)), ascii(0.0, (0.0, -1.0)));
     }
 
     #[test]
     fn neutral_safe_pose_pins_the_pixels() {
-        assert_eq!(ascii_of(&SAFE, 0.0, (0.0, 0.0)), ["..............WW....", "..oooooo......WW....", ".o......o...ooWWoo..", "..ooWWoo...o......o.", "....WW......oooooo..", "....WW.............."]);
+        assert_eq!(ascii_of(&SAFE, 0.0, (0.0, 0.0)), ["....................", "..oooooo......WW....", ".o......o...ooWWoo..", "..ooWWoo...o......o.", "....WW......oooooo..", "...................."]);
     }
 
     #[test]
