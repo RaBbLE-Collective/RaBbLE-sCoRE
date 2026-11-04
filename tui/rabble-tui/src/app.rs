@@ -177,6 +177,11 @@ mod gaze {
     /// Columns from the right edge that count as leaving, and how far beyond it the eyes aim.
     pub const EXIT_EDGE: u16 = 2;
     pub const EXIT_REACH: f64 = 80.0;
+    /// A glance straight up: how long it lasts, and the gap between idle ones (a signal, such as a mood flash,
+    /// glances too). Idle glances only happen when nothing else is worth looking at.
+    pub const GLANCE_HOLD: Duration = Duration::from_millis(1400);
+    pub const GLANCE_GAP_MIN_MS: u64 = 12_000;
+    pub const GLANCE_GAP_SPAN_MS: u64 = 25_000;
     /// How often the entity re-chooses what to look at (low, so it never jitters), and how long it must stay
     /// on one thing before it may switch (hysteresis).
     pub const ATTN_EVERY: Duration = Duration::from_millis(500);
@@ -235,6 +240,10 @@ mod gaze {
         pub pointer: Option<((u16, u16), Instant)>,
         /// Where the eyes go once the pointer has left to the right, and since when.
         pub exit: Option<(Cell, Instant)>,
+        /// Looking straight up until, when the next idle glance is due, and the xorshift state that spaces them.
+        pub glance: Option<Instant>,
+        pub glance_next: Option<Instant>,
+        pub glance_rng: u64,
         pub typed_at: Option<Instant>,
         pub card_at: Option<Instant>,
         pub cursor: (u16, u16),
@@ -307,6 +316,7 @@ impl App {
     // ---- the face -----------------------------------------------------------------------------
     fn flash(&mut self, m: Mood) {
         self.flash = Some((m, Instant::now() + FLASH));
+        self.gz.glance = Some(Instant::now() + gaze::GLANCE_HOLD);
     }
 
     /// Python `_mood()`: a flash, else streaming, else something running, else typing, else idle.
@@ -407,9 +417,27 @@ impl App {
             }
             (self.gz.current(), gaze::ATTN_TTL)
         };
+        // an idle moment now and then, or a signal, turns the eyes up (never over the pointer)
+        if pointer.is_none() && gone.is_none() {
+            if target.is_none() && self.gz.glance_next.is_none_or(|t| now >= t) {
+                let r = &mut self.gz.glance_rng;
+                if *r == 0 {
+                    *r = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64) | 1;
+                }
+                *r ^= *r << 13;
+                *r ^= *r >> 7;
+                *r ^= *r << 17;
+                let gap = gaze::GLANCE_GAP_MIN_MS + *r % gaze::GLANCE_GAP_SPAN_MS;
+                if self.gz.glance_next.is_some() {
+                    self.gz.glance = Some(now + gaze::GLANCE_HOLD);
+                }
+                self.gz.glance_next = Some(now + Duration::from_millis(gap));
+            }
+        }
+        let glancing = pointer.is_none() && gone.is_none() && self.gz.glance.is_some_and(|u| now < u);
         let centres = self.gz.centres;
         let Some(hub) = &mut self.face else { return };
-        let aim = |i: usize| target.zip(centres[i]).map(|(t, c)| gaze::aim(t, c));
+        let aim = |i: usize| if glancing { centres[i].map(|_| (0.0, -1.0)) } else { target.zip(centres[i]).map(|(t, c)| gaze::aim(t, c)) };
         let aimed = [aim(0), aim(1)];
         hub.mini.set_gaze(aimed[0], Some(ttl), now);
         if let Some(f) = &mut hub.full {
@@ -2617,6 +2645,28 @@ mod tests {
         // an ordinary move near the edge, or one heading left, is not leaving
         a.on_input(Event::Mouse(MouseEvent { kind: Moved, column: 80, row: 20, modifiers: KeyModifiers::NONE }));
         assert!(a.gz.exit.is_none());
+    }
+
+    #[test]
+    fn the_eyes_glance_up_now_and_then_when_idle_and_on_a_signal() {
+        let (mut a, _rx) = face_app();
+        screen(&mut a, 100, 40);
+        a.gz.typed_at = None;
+        let t0 = Instant::now();
+        let mut ups = 0;
+        for i in 0..2000 {
+            a.tick_face(t0 + Duration::from_millis(100 * i));
+            if a.gz.aimed[0] == Some((0.0, -1.0)) {
+                ups += 1;
+            }
+        }
+        assert!((5..400).contains(&ups), "glanced up now and then in 200 s, got {ups} ticks");
+        let (mut b, _rx) = face_app();
+        screen(&mut b, 100, 40);
+        b.gz.typed_at = None;
+        b.flash(Mood::Error);
+        b.tick_face(Instant::now() + Duration::from_millis(50));
+        assert_eq!(b.gz.aimed[0], Some((0.0, -1.0)), "a signal turns the eyes up");
     }
 
     #[test]
