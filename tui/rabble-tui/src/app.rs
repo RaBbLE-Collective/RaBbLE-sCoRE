@@ -707,7 +707,7 @@ impl App {
             Down::OrganStarted { organ, brief, task_id, .. } => {
                 self.crew.started(&organ, task_id, &brief);
                 self.busy.insert(format!("organ:{organ}"));
-                self.notice(&format!("{organ} started: {brief}"), false)
+                self.notice(&format!("{} started: {brief}", crate::crew::display(&organ)), false)
             }
             Down::OrganDone { organ, status, result, .. } => {
                 self.crew.done(&organ, &status, &result);
@@ -718,7 +718,7 @@ impl App {
                     OrganStatus::Killed => ("killed", true),
                     OrganStatus::Unknown => ("ended", true),
                 };
-                self.notice(&format!("{organ} {word}"), err);
+                self.notice(&format!("{} {word}", crate::crew::display(&organ)), err);
             }
             Down::OrganProgress { organ, usage, last_tool_name, .. } => self.crew.progress(&organ, usage.as_ref(), last_tool_name.as_deref()),
             Down::Narration { organ, text, .. } => self.crew.note(&organ, &text),
@@ -1670,7 +1670,7 @@ mod tests {
         ev(&mut a, r#"{"type":"OrganDone","organ":"gobble","task_id":"k","status":"failed"}"#);
         ev(&mut a, r#"{"type":"TurnDone","stop_reason":"end_turn","origin":"background"}"#);
         let s = screen(&mut a, 80, 20);
-        assert!(s.contains("gobble started: map it") && s.contains("gobble failed") && s.contains("background turn finished"), "{s}");
+        assert!(s.contains("GoBbLE started: map it") && s.contains("GoBbLE failed") && s.contains("background turn finished"), "{s}");
     }
 
     #[test]

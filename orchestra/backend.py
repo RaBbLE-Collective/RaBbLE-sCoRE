@@ -64,6 +64,13 @@ _TEST_RUN = re.compile(r"\b(pytest|py\.test|unittest|npm\s+(run\s+)?test|pnpm\s+
 # one stream-json line carries a whole tool result; a base64 screenshot is >1 MB (the SDK default)
 MAX_BUFFER = 64 * 1024 * 1024
 
+END_SESSION_TOOL = "mcp__rabble__end_session"
+SELF_END_GUIDANCE = (
+    "Session lifecycle: each session is a live process the engine pays for. When you believe the work you were "
+    "given is complete and nothing is left for you to do or answer, finish your reply and call the end_session "
+    "tool (mcp__rabble__end_session) with a one-line reason. If the user's request was open-ended, a question "
+    "they may follow up on, or work is still unverified or blocked, do not end; keep the session open.")
+
 
 class ClaudeCodeBackend(_Queued):
     def __init__(self, cwd: str | Path, *, append: str | None = None, agents: dict[str, Any] | None = None,
@@ -87,6 +94,7 @@ class ClaudeCodeBackend(_Queued):
         self._lead_model: str | None = None
         self._reported: tuple[float, int] | None = None
         self.client = None
+        self.end_requested = False   # the session called end_session: the engine closes it once the turn is done
         self._pump: asyncio.Task | None = None
         self._side: set[asyncio.Task] = set()
         self._calls: dict[str, tuple[str, dict]] = {}   # tool id -> (name, input), for re-grounding
@@ -144,10 +152,23 @@ class ClaudeCodeBackend(_Queued):
         self._report_entropy("; ".join(reasons) or None)
 
     def _auto_allow(self, tool: str, tool_input: dict[str, Any]) -> bool:
+        if tool == END_SESSION_TOOL:      # ending itself costs the user nothing, whatever the trust profile
+            return True
         return trust.auto_allow(self.trust_profile(), tool, tool_input, self.cwd)
 
     def organ_of_agent(self, agent_id: str | None) -> str:
         return self._organ_by_agent.get(agent_id, "agent") if agent_id else ev.LEAD
+
+    def _self_end_server(self):
+        from claude_agent_sdk import create_sdk_mcp_server, tool
+
+        @tool("end_session", "Call this when the work you were given is finished and nothing more is wanted from you. "
+              "Finish your reply first; the session closes when this turn ends. Do not call it while the user may "
+              "still have follow-ups.", {"reason": str})
+        async def end_session(args: dict[str, Any]) -> dict[str, Any]:
+            self.end_requested = True
+            return {"content": [{"type": "text", "text": "Noted. This session closes when your reply is done."}]}
+        return create_sdk_mcp_server("rabble", tools=[end_session])
 
     def options(self):
         from claude_agent_sdk import AgentDefinition, ClaudeAgentOptions, HookMatcher
@@ -155,9 +176,9 @@ class ClaudeCodeBackend(_Queued):
         from .permissions import Permissions
         self.permissions = Permissions(self.emit, self.organ_of_agent, self._auto_allow)
         system_prompt: dict[str, Any] = {"type": "preset", "preset": "claude_code"}
-        if self.append:
-            # an append to Claude Code's own prompt; replacing it drops its coding + safety guidance
-            system_prompt["append"] = self.append
+        # an append to Claude Code's own prompt; replacing it drops its coding + safety guidance
+        system_prompt["append"] = "\n\n".join(filter(None, (self.append, SELF_END_GUIDANCE)))
+        mcp_servers = {**(self.engine.mcp_servers if self.engine else {}), "rabble": self._self_end_server()}
         return ClaudeAgentOptions(
             system_prompt=system_prompt,
             setting_sources=["user", "project", "local"],
@@ -173,7 +194,7 @@ class ClaudeCodeBackend(_Queued):
             if self.agents else None,
             max_buffer_size=MAX_BUFFER,
             can_use_tool=self.permissions.can_use_tool,
-            **(self.engine.sdk_kwargs() if self.engine else {}),
+            **{**(self.engine.sdk_kwargs() if self.engine else {}), "mcp_servers": mcp_servers},
             hooks={"SubagentStart": [HookMatcher(hooks=[self._on_subagent_start])]},
         )
 

@@ -292,9 +292,10 @@ impl Permission {
         let w = area.width.saturating_sub(4).clamp(10, 100).min(area.width);
         let inner = w.saturating_sub(4) as usize;
         let who = if self.ask.organ.is_empty() { "rabble".to_owned() } else { self.ask.organ.clone() };
+        let shown = crate::crew::display(&who);
         let head = self.ask.title.clone().unwrap_or_else(|| format!("{who} wants to use {}", self.ask.tool));
         let mut top: Vec<Line<'static>> = Vec::new();
-        top.push(Line::from(vec![Span::styled(format!("{who} "), th.organ(&who)), Span::styled(format!("asks: {}", self.ask.tool), th.heading)]));
+        top.push(Line::from(vec![Span::styled(format!("{shown} "), th.organ(&who)), Span::styled(format!("asks: {}", self.ask.tool), th.heading)]));
         top.extend(wrap::wrap(&[Span::styled(clean(&head), th.text)], inner, &[], &[]).into_iter().take(2));
         if let Some(d) = &self.ask.description {
             top.extend(wrap::wrap(&[Span::styled(clean(d), th.muted)], inner, &[], &[]).into_iter().take(2));

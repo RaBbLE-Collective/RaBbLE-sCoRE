@@ -436,7 +436,7 @@ impl Transcript {
             Item::Reply { organ, text, .. } => {
                 let mut v = markdown::render(text, th, w);
                 if organ != "rabble" && !organ.is_empty() {
-                    v.insert(0, Line::from(Span::styled(format!("{organ} {}", g.bullet), th.organ(organ))));
+                    v.insert(0, Line::from(Span::styled(format!("{} {}", crate::crew::display(organ), g.bullet), th.organ(organ))));
                 }
                 if v.is_empty() {
                     v.push(Line::default());
@@ -453,7 +453,7 @@ impl Transcript {
                 text.split('\n').flat_map(|l| wrap::wrap(&[Span::styled(l.to_owned(), st)], w, &first, &rest)).collect()
             }
             Item::Tool { organ, name, line, input, result, .. } => {
-                let label = if organ == "rabble" || organ.is_empty() { String::new() } else { format!("{organ}: ") };
+                let label = if organ == "rabble" || organ.is_empty() { String::new() } else { format!("{}: ", crate::crew::display(organ)) };
                 let (rst, rtxt) = match result {
                     Some((true, s)) => (th.muted, format!(" {} {}", g.arrow, clip(s, RESULT_MAX, g.ellipsis))),
                     Some((false, s)) => (th.error, format!(" {} {}", g.arrow, clip(s, RESULT_MAX, g.ellipsis))),
@@ -653,7 +653,7 @@ mod tests {
         t.tool_result("t1", false, "boom");
         t.toggle_cards();
         let rows = paint(&mut t, 60, 8).join("\n");
-        assert!(rows.contains("gobble: Bash") && rows.contains("\"command\": \"ls\"") && rows.contains("boom"), "{rows}");
+        assert!(rows.contains("GoBbLE: Bash") && rows.contains("\"command\": \"ls\"") && rows.contains("boom"), "{rows}");
     }
 
     #[test]

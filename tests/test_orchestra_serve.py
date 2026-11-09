@@ -198,6 +198,53 @@ async def test_late_attach_catches_up_with_open_asks(tmp_path):
         assert (await b.until("PermissionAsk"))["id"] == "a1"
 
 
+class SelfEndingBackend(FakeBackend):
+    """Answers a send with a finished turn, having called end_session."""
+
+    end_requested = False
+
+    async def send(self, text):
+        self.sent.append(text)
+        self.end_requested = True
+        self.emit(ev.TurnDone("end_turn"))
+
+
+async def test_a_session_that_ends_itself_closes_after_its_turn(tmp_path):
+    backend = SelfEndingBackend()
+
+    async def factory(_p):
+        return backend
+    async with Rig(tmp_path, factory) as rig:
+        a = await rig.client()
+        await a.hello()
+        a.send(type="create_session", cwd="/done")
+        sid = (await a.until("session_created"))["session"]
+        a.send(type="send", session=sid, text="do the thing")
+        await a.until("TurnDone")                              # the turn is delivered first
+        assert (await a.until("session_closed"))["session"] == sid
+        assert backend.closed and sid not in rig.server.manager.sessions
+
+
+async def test_idle_detached_session_is_reaped_but_attached_or_busy_is_kept(tmp_path):
+    async with Rig(tmp_path, fake_factory) as rig:
+        a = await rig.client()
+        await a.hello()
+        a.send(type="create_session", cwd="/gone")
+        gone = (await a.until("session_created"))["session"]
+        a.send(type="create_session", cwd="/kept")
+        kept = (await a.until("session_created"))["session"]
+        mgr = rig.server.manager
+        a.send(type="detach", session=gone)
+        await a.until("detached")
+        assert await mgr.reap_idle(ttl=3600) == []             # not idle long enough
+        await asyncio.sleep(0.05)
+        assert await mgr.reap_idle(ttl=0.01) == [gone]         # detached and quiet: closed
+        assert set(mgr.sessions) == {kept}                     # still attached: left alone
+        mgr.sessions[kept].clients.clear()
+        mgr.sessions[kept].busy = True
+        assert await mgr.reap_idle(ttl=0.01) == []             # a running turn is not idle
+
+
 async def test_session_outlives_its_client(tmp_path):
     async with Rig(tmp_path, fake_factory) as rig:
         a = await rig.client()

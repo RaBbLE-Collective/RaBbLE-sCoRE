@@ -41,7 +41,9 @@ loaded for local principals. A client that stops reading is disconnected once it
 MAX_QUEUE_BYTES, with a notice; it reattaches with `since_seq`.
 
 Identity comes from the transport (a Principal made by the Listener), never from a message.
-Sessions outlive their clients; the first answer to a PermissionAsk wins.
+A session may end itself (the end_session tool): it closes once that turn is done. Sessions outlive
+their clients, until they have sat idle with nobody attached for IDLE_TTL (then
+the engine closes them and their CLI child); the first answer to a PermissionAsk wins.
 Not built (undecided, see the handoff): accounts, tokens, pairing, hosted listener, and
 refusing answers from the session CLI's own process tree (finding 12, deferred).
 """
@@ -58,6 +60,7 @@ import socket
 import stat
 import struct
 import sys
+import time
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -81,6 +84,7 @@ DECISIONS = ("allow", "allow_session", "deny")
 CREATE_KEYS = ("cwd", "resume", "continue", "model", "mode", "crew", "trust", "provider")
 _STR_KEYS = ("cwd", "resume", "model", "mode", "trust", "provider")
 _BOOL_KEYS = ("continue", "crew")
+IDLE_TTL = float(os.environ.get("RABBLE_SESSION_IDLE_TTL", "1800"))   # seconds a detached, idle session lives; 0 keeps them forever
 UNKNOWN = "no such session"           # one answer for "absent" and "not yours"
 
 
@@ -207,6 +211,7 @@ class Session:
     trust: str | None = None
     sdk_session_id: str | None = None
     organs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    last_active: float = field(default_factory=time.monotonic)
 
     def __post_init__(self) -> None:
         self.model = self.params.get("model")
@@ -271,6 +276,7 @@ class Session:
 
     def publish(self, e: ev.Event) -> None:
         """Observe, sequence, remember and fan out one event."""
+        self.last_active = time.monotonic()
         self.observe(e)
         self.seq += 1
         line = _encode({"session": self.id, "seq": self.seq, **e.to_dict()})
@@ -345,6 +351,8 @@ class SessionManager:
         try:
             async for e in s.backend.events():
                 s.publish(e)
+                if isinstance(e, ev.TurnDone) and e.origin == "observer" and getattr(s.backend, "end_requested", False):
+                    break                                       # the session said it is done; finally: closes it
         except Exception as e:                                  # a broken backend ends the session, not the engine
             sys.stderr.write(f"orchestra.serve: session {s.id} backend failed: {e!r}\n")
         finally:
@@ -368,6 +376,27 @@ class SessionManager:
                     await asyncio.wait_for(s.pump, 2)
                 except (TimeoutError, asyncio.CancelledError):
                     s.pump.cancel()
+
+    def is_idle(self, s: Session, ttl: float, now: float) -> bool:
+        """Dead weight: nobody attached, nothing running or waiting, quiet for ttl seconds."""
+        return (not any(not c.dead for c in s.clients) and not s.busy and not s.asks and not s.organs
+                and not s.pending_asks() and not s.closing and now - s.last_active >= ttl)
+
+    async def reap_idle(self, ttl: float = IDLE_TTL) -> list[str]:
+        now = time.monotonic()
+        reaped = []
+        for s in list(self.sessions.values()):
+            if self.is_idle(s, ttl, now):
+                sys.stderr.write(f"orchestra.serve: closing idle session {s.id} ({s.params.get('cwd', '')})\n")
+                with contextlib.suppress(Exception):
+                    await self.close(s)
+                reaped.append(s.id)
+        return reaped
+
+    async def reap_loop(self, ttl: float = IDLE_TTL) -> None:
+        while True:
+            await asyncio.sleep(max(1.0, min(60.0, ttl / 4)))
+            await self.reap_idle(ttl)
 
     async def close_all(self) -> None:
         """Engine shutdown: close every backend so CLI children do not outlive us."""
@@ -421,6 +450,7 @@ class Server:
             for sid in list(conn.sessions):                     # sessions outlive clients
                 if s := self.manager.sessions.get(sid):
                     s.clients.discard(conn)
+                    s.last_active = time.monotonic()
             await conn.close()
 
     @staticmethod
@@ -483,6 +513,7 @@ class Server:
         elif kind == "detach":
             if s := self._session(conn, msg, ROLES):
                 s.clients.discard(conn)
+                s.last_active = time.monotonic()
                 conn.sessions.discard(s.id)
                 reply({"type": "detached", "session": s.id})
         elif kind == "close_session":
@@ -748,12 +779,15 @@ async def main(argv: list[str] | None = None) -> int:
     listener = UnixListener(a.socket)
     server = await serve(listener, factory, engine="replay" if a.replay else "claude-code")
     sys.stderr.write(f"orchestra.serve: listening on {a.socket}\n")
+    reaper = asyncio.create_task(server.manager.reap_loop()) if IDLE_TTL > 0 else None
     stop = asyncio.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
         asyncio.get_running_loop().add_signal_handler(sig, stop.set)
     try:
         await stop.wait()
     finally:
+        if reaper:
+            reaper.cancel()
         await server.shutdown()                                  # close every backend: no CLI children left behind
         await listener.close()
     return 0

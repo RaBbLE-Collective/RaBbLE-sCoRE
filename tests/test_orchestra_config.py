@@ -56,9 +56,9 @@ def test_backend_options_carry_the_config(tmp_path):
     cfg = EngineConfig.load(None, write(tmp_path / "u.json", {"mcp_servers": {"a": {"command": "x"}}, "max_budget_usd": 2,
                                                                  "fallback_model": "sonnet", "add_dirs": ["/tmp"]}))
     o = ClaudeCodeBackend(".", engine=cfg).options()
-    assert o.mcp_servers == {"a": {"command": "x"}} and o.max_budget_usd == 2.0
+    assert o.mcp_servers["a"] == {"command": "x"} and set(o.mcp_servers) == {"a", "rabble"} and o.max_budget_usd == 2.0
     assert o.fallback_model == "sonnet" and o.add_dirs == ["/tmp"]
-    assert ClaudeCodeBackend(".").options().mcp_servers == {}
+    assert set(ClaudeCodeBackend(".").options().mcp_servers) == {"rabble"}   # only the engine's own end_session
 
 
 def test_thinking_display_alone_implies_adaptive_and_never_rides_on_disabled(tmp_path):

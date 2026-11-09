@@ -11,6 +11,23 @@ use rabble_proto::OrganStatus;
 use serde_json::{Map, Value};
 
 pub const LEAD: &str = "rabble";
+
+/// How a crew member is written for people. The wire carries slugs (`gobble`); the Crew's names are
+/// cased on purpose (RaBbLE-Grimoire/RaBbLE/Crew/*.md `name:`), so the UI never shows a bare slug.
+pub fn display(slug: &str) -> &str {
+    match slug {
+        "rabble" => "RaBbLE",
+        "gobble" => "GoBbLE",
+        "quibble" => "QuiBbLE",
+        "cobble" => "CoBbLE",
+        "crumble" => "CrumBbLE",
+        "nibble" => "NiBbLE",
+        "babble" => "BaBbLE",
+        "dabble" => "DaBbLE",
+        "archivist" => "Archivist",
+        other => other,
+    }
+}
 const LOG_CAP: usize = 500;
 const HOP_CAP: usize = 40;
 
@@ -280,6 +297,15 @@ mod tests {
 
     fn m(v: Value) -> Map<String, Value> {
         v.as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn crew_names_are_cased_for_people_and_unknown_slugs_pass_through() {
+        assert_eq!(display("rabble"), "RaBbLE");
+        assert_eq!(display("gobble"), "GoBbLE");
+        assert_eq!(display("crumble"), "CrumBbLE");
+        assert_eq!(display("archivist"), "Archivist");
+        assert_eq!(display("mystery"), "mystery");
     }
 
     #[test]

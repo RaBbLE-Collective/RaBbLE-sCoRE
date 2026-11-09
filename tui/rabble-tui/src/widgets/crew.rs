@@ -7,7 +7,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{buffer::Buffer, layout::Rect, style::Style, text::{Line, Span}, widgets::Clear, widgets::Widget};
 
 use crate::{
-    crew::{Crew, Flow, Kind, Member, State, LEAD},
+    crew::{display, Crew, Flow, Kind, Member, State, LEAD},
     theme::Theme,
     wrap::{self, clean},
 };
@@ -77,7 +77,7 @@ pub fn panel(crew: &Crew, area: Rect, buf: &mut Buffer, th: &Theme, lead_busy: b
     put(buf, Line::from(Span::styled(fit(&head, w), th.heading)), &mut y);
     if let Some(lead) = crew.get(LEAD) {
         let (st, sty) = status(th, lead, lead_busy);
-        put(buf, Line::from(vec![Span::styled(format!("{} ", th.glyphs.bullet), sty), Span::styled(LEAD.to_owned(), th.text), Span::styled(format!("  {st}"), sty)]), &mut y);
+        put(buf, Line::from(vec![Span::styled(format!("{} ", th.glyphs.bullet), sty), Span::styled(display(LEAD).to_owned(), th.text), Span::styled(format!("  {st}"), sty)]), &mut y);
     }
     let organs: Vec<&Member> = crew.organs().collect();
     if organs.is_empty() {
@@ -86,7 +86,7 @@ pub fn panel(crew: &Crew, area: Rect, buf: &mut Buffer, th: &Theme, lead_busy: b
     for (i, m) in organs.iter().enumerate() {
         let (branch, cont) = tree(th, i + 1 == organs.len());
         let (st, sty) = status(th, m, false);
-        put(buf, Line::from(vec![Span::styled(branch, th.border), Span::styled(format!("{} ", th.glyphs.bullet), sty), Span::styled(fit(&m.name, 10), who(th, &m.name)), Span::styled(format!("  {}", fit(&st, w.saturating_sub(18))), sty)]), &mut y);
+        put(buf, Line::from(vec![Span::styled(branch, th.border), Span::styled(format!("{} ", th.glyphs.bullet), sty), Span::styled(fit(display(&m.name), 10), who(th, &m.name)), Span::styled(format!("  {}", fit(&st, w.saturating_sub(18))), sty)]), &mut y);
         let doing = if m.state.live() && !m.last_tool.is_empty() { m.last_tool.clone() } else { m.brief.clone() };
         if !doing.is_empty() {
             put(buf, Line::from(vec![Span::styled(cont, th.border), Span::styled(fit(&doing, w.saturating_sub(5)), th.muted)]), &mut y);
@@ -180,7 +180,7 @@ impl CrewView {
             }
             let (st, sty) = status(th, m, lead_busy);
             let name = if i == sel { th.select } else { who(th, &m.name) };
-            buf.set_line(area.x, y, &Line::from(vec![Span::styled(format!("{} ", th.glyphs.bullet), sty), Span::styled(fit(&m.name, side as usize - 3), name)]), side);
+            buf.set_line(area.x, y, &Line::from(vec![Span::styled(format!("{} ", th.glyphs.bullet), sty), Span::styled(fit(display(&m.name), side as usize - 3), name)]), side);
             buf.set_line(area.x + 2, y + 1, &Line::from(Span::styled(fit(&st, side as usize - 3), th.muted)), side - 2);
             y += 2;
         }
@@ -193,7 +193,7 @@ impl CrewView {
         let (x, w) = (area.x + side + 2, (area.width - side - 2) as usize);
         let Some(m) = crew.members.get(sel) else { return };
         let (st, sty) = status(th, m, lead_busy);
-        let mut head = vec![Span::styled(m.name.clone(), who(th, &m.name)), Span::styled(format!("  {st}"), sty)];
+        let mut head = vec![Span::styled(display(&m.name).to_owned(), who(th, &m.name)), Span::styled(format!("  {st}"), sty)];
         if m.tools > 0 || m.tokens > 0 {
             head.push(Span::styled(format!("  {} tools · {} tok", m.tools, m.tokens), th.muted));
         }

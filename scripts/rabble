@@ -3,9 +3,12 @@
 #   rabble [--model M] [--resume SDK_ID] [--attach ID] [--cwd DIR]   the Rust shell (tui/), on the engine
 #   rabble --py [--model M] [--continue] [--resume ID] [...]          the Python UI (ui/, S278), one release more
 #   rabble --cc [args]                                                the S273 Claude Code wrapper (crew/rabble.py)
+#   rabble --restart | --stop | --status                              the engine's systemd user unit (rabble-engine)
 # The Rust shell talks to the engine (orchestra/serve.py) over a Unix socket. If no engine is
-# listening, rabble starts one, detached, so sessions outlive the terminal; the engine log is
-# $XDG_STATE_HOME/rabble/engine.log. The engine runs in the RaBbLE-UI venv built by RaBbLE-OS
+# listening, rabble starts one: through the rabble-engine systemd user unit when RaBbLE-OS has
+# installed it (it restarts a crashed engine; `rabble --restart` picks up new code), else detached
+# by hand. Sessions outlive the terminal either way; the manual engine log is
+# $XDG_STATE_HOME/rabble/engine.log (the unit logs to the journal). The engine runs in the RaBbLE-UI venv built by RaBbLE-OS
 # ai-harnesses (layerctl apply claude-code); the Rust binary comes from `cargo build --release`
 # in tui/. If either is missing, rabble falls back (Python UI, then the wrapper).
 # Override: RABBLE_UI_PYTHON (venv python), RABBLE_TUI (shell binary), RABBLE_ENGINE_SOCKET.
@@ -51,6 +54,22 @@ except OSError:
     sys.exit(1)' "$sock" 2>/dev/null
 }
 
+unit=rabble-engine.service
+have_unit() { systemctl --user cat "$unit" >/dev/null 2>&1; }
+need_unit() {
+  have_unit || { echo "rabble: no $unit installed; RaBbLE-OS installs it: layerctl apply claude-code" >&2; exit 1; }
+}
+case "${1:-}" in
+  --restart) need_unit; echo "rabble: restarting the engine (live sessions close; resume them from their SDK ids)" >&2
+             systemctl --user restart "$unit"; exit ;;
+  --stop)    need_unit; systemctl --user stop "$unit"; exit ;;
+  --status)  need_unit; exec systemctl --user status "$unit" --no-pager ;;
+esac
+
+if ! alive && have_unit; then
+  echo "rabble: starting the engine ($unit)..." >&2
+  systemctl --user start "$unit" || true
+fi
 if ! alive; then
   mkdir -p "$state"
   echo "rabble: starting the engine ($sock)..." >&2
