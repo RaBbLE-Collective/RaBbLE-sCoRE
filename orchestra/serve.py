@@ -5,7 +5,7 @@
 NDJSON over a stream, one JSON object per line. Events go down exactly as
 `Event.to_json()` writes them plus a `session` key and a per-session `seq`; commands go up as
 `{"type": "<command>", "session": "...", "id": "<optional>", ...}`. Everything is addressed by
-session. Plan + decisions: RaBbLE-Grimoire/log/handoffs/HANDOFF-S295-RaBbLE-UI-Rust-R1-Seam.md,
+session. Plan + decisions: RaBbLE-Grimoire/log/handoffs/done/HANDOFF-S295-RaBbLE-UI-Rust-R1-Seam.md,
 protocol v1.1 freeze: HANDOFF-S295-RaBbLE-UI-Rust-Phase2-Parallel.md.
 
   down:  hello{version,engine,user,features}, sessions, session_created, attached{role,seq,gap,snapshot},
