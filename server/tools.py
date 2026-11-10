@@ -17,7 +17,7 @@ _DOC_MAP: dict[str, str] = {
     "identity":        "RaBbLE-Identity-gist.md",
     "collective":      "RaBbLE-Collective-gist.md",
     "roadmap":         "RaBbLE-Roadmap-gist.md",
-    "episode1":        "RaBbLE-Episode1-gist.md",
+    "entity":          "RaBbLE-Entity-gist.md",
     "versioning":      "RaBbLE-Versioning-gist.md",
     "palette":         "RaBbLE-Palette-gist.md",
     "commit-style":    "RaBbLE-CommitStyle-gist.md",

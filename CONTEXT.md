@@ -1,7 +1,7 @@
 # CONTEXT.md — RaBbLE-sCoRE
 
 ```
-epoch: 0 | evolution: 0 | echo: 0 | episode: 0 (pending) | version: v0.0.0.0 | status: active
+epoch: 0 | version: v0.0.0.0 | status: active (live at score.joinrabble.world)
 ```
 
 RaBbLE-sCoRE is the coordination server of the RaBbLE Collective.
