@@ -7,7 +7,7 @@ imports the other. Events are plain frozen data so they round-trip through JSON:
 fixtures through a fake backend instead of calling a live model.
 
 `organ` is LEAD ("rabble") for the lead session, otherwise a Crew persona slug.
-Plan: RaBbLE-Grimoire/log/plans/sCoRE-RaBbLE-UI-Plan.md (event contract + mapping rules).
+Plan: RaBbLE-Grimoire/log/plans/done/sCoRE-RaBbLE-UI-Plan.md (event contract + mapping rules).
 """
 
 import json
