@@ -1,7 +1,7 @@
 # CONTEXT.md — RaBbLE-sCoRE
 
 ```
-epoch: 0 | version: v0.0.0.0 | status: active (live at score.joinrabble.world)
+epoch: 0 | version: 0.1.0 (Genesis, root VERSION file) | status: active (live at score.joinrabble.world)
 ```
 
 RaBbLE-sCoRE is the coordination server of the RaBbLE Collective.
@@ -9,9 +9,9 @@ Intent → decompose → delegate → result. No execution surface of its own.
 
 ---
 
-## What Is Done (Pre-Episode-1 Events)
+## What Is Done
 
-All work below is accumulated toward Episode 1 air (`v0.0.0.1`). Episode 1 has not yet aired.
+The history below keeps its original labels (Episode, Plot). That model was retired in S322; members now plan by milestone (`RaBbLE-Grimoire/registry/epochs/current.epoch.yml`) and carry semver. sCoRE's first release is Genesis, `0.1.0`.
 
 ### Episode 1, Plot A — First Breath
 
@@ -102,7 +102,7 @@ All subsequent turns use `--continue` on the already-warm session.
 | RaBbLE-Server repo deprecated | CONTEXT.md updated to point here. |
 
 sCoRE can now be run as a local coordination shell (default) **or** as a web API endpoint
-(with `--with-server`). Server routes call LLM providers directly — task pipeline wiring is Episode 4+.
+(with `--with-server`). Server routes call LLM providers directly — task pipeline wiring is later work.
 
 ---
 
@@ -122,19 +122,19 @@ Run locally for the Pocket: `cd server && BEAM_ALLOW_GUEST=true uv run --with-re
 
 ## What Is Not Done Yet
 
-### Episode 1 Exit Conditions (current target)
+### Genesis checklist (formerly the Episode 1 exit conditions)
 
 | Item | Status |
 |---|---|
 | `harness/` path bug fixed (`server/` not `services/intelligence/`) | Done |
-| `server/main.py` version aligned to `v0.0.0.0` | Done |
+| `server/main.py` and `GET /health` report the root `VERSION` file | Done (S324) |
 | `server/api_test.py` Python test client | Done |
 | `harness/local.sh` starts server successfully | Needs verification |
 | Cloud deploy live | Done — https://score.joinrabble.world/health ✓ |
 | `RaBbLE-Grimoire/spells/deploy-score.sh` spell | Pending |
-| Episode 1 tagged on `main` | Pending — airs when Collective Episode 1 ready |
+| `v0.1.0` and `genesis` tagged on `main` | Pending: Genesis pull request #1 |
 
-### Episode 2 and Beyond (after Episode 1 airs)
+### After Genesis
 
 | Item | Notes |
 |---|---|
@@ -178,8 +178,8 @@ bash scripts/status.sh
 3. `agents/score.md` — sCoRE identity (what RaBbLE IS internally)
 4. `CLAUDE.md` — how sCoRE identity is injected into the session
 5. `grimoire/RaBbLE-sCoRE/RaBbLE-sCoRE-Architecture.md` — system design
-6. `memory/patterns/dispatch-print-mode.md` — dispatch lesson from Episode 1
-7. `memory/patterns/agent-isolation.md` — settings.json scope lesson from Episode 2
-8. `grimoire/RaBbLE-sCoRE/RaBbLE-sCoRE-Roadmap.md` — episode/epoch trajectory
+6. `memory/patterns/dispatch-print-mode.md` — dispatch lesson (first breath)
+7. `memory/patterns/agent-isolation.md` — settings.json scope lesson
+8. `grimoire/RaBbLE-sCoRE/RaBbLE-sCoRE-Roadmap.md` — milestones and trajectory
 
 For Collective context: `grimoire/RaBbLE-Agent/RaBbLE-Collective.md`

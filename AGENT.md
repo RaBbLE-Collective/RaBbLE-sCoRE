@@ -11,7 +11,7 @@ RaBbLE-sCoRE is the coordination engine of the RaBbLE Collective: Intent → dec
 
 | Path | What |
 |---|---|
-| `CONTEXT.md` | Current state, episode tracker, active work |
+| `CONTEXT.md` | Current state, milestones, active work |
 | `agents/` | Agent identity definitions (score, memory, search, execution) |
 | `tasks/` | Pending/active/done/archive task queue |
 | `scripts/dispatch-watch.sh` | Task router and agent orchestrator |
@@ -50,7 +50,7 @@ bash ../RaBbLE-Grimoire/spells/end-session.sh <feature-slug> "<note>"
 
 ## Session Start
 
-1. `CONTEXT.md` — current episode and active work
+1. `CONTEXT.md` — current state and active work
 2. `agents/score.md` — how sCoRE embodies itself (system prompt for sCoRE-as-entity)
 3. `grimoire/RaBbLE-sCoRE-Architecture.md` (in Grimoire) — delegation model, agent roster
 4. For Collective context → `../RaBbLE-Grimoire/RaBbLE-Agent/RaBbLE-Collective.md`
