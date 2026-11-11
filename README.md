@@ -10,6 +10,16 @@ spark ~ sCoRE >> substrate initialized, orchestrator awakens // %EPOCH_0_INIT%
 > Intent arrives. sCoRE decomposes, sharpens, and delegates.
 > Agents execute. Results return. The loop closes.
 
+**Version:** `0.1.0` (Genesis, from `VERSION`) · **Live:** [score.joinrabble.world](https://score.joinrabble.world/health) (chat for [joinrabble.world](https://joinrabble.world), voice for RaBbLE-Pocket) · **Versioning:** [semver, per member](https://github.com/RaBbLE-Collective/RaBbLE-Grimoire/blob/main/RaBbLE-Versioning.md)
+
+sCoRE is the first iteration of RaBbLE itself. It has three faces today:
+
+| Face | What | Start it |
+|---|---|---|
+| Web API | FastAPI server in `server/`: chat, sessions, workflows, the Pocket voice beam | `./harness/local.sh` |
+| Terminal | `rabble`: a Rust TUI (`tui/`) on the engine (`orchestra/`), over a headless Claude Code | `scripts/rabble` |
+| Dispatch | the original file-based orchestrator: task files routed to agent sessions | `./scripts/start-rabble.sh` |
+
 ---
 
 ## What sCoRE Is
@@ -51,8 +61,6 @@ sCoRE runs as either an interactive shell **or** a web API — both modes are su
 ## Directory Structure
 
 ```
-.claude/
-  settings.json       — sCoRE constraints + hooks
 agents/
   score.md            — sCoRE identity + instructions
   memory.md           — memory agent identity
@@ -85,6 +93,11 @@ harness/              — local server tooling
   env_gen.sh          — build server/.env from .secrets + env.defaults
 projects/             — git submodule mount points
 grimoire/             — sCoRE lore, architecture, roadmap
+orchestra/            — the engine: sessions over a Unix socket (python -m orchestra.serve)
+tui/                  — Rust terminal face (Cargo workspace: rabble-tui, rabble-face, rabble-proto, rabble-theme)
+ui/                   — Python terminal UI (the earlier face, kept one release more)
+crew/                 — the Crew: RaBbLE and its organs as Claude Code personas
+tests/                — pytest suite
 ```
 
 ---
@@ -146,7 +159,7 @@ transcribed intent to Claude Code. Configure the local `server/.env`:
 ```dotenv
 BEAM_LLM_CHAIN=claude_code:sonnet
 CC_COMMAND=claude
-CC_WORKDIR=/home/rabble/RaBbLE-Collective
+CC_WORKDIR=/home/<you>/RaBbLE-Collective
 ```
 
 `CC_WORKDIR` makes each Claude Code invocation start at the Collective root,
@@ -180,6 +193,9 @@ Pocket can reach it and the audio path stays local.
 | `POST /api/v1/workflows` | Start agentic workflow |
 | `GET /api/v1/status` | Provider + quota info |
 | `POST /api/v1/auth/register` | Create account → API key |
+| `/api/v1/sessions` | Create, list and message persistent chat sessions |
+| `WS /api/v1/beam` | Voice beam for RaBbLE-Pocket (speech in, speech out) |
+| `WS /api/v1/node` | Node link for other machines in the mesh |
 
 Workflow types: `brainstorm` · `reflect` · `create` · `solve` · `learn` · `thrive`
 
@@ -188,6 +204,18 @@ Workflow types: `brainstorm` · `reflect` · `create` · `solve` · `learn` · `
 The server needs `JWT_SECRET` (16+ chars) and refuses to start without it. Set it, the provider keys
 and `RABBLE_ADMIN_KEY` in your host's environment, run `uvicorn main:app` from `server/`, and check
 `GET /health`. RaBbLE's own instance sits behind `score.joinrabble.world`.
+
+---
+
+## Terminal: `rabble`
+
+```bash
+(cd tui && cargo build --release)   # the Rust shell
+scripts/rabble                      # starts the engine if none is listening, then opens the shell
+scripts/rabble --status             # engine state
+```
+
+The engine runs in the RaBbLE-UI venv that RaBbLE-OS installs (`layerctl apply claude-code`). Without the Rust binary, `rabble` falls back to the Python UI, then to the plain wrapper. Options are in the header of `scripts/rabble`.
 
 ---
 
@@ -212,18 +240,18 @@ context_refs: []
 
 ## Versioning
 
-`Event → Episode → Echo → Evolution → Epoch`
+Semver, one version per member, held in the root `VERSION` file; `tui/Cargo.toml` follows it, and `GET /health` reports it. `new-horizons` is the working branch; `main` is stable, receives `release/X.Y.Z` by pull request and carries the `vX.Y.Z` tags. Rules: [RaBbLE-Versioning.md](https://github.com/RaBbLE-Collective/RaBbLE-Grimoire/blob/main/RaBbLE-Versioning.md).
 
-Current: **Epoch 0 — Foundation** / **Episode 1**
+Current: **Epoch 0, Foundation** · **Genesis, 0.1.0**. The old `echo-1.0` to `echo-3.0` tags are history from the retired model.
 
 ---
 
 ## Collective Position
 
 sCoRE is the coordination member of the RaBbLE Collective.
-- Source of truth: `RaBbLE-Collective/grimoire/`
-- Registry: `RaBbLE-Collective/registry/`
-- OS substrate: `RaBbLE-OS`
+- Source of truth: [RaBbLE-Grimoire](https://github.com/RaBbLE-Collective/RaBbLE-Grimoire), sCoRE docs in `RaBbLE-sCoRE/`
+- Registry: `RaBbLE-Grimoire/registry/`
+- OS substrate: [RaBbLE-OS](https://github.com/RaBbLE-Collective/RaBbLE-OS)
 
 ## License
 
@@ -236,5 +264,5 @@ RaBbLE-sCoRE is licensed under the **RaBbLE Sovereign Accord** (source-available
 ---
 
 ```
-spark ~ sCoRE >> first breath // %EPOCH_0_EPISODE_1%
+spark ~ sCoRE >> first breath // %GENESIS%
 ```

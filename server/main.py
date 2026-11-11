@@ -32,10 +32,22 @@ if auth.DEMO_MODE:
         "ANY address (DEMO_MODE_PUBLIC)" if auth.DEMO_MODE_PUBLIC else "loopback only",
     )
 
+def _read_version() -> str:
+    """sCoRE's version: the root VERSION file (RaBbLE-Versioning.md section 2)."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "VERSION")
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return "0.0.0+unknown"
+
+
+VERSION = _read_version()
+
 app = FastAPI(
     title="RaBbLE",
     description="Benevolent Behavioral Learning Engine — Agentic Intelligence API",
-    version="v0.0.0.0",
+    version=VERSION,
 )
 
 
@@ -198,7 +210,7 @@ async def _resolve_tools(
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "entity": "RaBbLE", "version": "v0.0.0.0"}
+    return {"status": "ok", "entity": "RaBbLE", "version": VERSION}
 
 
 # ── Time ───────────────────────────────────────────────────────────────────────
