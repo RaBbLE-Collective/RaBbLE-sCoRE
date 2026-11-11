@@ -3,7 +3,7 @@ resolver = "2"
 members = ["rabble-proto", "rabble-theme", "rabble-face", "rabble-tui", "bench"]
 
 [workspace.package]
-version = "0.0.0"
+version = "0.1.0"
 edition = "2021"
 license-file = "../LICENSE"
 publish = false
