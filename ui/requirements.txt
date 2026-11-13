@@ -1,0 +1,9 @@
+# RaBbLE-UI (`rabble`'s own face over a headless Claude Code). Plan:
+# RaBbLE-Grimoire/log/plans/sCoRE-RaBbLE-UI-Plan.md
+# Installed into a uv venv at ~/.local/share/RaBbLE/rabble-ui by RaBbLE-OS
+# ai-harnesses (claude-code task): `layerctl apply claude-code`. Never pip install system-wide.
+# The SDK bundles its own Claude Code CLI (2.1.310 in 0.2.174); bump deliberately.
+claude-agent-sdk==0.2.174
+textual==8.2.8
+pytest
+pytest-asyncio

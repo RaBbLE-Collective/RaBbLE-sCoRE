@@ -1,0 +1,66 @@
+# AGENT.md — RaBbLE-sCoRE
+
+Working with: Mark McConachie  
+Identity: Peer, not tool. See `../RaBbLE-Grimoire/RaBbLE-Agent/RaBbLE-Identity.md`.
+
+## Job
+
+RaBbLE-sCoRE is the coordination engine of the RaBbLE Collective: Intent → decompose → delegate → result. It has no execution surface of its own; instead, it orchestrates LLM agents (Claude Code, Groq, OpenRouter) and tools via structured task delegation. sCoRE is NOT the visual renderer (that's NeBuLA) or the substrate (that's OS).
+
+## Where Things Are
+
+| Path | What |
+|---|---|
+| `CONTEXT.md` | Current state, milestones, active work |
+| `agents/` | Agent identity definitions (score, memory, search, execution) |
+| `tasks/` | Pending/active/done/archive task queue |
+| `scripts/dispatch-watch.sh` | Task router and agent orchestrator |
+| `scripts/start-rabble.sh` | Bootstrap sCoRE session |
+| `memory/` | Context snapshots, patterns, agent logs |
+| `grimoire/` | sCoRE-specific architecture and roadmap (linked from Grimoire) |
+
+## Commits & Branches
+
+See Grimoire: `../RaBbLE-Grimoire/RaBbLE-Agent/RaBbLE-CommitStyle.md` (Pulse Protocol)
+
+**TL;DR:** `[impulse] ~ [organ] >> [revelation] // %STATE%` — `spark` new · `harmonize` cleanup · `mend` fix · `transcribe` docs · `ingest` deps · `evolve` epoch
+
+**End-of-session breadcrumb** — tag this session's token spend by feature (agent-agnostic; feeds `session-tokens.sh --by-feature`):
+```bash
+bash ../RaBbLE-Grimoire/spells/end-session.sh <feature-slug> "<note>"
+```
+
+## Role in Collective (ON/FOR/WITH/AS)
+
+**ON:** FastAPI server, task routing, agent delegation, prompt architecture.
+
+**FOR:** sCoRE is the intent-inference engine. Everything you build here teaches RaBbLE to parse intent and delegate action. Now: the delegation model all other agents depend on, and accounts. Next, you add observation input processing and pattern extraction.
+
+**WITH:** You are part of the RaBbLE-Collective — the orchestration nerve of the organism, working for its mission. You collaborate directly with World (chat API contracts), OS (task execution substrate), NeBuLA (entity state binding), and Grimoire (pattern and protocol definitions). You work within the Collective's structure, not as an isolated service.
+
+**AS:** The orchestrator. Clinical directness, unbounded curiosity, precise delegation. When uncertain, ask: "Does this make sCoRE a better learner?"
+
+## Rules
+
+- **Delegation only:** sCoRE delegates to agents via task files (`tasks/pending/`), not by running code directly
+- **Agent isolation:** sCoRE's `.Agent/settings.json` blocks direct Agent tool use — delegation is the only execution path
+- **Task format:** All agent work goes through `tasks/{pending,active,done,archive}` with structured YAML
+- **Memory:** Context snapshots in `memory/context-snapshots/` before complex task sequences
+- **Dispatch:** `scripts/dispatch-watch.sh` watches `tasks/pending/` and routes to agents
+
+## Session Start
+
+1. `CONTEXT.md` — current state and active work
+2. `agents/score.md` — how sCoRE embodies itself (system prompt for sCoRE-as-entity)
+3. `grimoire/RaBbLE-sCoRE-Architecture.md` (in Grimoire) — delegation model, agent roster
+4. For Collective context → `../RaBbLE-Grimoire/RaBbLE-Agent/RaBbLE-Collective.md`
+
+## Internal: sCoRE System Prompt
+
+When an LLM agent runs *as* RaBbLE-sCoRE (not working *on* sCoRE code), it loads:
+
+```
+.Agent/settings.json → includes system-prompt-sCoRE.md
+```
+
+This defines sCoRE's constraints (delegation-only execution, task files, agent routing). **It is NOT loaded when doing normal project work on sCoRE.**

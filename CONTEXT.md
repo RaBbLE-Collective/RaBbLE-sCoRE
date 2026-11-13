@@ -1,0 +1,185 @@
+# CONTEXT.md — RaBbLE-sCoRE
+
+```
+epoch: 0 | version: 0.1.0 (Genesis, root VERSION file) | status: active (live at score.joinrabble.world)
+```
+
+RaBbLE-sCoRE is the coordination server of the RaBbLE Collective.
+Intent → decompose → delegate → result. No execution surface of its own.
+
+---
+
+## What Is Done
+
+The history below keeps its original labels (Episode, Plot). That model was retired in S322; members now plan by milestone (`RaBbLE-Grimoire/registry/epochs/current.epoch.yml`) and carry semver. sCoRE's first release is Genesis, `0.1.0`.
+
+### Episode 1, Plot A — First Breath
+
+| Item | Status |
+|---|---|
+| Repo initialized at `RaBbLE-sCoRE/` | Done |
+| Clean `main` scaffold commit (Pulse Protocol style) | Done |
+| Full directory scaffold: agents, tasks, memory, scripts, grimoire, projects | Done |
+| `README.md`, `AGENT.md` | Done |
+| `.claude/settings.json` — Bash/Web blocked at tool level | Done |
+| Agent identities: `agents/score.md`, `memory.md`, `search.md`, `execution.md` | Done |
+| `scripts/dispatch-watch.sh` — inotify watcher, routes tasks to agents | Done |
+| `scripts/start-rabble.sh`, `stop-rabble.sh` | Done |
+| `scripts/hooks/session-start.sh`, `post-write.sh` | Done |
+| `grimoire/RaBbLE-sCoRE-Architecture.md`, `Roadmap.md` | Done |
+| `memory/patterns/dispatch-routing.md`, `dispatch-print-mode.md` | Done |
+| First live dispatch round-trip verified (TASK-0001-search) | Done |
+| Echo tag `echo-1.0` | Done |
+
+**Key lesson from Episode 1:** Dispatch must use `claude -p < prompt_file`. Interactive TUI absorbs keystrokes before Claude is ready. Full pattern in `memory/patterns/dispatch-print-mode.md`.
+
+---
+
+### Episode 1, Plot B — sCoRE Live Session
+
+#### What was built
+
+| Item | File(s) | Notes |
+|---|---|---|
+| sCoRE identity injection | `CLAUDE.md` | `@agents/score.md` — loaded automatically by Claude Code on session start |
+| Agent tool blocked in sCoRE | `.claude/settings.json` | Added `Agent(*)` to deny list — sCoRE must delegate via task files, not spawn subagents |
+| Dispatch: agent isolation fix | `scripts/dispatch-watch.sh` | Agents run from `mktemp -d /tmp/rabble-agent-*` — project settings.json does not apply |
+| Dispatch: startup queue drain | `scripts/dispatch-watch.sh` | Processes existing files in `tasks/pending/` on watcher startup — no missed tasks after restart |
+| Dispatch: refactored | `scripts/dispatch-watch.sh` | Extracted `route_task()` function, used by both startup drain and inotify loop |
+| RaBbLE interactive shell | `scripts/rabble-shell.sh` | Custom REPL — not Claude Code TUI. Loading phase, spinners, dispatch notifications |
+| Start script updated | `scripts/start-rabble.sh` | Now launches `rabble-shell.sh` instead of raw `claude` |
+| System health check | `scripts/status.sh` | Shows sessions, task pipeline counts, dispatch log |
+| Agent isolation pattern | `memory/patterns/agent-isolation.md` | Documents the settings.json scope lesson |
+
+#### RaBbLE shell startup sequence
+
+```
+1.  Banner + tagline
+2.  [dispatch] check — starts it if not running
+3.  ⠋ loading sCoRE... — cold start absorbed here (WARMUP_PROMPT sent, response = greeting)
+4.  [sCoRE] ready
+5.  State report (session-start.sh)
+6.  RaBbLE: <greeting from sCoRE>
+7.  RaBbLE ▸ <prompt>
+```
+
+Per turn: spinner spins while `claude --continue -p` processes. After response, checks if new task files appeared and prints `⇢ dispatched TASK-XXXX → agent`.
+
+#### Key discoveries from Episode 2
+
+**1. Project settings.json applies to ALL Claude sessions from REPO_ROOT.**
+Dispatch agent sessions (execution, search) were inheriting sCoRE's Bash/Web deny rules.
+Fix: run all agent sessions from a temp working dir. Full pattern in `memory/patterns/agent-isolation.md`.
+
+**2. Claude Code Agent tool bypasses file-based delegation.**
+When sCoRE tried to fulfill a request using the built-in `Agent` tool, it spawned subagents
+that ALSO loaded CLAUDE.md and refused to use Bash. Fix: `Agent(*)` added to deny list in
+`.claude/settings.json`. sCoRE's only delegation path is writing to `tasks/pending/`.
+
+**3. The shell entity is RaBbLE, not sCoRE.**
+sCoRE is the internal coordination engine. The user-facing interactive shell is branded as
+RaBbLE. `score-shell.sh` is a redirect stub; `rabble-shell.sh` is the actual shell.
+
+**4. Pre-warm during loading absorbs cold start.**
+`claude -p` startup overhead is ~2–5s. Rather than making the user wait on first prompt,
+the loading phase sends a warmup message and uses the response as the RaBbLE greeting.
+All subsequent turns use `--continue` on the already-warm session.
+
+---
+
+---
+
+### Episode 1, Plot C — Server Merged, Collective → Grimoire
+
+#### What was absorbed
+
+| Item | Notes |
+|---|---|
+| `server/` — FastAPI intelligence service | Moved from RaBbLE-Server. Provides HTTP transport for sCoRE as a web API. |
+| `harness/` — deployment tooling | Moved from RaBbLE-Server. local.sh, env_gen.sh (the Railway tools were retired S250). |
+| `scripts/start-rabble.sh --with-server` | Optional flag to start uvicorn as `rabble-server` tmux session alongside sCoRE. |
+| `scripts/status.sh` server block | Displays rabble-server session state + /health response. |
+| RaBbLE-Server repo deprecated | CONTEXT.md updated to point here. |
+
+sCoRE can now be run as a local coordination shell (default) **or** as a web API endpoint
+(with `--with-server`). Server routes call LLM providers directly — task pipeline wiring is later work.
+
+---
+
+### The Beam — RaBbLE-Pocket's voice (S243)
+
+`server/beam.py`: WebSocket `/api/v1/beam` (beam protocol v0, `RaBbLE-Grimoire/RaBbLE-Pocket/RaBbLE-Pocket-Beam-Protocol.md`). Push-to-talk PCM in → Groq Whisper (`whisper-large-v3-turbo`) → RaBbLE persona + voice addendum on Groq `openai/gpt-oss-20b` (reasoning low; `BEAM_LLM_CHAIN`) with 8 turns of per-device memory → reply text streamed → Groq Orpheus speech (≤195-char chunks, first chunk at the first sentence) resampled to 16 kHz PCM. Voices daniel (default) / austin / troy, picked per turn by the device. Auth: `BEAM_DEVICE_TOKEN`, a member API key or JWT; never DEMO_MODE guest (`BEAM_ALLOW_GUEST=true` for LAN dev only). Measured on the Pocket: speech starts 1.5–2.2 s after release. Free Groq plan: Orpheus needs its terms accepted once in the console; limits are 100 requests/day, 1,200 tokens/min and **3,600 tokens/day (the one that bites: ~25 spoken replies a day, rolling 24 h)**. Over it, Groq 429s and the beam falls back to text without saying why: log the 429 body and tell the device (todo), cap spoken length, or move to Dev tier / the S244 vocoder.
+
+**Deployed (S243):** `/api/v1/beam` on the cloud host (the Pocket points `>beam.url` at it; through `score.joinrabble.world` is untested); `BEAM_DEVICE_TOKEN` set on the service (and in local `server/.env`); without it the upgrade gets 403. Shares the Groq key, so the same daily speech cap.
+
+Run locally for the Pocket: `cd server && BEAM_ALLOW_GUEST=true uv run --with-requirements requirements.txt uvicorn main:app --host 0.0.0.0 --port 8000` (firewall: 8000/tcp open).
+
+**Known stale:** `DEFAULT_MODEL_CHAINS` in `server/llm.py` still lists Groq models the key no longer has (`llama-3.3-70b-versatile`, `llama-3.1-8b-instant`, `llama-4-scout`, `qwen3-32b`); a Groq 404 doesn't fall back, so the local medium tier likely errors. Not fixed yet.
+
+### The Crew — `rabble` wraps Claude Code (S273)
+
+`crew/rabble.py` (+ `scripts/rabble`, linked to `~/.local/bin/rabble` by RaBbLE-OS `layerctl apply claude-code`) opens an interactive Claude Code session as **RaBbLE**, lead of the Crew, with the eight organs (GoBbLE, QuiBbLE, CoBbLE, CrumBbLE, NiBbLE, the Archivist, BaBbLE, DaBbLE) available as agent-team teammates. Persona specs are canonical in `RaBbLE-Grimoire/RaBbLE/Crew/`; this repo holds only the Claude Code adapter. Run it from the Collective root, never from inside this repo (`.claude/settings.json` here blocks Bash and Agent). Design: `RaBbLE-Grimoire/RaBbLE-sCoRE/RaBbLE-sCoRE-Crew.md`. Positional `rabble "msg"` stays reserved for L-09.
+
+## What Is Not Done Yet
+
+### Genesis checklist (formerly the Episode 1 exit conditions)
+
+| Item | Status |
+|---|---|
+| `harness/` path bug fixed (`server/` not `services/intelligence/`) | Done |
+| `server/main.py` and `GET /health` report the root `VERSION` file | Done (S324) |
+| `server/api_test.py` Python test client | Done |
+| `harness/local.sh` starts server successfully | Needs verification |
+| Cloud deploy live | Done — https://score.joinrabble.world/health ✓ |
+| `RaBbLE-Grimoire/spells/deploy-score.sh` spell | Pending |
+| `v0.1.0` and `genesis` tagged on `main` | Pending: Genesis pull request #1 |
+
+### After Genesis
+
+| Item | Notes |
+|---|---|
+| Full coordination loop E2E verified | RaBbLE shell built; execution round-trip needs clean test run |
+| Memory agent wired into sCoRE decisions | sCoRE reads `memory/patterns/` before delegating |
+| `start-rabble.sh` lifecycle for all agent sessions | memory/search/execution start/stop |
+| Context snapshots written by sCoRE | `memory/context-snapshots/` currently empty |
+| Server routes → task pipeline | Wire `/api/v1/chat` through sCoRE's file-based dispatch |
+| GitHub remote + CI | Deferred |
+
+---
+
+## How to Run RaBbLE
+
+```bash
+cd RaBbLE-sCoRE
+bash scripts/rabble-shell.sh
+```
+
+That's it. The shell auto-starts dispatch, warms up sCoRE, and drops you into the REPL.
+
+### Alternatively, full session suite:
+
+```bash
+bash scripts/start-rabble.sh
+tmux attach -t rabble-score
+```
+
+### Health check:
+
+```bash
+bash scripts/status.sh
+```
+
+---
+
+## Reading Order for a New Session
+
+1. This file (`CONTEXT.md`) — you are here
+2. `AGENT.md` — rules and workspace map
+3. `agents/score.md` — sCoRE identity (what RaBbLE IS internally)
+4. `CLAUDE.md` — how sCoRE identity is injected into the session
+5. `grimoire/RaBbLE-sCoRE/RaBbLE-sCoRE-Architecture.md` — system design
+6. `memory/patterns/dispatch-print-mode.md` — dispatch lesson (first breath)
+7. `memory/patterns/agent-isolation.md` — settings.json scope lesson
+8. `grimoire/RaBbLE-sCoRE/RaBbLE-sCoRE-Roadmap.md` — milestones and trajectory
+
+For Collective context: `grimoire/RaBbLE-Agent/RaBbLE-Collective.md`

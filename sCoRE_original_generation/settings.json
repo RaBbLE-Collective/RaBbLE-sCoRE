@@ -1,0 +1,73 @@
+{
+  "model": "claude-opus-4-5",
+  "permissions": {
+    "allow": [
+      "Read(**)",
+      "Write(tasks/**)",
+      "Write(memory/**)",
+      "Write(agents/**)",
+      "Edit(tasks/**)",
+      "Edit(memory/**)",
+      "Edit(agents/**)"
+    ],
+    "deny": [
+      "Bash(*)",
+      "WebSearch(*)",
+      "WebFetch(*)",
+      "mcp__*__web_search",
+      "mcp__*__fetch"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '[sCoRE GUARD] Bash execution blocked. Delegate via tasks/pending/' >&2 && exit 1"
+          }
+        ]
+      },
+      {
+        "matcher": "WebSearch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '[sCoRE GUARD] Direct search blocked. Write a search task to tasks/pending/' >&2 && exit 1"
+          }
+        ]
+      },
+      {
+        "matcher": "WebFetch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '[sCoRE GUARD] Direct fetch blocked. Write a search task to tasks/pending/' >&2 && exit 1"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "scripts/hooks/post-write.sh \"$CLAUDE_TOOL_INPUT_PATH\""
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "scripts/hooks/session-start.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

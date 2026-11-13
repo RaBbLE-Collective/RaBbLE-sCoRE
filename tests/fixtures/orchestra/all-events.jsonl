@@ -1,0 +1,22 @@
+{"type":"SessionStarted","session_id":"s1","model":"opus","cwd":"/home/x"}
+{"type":"Capabilities","slash_commands":["compact","endsession"],"skills":["endsession"],"mcp":[{"name":"notes","status":"connected"}],"plugins":["p"],"problems":["mcp x: failed"]}
+{"type":"SessionResumed","session_id":"s1"}
+{"type":"TextDelta","organ":"rabble","text":"hel"}
+{"type":"TextBlock","organ":"gobble","text":"found it"}
+{"type":"Thinking","organ":"rabble"}
+{"type":"ThinkingText","organ":"rabble","text":"checking the reconnect path"}
+{"type":"Narration","organ":"rabble","text":"Reading `orchestra/events.py`","id":"tu1"}
+{"type":"ToolCall","organ":"rabble","id":"tu1","name":"Bash","input":{"command":"ls"}}
+{"type":"ToolResult","organ":"rabble","id":"tu1","ok":true,"summary":"3 files"}
+{"type":"PermissionAsk","id":"p1","organ":"rabble","tool":"Bash","input":{"command":"rm x"},"title":"Run rm?","display_name":null,"description":null,"blocked_path":null,"suggestions":[{"type":"addRules","destination":"session"}]}
+{"type":"PermissionResolved","id":"p1","decision":"allow","by":"local:1000"}
+{"type":"UserSaid","sender":"local:1000","text":"hello","client":"rabble-tui"}
+{"type":"OrganStarted","organ":"gobble","tool_use_id":"tu2","task_id":"t1","brief":"map the beam reconnect","context":true}
+{"type":"OrganProgress","organ":"gobble","task_id":"t1","usage":{"tokens":10},"last_tool_name":"Grep"}
+{"type":"OrganDone","organ":"gobble","task_id":"t1","status":"completed","result":"it lives in beam.py"}
+{"type":"Usage","tokens":1200,"cost":0.01,"context_pct":4.5}
+{"type":"RateLimited","status":"warning","until":1761400000.0}
+{"type":"EntropyChanged","score":0.55,"band":"ELEVATED","trust":"strict","reason":"context compacted","capability":0,"categories":{},"local":false,"base":0,"stability":100}
+{"type":"ModelUsed","model":"claude-opus-5-5"}
+{"type":"TurnDone","stop_reason":"end_turn","origin":"background"}
+{"type":"Error","text":"boom"}

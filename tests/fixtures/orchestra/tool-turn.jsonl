@@ -1,0 +1,10 @@
+{"type":"SessionStarted","session_id":"4279267f-28e6-4413-b39b-25313f0182dc","model":"claude-haiku-5-5","cwd":"/home/rabble/RaBbLE-Collective"}
+{"type":"RateLimited","status":"allowed","until":1792910400.0}
+{"type":"ToolCall","organ":"rabble","id":"toolu_01Pv7VMmfy518oVXpCvoxLkN","name":"Bash","input":{"command":"ls RaBbLE-sCoRE/orchestra | wc -l","description":"Count entries in sCoRE orchestra directory"}}
+{"type":"ToolResult","organ":"rabble","id":"toolu_01Pv7VMmfy518oVXpCvoxLkN","ok":true,"summary":"8"}
+{"type":"Thinking","organ":"rabble"}
+{"type":"TextDelta","organ":"rabble","text":"8"}
+{"type":"TextBlock","organ":"rabble","text":"8"}
+{"type":"Usage","tokens":69875,"cost":0.00594475,"context_pct":null}
+{"type":"TurnDone","stop_reason":"end_turn","origin":"observer"}
+{"type":"Usage","tokens":36772,"cost":null,"context_pct":4.0}

@@ -1,0 +1,23 @@
+[package]
+name = "rabble-tui"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[lib]
+name = "rabble_tui"
+
+[[bin]]
+name = "rabble-tui"
+path = "src/main.rs"
+
+[dependencies]
+rabble-proto = { path = "../rabble-proto" }
+serde_json.workspace = true
+rabble-theme = { path = "../rabble-theme" }
+rabble-face = { path = "../rabble-face" }
+unicode-width = "0.2"
+signal-hook = "0.3"
+ratatui.workspace = true
+crossterm.workspace = true

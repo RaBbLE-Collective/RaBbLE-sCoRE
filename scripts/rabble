@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# rabble: RaBbLE's own terminal face over a headless Claude Code.
+#   rabble [--model M] [--resume SDK_ID] [--attach ID] [--cwd DIR]   the Rust shell (tui/), on the engine
+#   rabble --py [--model M] [--continue] [--resume ID] [...]          the Python UI (ui/, S278), one release more
+#   rabble --cc [args]                                                the S273 Claude Code wrapper (crew/rabble.py)
+#   rabble --restart | --stop | --status                              the engine's systemd user unit (rabble-engine)
+# The Rust shell talks to the engine (orchestra/serve.py) over a Unix socket. If no engine is
+# listening, rabble starts one: through the rabble-engine systemd user unit when RaBbLE-OS has
+# installed it (it restarts a crashed engine; `rabble --restart` picks up new code), else detached
+# by hand. Sessions outlive the terminal either way; the manual engine log is
+# $XDG_STATE_HOME/rabble/engine.log (the unit logs to the journal). The engine runs in the RaBbLE-UI venv built by RaBbLE-OS
+# ai-harnesses (layerctl apply claude-code); the Rust binary comes from `cargo build --release`
+# in tui/. If either is missing, rabble falls back (Python UI, then the wrapper).
+# Override: RABBLE_UI_PYTHON (venv python), RABBLE_TUI (shell binary), RABBLE_ENGINE_SOCKET.
+set -euo pipefail
+here="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+score="$(dirname "$here")"
+venv_py="${RABBLE_UI_PYTHON:-$HOME/.local/share/RaBbLE/rabble-ui/bin/python}"
+tui="${RABBLE_TUI:-$score/tui/target/release/rabble-tui}"
+
+py_ui() {
+  # -P: the launch dir must not shadow sCoRE's packages (a repo with its own ui/ would run instead)
+  exec env PYTHONPATH="$score${PYTHONPATH:+:$PYTHONPATH}" "$venv_py" -P -m ui --cwd "$PWD" "$@"
+}
+
+if [[ "${1:-}" == "--cc" ]]; then
+  shift
+  exec python3 "$score/crew/rabble.py" "$@"
+fi
+if [[ ! -x "$venv_py" ]]; then
+  echo "rabble: RaBbLE-UI venv missing ($venv_py); opening the Claude Code wrapper. Build it: layerctl apply claude-code" >&2
+  exec python3 "$score/crew/rabble.py" "$@"
+fi
+if [[ "${1:-}" == "--py" ]]; then
+  shift
+  py_ui "$@"
+fi
+if [[ ! -x "$tui" ]]; then
+  echo "rabble: Rust shell not built ($tui); opening the Python UI. Build it: (cd $score/tui && cargo build --release --offline)" >&2
+  py_ui "$@"
+fi
+
+sock="${RABBLE_ENGINE_SOCKET:-${XDG_RUNTIME_DIR:-$HOME/.local/state}/rabble/engine.sock}"
+state="${XDG_STATE_HOME:-$HOME/.local/state}/rabble"
+
+# alive: something accepts connections on the socket (a stale file from a crash does not)
+alive() {
+  [[ -S "$sock" ]] && "$venv_py" -I -c 'import socket,sys
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(1)
+try:
+    s.connect(sys.argv[1])
+except OSError:
+    sys.exit(1)' "$sock" 2>/dev/null
+}
+
+unit=rabble-engine.service
+have_unit() { systemctl --user cat "$unit" >/dev/null 2>&1; }
+need_unit() {
+  have_unit || { echo "rabble: no $unit installed; RaBbLE-OS installs it: layerctl apply claude-code" >&2; exit 1; }
+}
+case "${1:-}" in
+  --restart) need_unit; echo "rabble: restarting the engine (live sessions close; resume them from their SDK ids)" >&2
+             systemctl --user restart "$unit"; exit ;;
+  --stop)    need_unit; systemctl --user stop "$unit"; exit ;;
+  --status)  need_unit; exec systemctl --user status "$unit" --no-pager ;;
+esac
+
+if ! alive && have_unit; then
+  echo "rabble: starting the engine ($unit)..." >&2
+  systemctl --user start "$unit" || true
+fi
+if ! alive; then
+  mkdir -p "$state"
+  echo "rabble: starting the engine ($sock)..." >&2
+  # setsid + nohup: the engine outlives this terminal. The engine's own lock makes two racing
+  # launches safe: the loser exits and we connect to the winner.
+  (cd "$score" && PYTHONPATH="$score${PYTHONPATH:+:$PYTHONPATH}" setsid nohup "$venv_py" -P -m orchestra.serve --socket "$sock" \
+      >>"$state/engine.log" 2>&1 </dev/null &)
+  for _ in $(seq 1 100); do
+    alive && break
+    sleep 0.1
+  done
+  if ! alive; then
+    echo "rabble: the engine did not come up in 10 s; see $state/engine.log" >&2
+    tail -n 8 "$state/engine.log" >&2 || true
+    exit 1
+  fi
+fi
+
+exec "$tui" --socket "$sock" --cwd "$PWD" "$@"
