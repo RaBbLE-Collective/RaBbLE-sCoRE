@@ -44,10 +44,17 @@ def _read_version() -> str:
 
 VERSION = _read_version()
 
+# The interactive docs (/docs, /redoc, /openapi.json) map every route, admin included: free
+# reconnaissance on a public instance. Off unless API_DOCS=true (a laptop may turn them on).
+_API_DOCS = os.getenv("API_DOCS", "false").strip().lower() in ("1", "true", "yes")
+
 app = FastAPI(
     title="RaBbLE",
     description="Benevolent Behavioral Learning Engine — Agentic Intelligence API",
     version=VERSION,
+    docs_url="/docs" if _API_DOCS else None,
+    redoc_url="/redoc" if _API_DOCS else None,
+    openapi_url="/openapi.json" if _API_DOCS else None,
 )
 
 
@@ -331,7 +338,7 @@ async def chat_complete(
 async def create_workflow(
     req:     WorkflowCreateRequest,
     request: Request,
-    user:    dict = Depends(auth.require_user),
+    user:    dict = Depends(auth.require_member),
 ):
     user_id   = user["sub"]
     user_tier = user.get("tier", "free")
@@ -377,7 +384,7 @@ async def create_workflow(
 
 
 @app.get("/api/v1/workflows/{wf_id}")
-async def get_workflow(wf_id: str, user: dict = Depends(auth.require_user)):
+async def get_workflow(wf_id: str, user: dict = Depends(auth.require_member)):
     record = wf_store.get(wf_id, user["sub"])
     return {
         "id":         record["id"],
@@ -398,7 +405,7 @@ async def workflow_step(
     wf_id:   str,
     req:     WorkflowStepRequest,
     request: Request,
-    user:    dict = Depends(auth.require_user),
+    user:    dict = Depends(auth.require_member),
 ):
     user_id   = user["sub"]
     user_tier = user.get("tier", "free")
@@ -438,7 +445,7 @@ async def workflow_step(
 
 
 @app.delete("/api/v1/workflows/{wf_id}")
-async def cancel_workflow(wf_id: str, user: dict = Depends(auth.require_user)):
+async def cancel_workflow(wf_id: str, user: dict = Depends(auth.require_member)):
     wf_store.cancel(wf_id, user["sub"])
     return {"status": "cancelled", "id": wf_id}
 
@@ -458,7 +465,7 @@ def _session_summary(rec: "session_store.SessionRecord") -> dict:
 @app.post("/api/v1/sessions")
 async def create_or_resume_session(
     req:  SessionCreateRequest,
-    user: dict = Depends(auth.require_user),
+    user: dict = Depends(auth.require_member),
 ):
     user_id = user["sub"]
     if req.resume:
@@ -473,13 +480,13 @@ async def create_or_resume_session(
 
 
 @app.get("/api/v1/sessions")
-async def list_sessions(user: dict = Depends(auth.require_user)):
+async def list_sessions(user: dict = Depends(auth.require_member)):
     records = session_store.list_user_sessions(user["sub"])
     return [_session_summary(r) for r in records]
 
 
 @app.get("/api/v1/sessions/{session_id}")
-async def get_session(session_id: str, user: dict = Depends(auth.require_user)):
+async def get_session(session_id: str, user: dict = Depends(auth.require_member)):
     rec = session_store.get_session(session_id, user["sub"])
     if not rec:
         raise HTTPException(404, "Session not found")
@@ -491,7 +498,7 @@ async def session_message(
     session_id: str,
     req:        SessionMessageRequest,
     request:    Request,
-    user:       dict = Depends(auth.require_user),
+    user:       dict = Depends(auth.require_member),
 ):
     user_id = user["sub"]
     rec = session_store.get_session(session_id, user_id)
