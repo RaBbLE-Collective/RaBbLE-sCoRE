@@ -116,6 +116,14 @@ async def require_user(
     )
 
 
+async def require_member(user: dict = Depends(require_user)) -> dict:
+    """require_user, minus the demo guest. Every public guest shares the id "guest", so anything
+    stored per user (sessions, workflows) would be readable by every other guest."""
+    if user.get("sub") == _GUEST["sub"]:
+        raise HTTPException(403, "Sign in to keep conversations; guests can use /api/v1/chat.")
+    return user
+
+
 # ── bcrypt helpers ─────────────────────────────────────────────────────────────
 
 def hash_password(plain: str) -> str:

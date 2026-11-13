@@ -1,3 +1,4 @@
+import re
 import secrets
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,7 +30,13 @@ def _sessions_dir(user_id: str) -> Path:
     return base
 
 
+_SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
 def _session_path(user_id: str, session_id: str) -> Path:
+    # session_id comes from the URL: never let it name anything but a file in the user's folder
+    if not _SESSION_ID.fullmatch(session_id):
+        raise ValueError("bad session id")
     return _sessions_dir(user_id) / f"{session_id}.json"
 
 
@@ -58,7 +65,10 @@ def create_session(user_id: str) -> SessionRecord:
 
 
 def get_session(session_id: str, user_id: str) -> Optional[SessionRecord]:
-    path = _session_path(user_id, session_id)
+    try:
+        path = _session_path(user_id, session_id)
+    except ValueError:
+        return None   # a malformed id is just a session that does not exist (404)
     if not path.exists():
         return None
     return SessionRecord.model_validate_json(path.read_text())
