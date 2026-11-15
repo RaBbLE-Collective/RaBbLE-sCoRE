@@ -38,21 +38,24 @@ use crate::{
 pub const QUIT_WINDOW_MS: u128 = 2000;
 /// How long an error or a denial holds the face's mood (Python `FLASH`).
 pub const FLASH: Duration = Duration::from_millis(2500);
-pub const HELP: [(&str, &str); 14] = [
+pub const HELP: [(&str, &str); 17] = [
     ("/model", "pick the model (or /model opus|sonnet|haiku|fable|default|<id>)"),
-    ("/crew", "organs: /crew on|off (off = solo, cheapest) · /crew view = panel, then transcripts (Ctrl-G cycles)"),
+    ("/crew", "organs: /crew (roster) · /crew stop <name|all> · /crew on|off (off = solo, cheapest) · /crew view = panel, then transcripts (Ctrl-G cycles)"),
     ("/trust", "auto-approve level: /trust strict|standard|trusted|auto (auto = earned from session entropy)"),
     ("/mode", "permission mode: /mode default|acceptEdits|plan|auto (Shift+Tab cycles)"),
     ("/status", "model, crew, trust and mode at a glance"),
     ("/park", "hand off to a fresh session: /park [now|continue] | auto|ask|off | continue on|off (parks itself at 80% context)"),
     ("/resume", "pick an earlier session"),
-    ("/clear", "start a fresh session"),
+    ("/clear", "start a fresh session and clear the screen"),
+    ("/close", "close this session but keep the screen (then /open)"),
+    ("/open", "start a new session below this one, screen kept (only when the session is closed)"),
     ("/copy", "copy the last reply (drag to select, Ctrl-C copies the selection, Ctrl-V pastes)"),
     ("/face", "show the full face"),
     ("/reload", "restart this shell on the same session (picks up a rebuilt binary; the engine is untouched)"),
     ("/help", "this list"),
     ("/quit", "leave (Ctrl-C twice also works)"),
-    ("Ctrl-O", "expand or collapse tool cards"),
+    ("Ctrl-O", "expand or collapse tool cards and thoughts"),
+    ("!cmd", "run a shell command here; its output goes to RaBbLE with your next message"),
 ];
 
 /// Makes a fresh engine connection (used to reconnect); `None` in tests and benches.
@@ -71,11 +74,15 @@ pub enum Msg {
     Files(Vec<String>),
     Clipboard(String),
     Reconnected(Handle),
+    /// A `!command` finished on its worker: (command, output, exit ok).
+    Shell(String, String, bool),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
     Copy(String),
+    /// Bell + desktop notification (OSC 777) for a window that is not focused.
+    Notify(String),
 }
 
 #[derive(Debug, Clone)]
@@ -123,6 +130,16 @@ pub struct App {
     pub session: Option<String>,
     pub max_seq: u64,
     pub turn_open: bool,
+    /// Messages typed while a turn runs: sent one by one as turns finish.
+    queue: VecDeque<String>,
+    /// Output of `!commands`, prepended to the next message so the model sees it.
+    shell_ctx: Vec<String>,
+    /// The lead's in-progress todo (its activeForm), shown in the divider.
+    todo_now: Option<String>,
+    /// When the running turn started, which turn it is (picks its thinking word), and what the lead said it is doing.
+    turn_t0: Option<Instant>,
+    turn_no: u64,
+    doing: Option<String>,
     pub engine_ok: bool,
     cfg: Config,
     out: Handle,
@@ -287,6 +304,21 @@ fn palette_has_face_colours(p: &rabble_theme::Palette) -> bool {
     ["bg", "text", "cyan", "magenta", "violet", "pink", "muted"].iter().all(|n| p.get(n).is_some())
 }
 
+/// Clip a divider label to `max` columns with an ellipsis.
+fn fit_label(s: &str, max: usize) -> String {
+    if crate::wrap::str_width(s) <= max {
+        return s.to_owned();
+    }
+    let mut out = String::new();
+    for c in s.chars() {
+        if crate::wrap::str_width(&out) + 2 > max {
+            break;
+        }
+        out.push(c);
+    }
+    out + "…"
+}
+
 fn base_commands() -> Vec<String> {
     let mut v: Vec<String> = HELP.iter().filter(|(c, _)| c.starts_with('/')).map(|(c, _)| (*c).to_owned()).collect();
     v.sort();
@@ -299,7 +331,7 @@ impl App {
         let composer = Composer::new(&cfg.cwd, base_commands());
         App {
             th, t: Transcript::new(), composer, header, settings, overlay: Overlay::None, crew: crate::crew::Crew::new(), crew_panel: false, quit: false, reload: false, dirty: true, flow_t0: Instant::now(), flow_next: Instant::now(), usage_at: None, effects: vec![], malformed: 0,
-            session: None, max_seq: 0, turn_open: false, engine_ok: true, cfg, out, asks: VecDeque::new(), seen_asks: HashSet::new(), last_ctrl_c: None, tr_rect: Rect::default(), last_width: 0,
+            session: None, max_seq: 0, turn_open: false, queue: VecDeque::new(), shell_ctx: Vec::new(), todo_now: None, turn_t0: None, turn_no: 0, doing: None, engine_ok: true, cfg, out, asks: VecDeque::new(), seen_asks: HashSet::new(), last_ctrl_c: None, tr_rect: Rect::default(), last_width: 0,
             sdk_session: None, started: false, live: vec![], parking: None, park_pending: false, park_warned: false, park_blocked: false, seed: None,
             continue_once: false, entropy_trust: None, caps_line: String::new(), focused: true,
             post: None, connector: None, quit_reason: None, create_id: None, reconnecting: false, reconnect_running: false,
@@ -660,6 +692,23 @@ impl App {
                 self.t.block(&organ, &text)
             }
             Down::Thinking { .. } => self.t.thinking(),
+            Down::ThinkingText { organ, text } => self.t.thought(&organ, &text),
+            Down::ToolCall { organ, id, name, input } if name == "TodoWrite" && organ == "rabble" && input.get("todos").is_some_and(|t| t.is_array()) => {
+                self.crew.tool_call(&organ, &id, &name, &input);
+                let list: Vec<(String, String)> = input["todos"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|t| {
+                        let st = t.get("status").and_then(|v| v.as_str()).unwrap_or("pending").to_owned();
+                        let text = if st == "in_progress" { t.get("activeForm").or_else(|| t.get("content")) } else { t.get("content") };
+                        (st, text.and_then(|v| v.as_str()).unwrap_or("").to_owned())
+                    })
+                    .collect();
+                self.todo_now = list.iter().find(|(s, _)| s == "in_progress").map(|(_, t)| t.clone());
+                self.streaming = false;
+                self.t.todos(list)
+            }
             Down::ToolCall { organ, id, name, input } => {
                 self.crew.tool_call(&organ, &id, &name, &input);
                 self.streaming = false;
@@ -686,6 +735,9 @@ impl App {
             }
             Down::PermissionAsk { id, organ, tool, input, title, description, blocked_path, .. } => {
                 if self.seen_asks.insert(id.clone()) {
+                    if !self.focused {
+                        self.effects.push(Effect::Notify(format!("{} needs you: {tool}", crate::crew::display(&organ))));
+                    }
                     self.crew.ask(&organ, &id, &tool);
                     self.asks.push_back(Ask { id, organ, tool, input, title, description, blocked_path });
                     self.next_ask();
@@ -721,7 +773,12 @@ impl App {
                 self.notice(&format!("{} {word}", crate::crew::display(&organ)), err);
             }
             Down::OrganProgress { organ, usage, last_tool_name, .. } => self.crew.progress(&organ, usage.as_ref(), last_tool_name.as_deref()),
-            Down::Narration { organ, text, .. } => self.crew.note(&organ, &text),
+            Down::Narration { organ, text, .. } => {
+                if organ == "rabble" {
+                    self.doing = Some(text.clone());
+                }
+                self.crew.note(&organ, &text)
+            }
             Down::ModelUsed { model } => self.header.model = model,
             Down::EntropyChanged { score, band, trust, reason, base, stability, local, capability, categories, .. } => {
                 self.local = local;
@@ -773,6 +830,12 @@ impl App {
                         self.finish_park();
                     } else if self.park_pending {
                         self.begin_park(None);
+                    } else if let Some(next) = self.queue.pop_front() {
+                        self.submit(next);
+                    }
+                    self.todo_now = None;
+                    if !self.focused && !self.turn_open {
+                        self.effects.push(Effect::Notify("RaBbLE finished".into()));
                     }
                 } else {
                     self.notice("background turn finished", false);
@@ -915,6 +978,8 @@ impl App {
         self.max_seq = 0;
         self.park_pending = false;
         self.park_warned = false;
+        self.queue.clear();
+        self.todo_now = None;
         if clear {
             self.t.clear();
             self.header.context_pct = None;
@@ -952,6 +1017,15 @@ impl App {
             Msg::Files(v) => {
                 self.dirty = true;
                 self.composer.set_files(v);
+            }
+            Msg::Shell(cmd, out, ok) => {
+                self.dirty = true;
+                let out = out.trim_end();
+                let lines: Vec<&str> = out.lines().collect();
+                let shown = if lines.len() > 40 { format!("{}\n… {} more lines", lines[..40].join("\n"), lines.len() - 40) } else { out.to_owned() };
+                let ctx: String = out.chars().take(4000).collect();
+                self.shell_ctx.push(format!("$ {cmd}\n{ctx}"));
+                self.notice(&format!("$ {cmd}{}\n{shown}", if ok { "" } else { "  (failed or timed out)" }), !ok);
             }
             Msg::Clipboard(t) => {
                 self.dirty = true;
@@ -1213,6 +1287,10 @@ impl App {
                 Action::Submit(text) => self.submit(text),
                 Action::Interrupt => {
                     self.asks.clear();
+                    if !self.queue.is_empty() {
+                        self.notice(&format!("interrupted: {} queued message(s) dropped", self.queue.len()), false);
+                        self.queue.clear();
+                    }
                     if self.sid().is_some() {
                         self.to_session("interrupt", |s| Up::Interrupt { session: s });
                     }
@@ -1250,6 +1328,9 @@ impl App {
         if let Some(f) = &mut self.face {
             f.hide_full();
         }
+        if let Some(cmd) = text.strip_prefix('!').map(str::trim).filter(|c| !c.is_empty()) {
+            return self.run_shell(cmd.to_owned());
+        }
         let word = text.split_whitespace().next().unwrap_or("").to_owned();
         if HELP.iter().any(|(c, _)| *c == word && c.starts_with('/')) {
             let arg = text[word.len()..].trim().to_owned();
@@ -1258,11 +1339,70 @@ impl App {
         if self.parking.is_some() {
             return self.notice("parking: the handoff is being written, then a fresh session starts", true);
         }
+        if self.turn_open {
+            self.queue.push_back(text);
+            let n = self.queue.len();
+            return self.brief(&format!("queued ({n}): sends when this turn finishes, Esc drops the queue"), false);
+        }
+        let text = if self.shell_ctx.is_empty() { text } else { format!("[shell output the Observer ran with !]\n{}\n\n{text}", self.shell_ctx.drain(..).collect::<Vec<_>>().join("\n")) };
         self.turn_open = true;
         if !self.to_session("send", |s| Up::Send { session: s, text }) {
             self.turn_open = false;
         } else if !self.engine_ok {
             self.notice("engine connection is gone; this message was not delivered", true);
+        }
+    }
+
+    /// `!cmd`: run it here on a worker (30 s cap), show the output, hand it to the model with the next message.
+    fn run_shell(&mut self, cmd: String) {
+        let Some(post) = self.post.clone() else { return self.notice("!: no worker channel", true) };
+        let cwd = self.cfg.cwd.clone();
+        self.brief(&format!("$ {cmd}"), false);
+        std::thread::spawn(move || {
+            let r = std::process::Command::new("timeout").args(["30", "sh", "-c", &cmd]).current_dir(&cwd).stdin(std::process::Stdio::null()).output();
+            let (out, ok) = match r {
+                Ok(o) => (format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)), o.status.success()),
+                Err(e) => (format!("could not run: {e}"), false),
+            };
+            let _ = post.send(Msg::Shell(cmd, out, ok));
+        });
+    }
+
+    /// `/crew`: who is in the crew and what each is doing.
+    fn crew_roster(&mut self) {
+        let mut rows: Vec<String> = Vec::new();
+        for m in self.crew.organs() {
+            let st = match m.state {
+                crate::crew::State::Active => "working",
+                crate::crew::State::Waiting => "needs you",
+                crate::crew::State::Done => "done",
+                crate::crew::State::Failed => "failed",
+                crate::crew::State::Killed => "stopped",
+                crate::crew::State::Idle => "idle",
+            };
+            let secs = m.secs().map(|s| format!(" {s}s")).unwrap_or_default();
+            let brief: String = m.brief.chars().take(60).collect();
+            rows.push(format!("{} {st}{secs} · {} tools · {} tok{}", crate::crew::display(&m.name), m.tools, m.tokens, if brief.is_empty() { String::new() } else { format!(" · {brief}") }));
+        }
+        let head = format!("crew is {} · /crew stop <name|all> · /crew view", if self.settings.crew { "on" } else { "off" });
+        self.notice(&if rows.is_empty() { format!("{head}\nno organs have run yet") } else { format!("{head}\n{}", rows.join("\n")) }, false);
+    }
+
+    /// `/crew stop gobble|all`: stop a running organ's task.
+    fn crew_stop(&mut self, who: &str) {
+        let want = who.to_lowercase();
+        let ids: Vec<(String, String)> = self
+            .crew
+            .organs()
+            .filter(|m| m.state.live() && (want == "all" || m.name.to_lowercase() == want || crate::crew::display(&m.name).to_lowercase() == want))
+            .filter_map(|m| m.task_id.clone().map(|t| (m.name.clone(), t)))
+            .collect();
+        if want.is_empty() || ids.is_empty() {
+            return self.notice(&format!("no running organ{}: /crew stop <name|all>", if want.is_empty() || want == "all" { String::new() } else { format!(" named {want}") }), true);
+        }
+        for (name, task_id) in ids {
+            self.to_session("stop", |s| Up::StopTask { session: s, task_id });
+            self.notice(&format!("stopping {}", crate::crew::display(&name)), false);
         }
     }
 
@@ -1301,8 +1441,14 @@ impl App {
                 if a == "view" || a == "panel" || a == "log" {
                     return self.cycle_crew_view();
                 }
+                if a.is_empty() || a == "list" || a == "who" {
+                    return self.crew_roster();
+                }
+                if let Some(who) = a.strip_prefix("stop") {
+                    return self.crew_stop(who.trim());
+                }
                 if a != "on" && a != "off" {
-                    return self.notice(&format!("crew is {}; usage: /crew on|off|view", if self.settings.crew { "on" } else { "off" }), !a.is_empty());
+                    return self.notice(&format!("crew is {}; usage: /crew on|off|view|list|stop <name|all>", if self.settings.crew { "on" } else { "off" }), !a.is_empty());
                 }
                 let want = a == "on";
                 if want == self.settings.crew {
@@ -1352,6 +1498,29 @@ impl App {
                 } else {
                     self.reload = true;
                     self.quit = true;
+                }
+            }
+            "/close" => match self.session.take() {
+                Some(old) => {
+                    self.out.send(&Up::CloseSession { session: old });
+                    self.asks.clear();
+                    self.overlay = Overlay::None;
+                    self.turn_open = false;
+                    self.streaming = false;
+                    self.busy.clear();
+                    self.notice("session closed: /open starts a new one here, /clear starts one on a clean screen", false);
+                }
+                None => self.notice("no session is open: /open starts one", false),
+            },
+            "/open" => {
+                if self.session.is_some() {
+                    self.notice("a session is still open: /close it first (/clear starts a fresh one on a clean screen)", true);
+                } else if self.create_id.is_some() {
+                    self.notice("a session is already starting", false);
+                } else {
+                    self.restart(None, false);
+                    self.header.context_pct = None;
+                    self.notice("new session opened below, screen kept", false);
                 }
             }
             "/clear" => {
@@ -1461,16 +1630,30 @@ impl App {
     }
 
     // ---- paint -------------------------------------------------------------------------------
-    pub fn busy_label(&self) -> &'static str {
+    pub fn busy_label(&self) -> String {
         if matches!(self.overlay, Overlay::Permission(_)) || !self.asks.is_empty() {
-            "awaiting approval"
+            "awaiting approval".into()
         } else if self.parking.is_some() {
-            "parking"
+            "parking".into()
         } else if self.turn_open {
-            "working"
+            let el = self.turn_t0.map_or(Duration::ZERO, |t| t.elapsed());
+            let spin = crate::thinking::spinner(el, self.th.glyphs.rule != '─');
+            let mut s = format!("{spin} {}{} {}", crate::thinking::word(self.turn_no, el), self.th.glyphs.ellipsis, crate::thinking::clock(el));
+            if let Some(d) = self.todo_now.as_ref().or(self.doing.as_ref()) {
+                s = format!("{s} · {d}");
+            }
+            if !self.queue.is_empty() {
+                s = format!("{s} · {} queued", self.queue.len());
+            }
+            s
         } else {
-            ""
+            String::new()
         }
+    }
+
+    /// The turn clock moves once a second while a turn runs.
+    pub fn wants_second_tick(&self) -> bool {
+        self.turn_open
     }
 
     pub fn needs_tick(&self) -> bool {
@@ -1516,7 +1699,17 @@ impl App {
         // the micro mark is all eye, so its text keeps one more column of air than the full mark's
         let text_slot = if face_on { mark_w } else if compact { mark_w + 1 } else { 0 };
         self.header.draw(ha, buf, &self.th, text_slot, face_on, phase);
-        draw_divider(da, buf, &self.th, self.busy_label(), phase);
+        if self.turn_open {
+            if self.turn_t0.is_none() {
+                self.turn_t0 = Some(Instant::now());
+                self.turn_no += 1;
+            }
+        } else {
+            self.turn_t0 = None;
+            self.doing = None;
+        }
+        let label = fit_label(&self.busy_label(), (da.width as usize / 2).max(12));
+        draw_divider(da, buf, &self.th, &label, phase);
         ratatui::widgets::Widget::render(View(&self.t), ta, buf);
         if panel_on {
             crate::widgets::crew::panel(&self.crew, pa, buf, &self.th, self.turn_open);
@@ -1652,6 +1845,102 @@ mod tests {
         let s = screen(&mut a, 80, 20);
         assert_eq!(s.matches("Hello there").count(), 1, "{s}");
         assert!(s.lines().next().unwrap().contains("claude-haiku"), "{s}");
+    }
+
+    #[test]
+    fn open_needs_a_closed_session_and_keeps_the_screen() {
+        let (mut a, rx) = live();
+        ev(&mut a, r#"{"type":"SessionStarted","session_id":"abc","model":"claude-haiku","cwd":"/w"}"#);
+        ev(&mut a, r#"{"type":"TextBlock","organ":"rabble","text":"earlier answer"}"#);
+        sent(&rx);
+        say(&mut a, "/open");
+        assert!(sent(&rx).is_empty() && a.session.is_some(), "an open session refuses /open");
+        say(&mut a, "/close");
+        assert!(a.session.is_none());
+        assert!(sent(&rx).iter().any(|m| m["type"] == "close_session"));
+        say(&mut a, "/open");
+        assert!(sent(&rx).iter().any(|m| m["type"] == "create_session"));
+        let s = screen(&mut a, 80, 20);
+        assert!(s.contains("earlier answer"), "/open keeps the transcript: {s}");
+    }
+
+    #[test]
+    fn thinking_shows_as_a_thought_and_the_divider_has_a_word_not_working() {
+        let (mut a, _rx) = live();
+        ev(&mut a, r#"{"type":"SessionStarted","session_id":"abc","model":"m","cwd":"/w"}"#);
+        a.turn_open = true;
+        ev(&mut a, r#"{"type":"ThinkingText","organ":"rabble","text":"weighing the "}"#);
+        ev(&mut a, r#"{"type":"ThinkingText","organ":"rabble","text":"two options"}"#);
+        ev(&mut a, r#"{"type":"Narration","organ":"rabble","text":"Running the tests","id":"t1"}"#);
+        let s = screen(&mut a, 100, 20);
+        assert!(s.contains("∴ thinking") && s.contains("weighing the two options"), "{s}");
+        assert_eq!(s.matches("∴ thinking").count(), 1, "chunks join one thought: {s}");
+        assert!((s.contains("…") || s.contains("...")) && s.contains("Running the tests") && !s.contains(" working "), "{s}");
+    }
+
+    #[test]
+    fn messages_typed_during_a_turn_queue_and_send_when_it_finishes() {
+        let (mut a, rx) = live();
+        ev(&mut a, r#"{"type":"SessionStarted","session_id":"abc","model":"m","cwd":"/w"}"#);
+        say(&mut a, "first");
+        say(&mut a, "second");
+        let sends = |rx: &Receiver<String>| sent(rx).iter().filter(|m| m["type"] == "send").map(|m| m["text"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        assert_eq!(sends(&rx), ["first"], "the second waits");
+        assert!(a.busy_label().contains("1 queued"), "{}", a.busy_label());
+        ev(&mut a, r#"{"type":"TurnDone","stop_reason":"end_turn","origin":"observer"}"#);
+        assert_eq!(sends(&rx), ["second"]);
+        assert!(a.queue.is_empty());
+    }
+
+    #[test]
+    fn todo_write_draws_one_checklist_and_names_the_active_item() {
+        let (mut a, _rx) = live();
+        ev(&mut a, r#"{"type":"SessionStarted","session_id":"abc","model":"m","cwd":"/w"}"#);
+        a.turn_open = true;
+        let todo = |st1: &str, st2: &str| format!(r#"{{"type":"ToolCall","organ":"rabble","id":"t","name":"TodoWrite","input":{{"todos":[{{"content":"Read code","status":"{st1}","activeForm":"Reading code"}},{{"content":"Write tests","status":"{st2}","activeForm":"Writing tests"}}]}}}}"#);
+        ev(&mut a, &todo("in_progress", "pending"));
+        ev(&mut a, &todo("completed", "in_progress"));
+        let s = screen(&mut a, 100, 20);
+        assert_eq!(s.matches("Todos ").count(), 1, "{s}");
+        assert!(s.contains("Todos 1/2") && s.contains("Read code") && s.contains("Writing tests"), "{s}");
+        assert!(a.busy_label().contains("Writing tests"), "{}", a.busy_label());
+    }
+
+    #[test]
+    fn bang_runs_a_shell_command_and_feeds_the_next_message() {
+        let (mut a, rx) = live();
+        ev(&mut a, r#"{"type":"SessionStarted","session_id":"abc","model":"m","cwd":"/w"}"#);
+        a.on_msg(Msg::Shell("echo hi".into(), "hi\n".into(), true));
+        let s = screen(&mut a, 80, 20);
+        assert!(s.contains("$ echo hi") && s.contains("hi"), "{s}");
+        sent(&rx);
+        say(&mut a, "what did that print?");
+        let t = sent(&rx).iter().find(|m| m["type"] == "send").unwrap()["text"].as_str().unwrap().to_owned();
+        assert!(t.contains("$ echo hi\nhi") && t.ends_with("what did that print?"), "{t}");
+    }
+
+    #[test]
+    fn crew_roster_and_stop() {
+        let (mut a, rx) = live();
+        ev(&mut a, r#"{"type":"SessionStarted","session_id":"abc","model":"m","cwd":"/w"}"#);
+        ev(&mut a, r#"{"type":"OrganStarted","organ":"gobble","tool_use_id":"u","task_id":"task-1","brief":"map it"}"#);
+        say(&mut a, "/crew");
+        let s = screen(&mut a, 100, 20);
+        assert!(s.contains("GoBbLE working") && s.contains("map it"), "{s}");
+        sent(&rx);
+        say(&mut a, "/crew stop gobble");
+        let m = sent(&rx);
+        assert!(m.iter().any(|m| m["type"] == "stop_task" && m["task_id"] == "task-1"), "{m:?}");
+    }
+
+    #[test]
+    fn an_unfocused_window_gets_a_notification_when_the_turn_ends() {
+        let (mut a, _rx) = live();
+        ev(&mut a, r#"{"type":"SessionStarted","session_id":"abc","model":"m","cwd":"/w"}"#);
+        a.turn_open = true;
+        a.focused = false;
+        ev(&mut a, r#"{"type":"TurnDone","stop_reason":"end_turn","origin":"observer"}"#);
+        assert!(a.effects.iter().any(|e| matches!(e, Effect::Notify(_))));
     }
 
     #[test]
