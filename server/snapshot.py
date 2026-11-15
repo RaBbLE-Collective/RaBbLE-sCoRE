@@ -31,6 +31,8 @@ debounced (SNAPSHOT_DEBOUNCE_S, 30), only if changed. Shutdown: one last flush (
 re-merge if the restore had failed or we were fenced). A crash loses the last few seconds of
 writes: accepted. Every request is counted (storage.py).
 """
+from __future__ import annotations
+
 import asyncio
 import hashlib
 import json
