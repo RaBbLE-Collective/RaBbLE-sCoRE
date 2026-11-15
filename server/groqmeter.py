@@ -4,7 +4,8 @@ A rolling record of Groq's own rate-limit headers, per endpoint and model.
 Groq answers every call with x-ratelimit-limit-<kind>, x-ratelimit-remaining-<kind> and
 x-ratelimit-reset-<kind> (kind is requests, a daily window, or tokens, a per-minute window;
 speech endpoints report their own). We keep the latest of each triple. Guests are refused
-while ANY live window shows more than GUEST_GROQ_CUTOFF (default 0.5) consumed, so members
+while ANY live window shows more than GUEST_GROQ_CUTOFF (default 0.5) consumed (per-minute tokens
+windows: GUEST_GROQ_MINUTE_CUTOFF, default 0.9), so members
 and the owner keep the rest. A window that has passed its reset time counts as empty again.
 No data yet (cold start): no cutoff, and the daily guest turn pools in guests.py still apply.
 
@@ -31,6 +32,12 @@ _UNIT = {"ms": 0.001, "s": 1, "m": 60, "h": 3600}
 
 def cutoff() -> float:
     return float(os.getenv("GUEST_GROQ_CUTOFF", "0.5"))
+
+
+def minute_cutoff() -> float:
+    """Per-minute token windows refill in seconds and one guest's own talk fills them (the history
+    grows each turn), so they get a looser cutoff than the daily windows."""
+    return float(os.getenv("GUEST_GROQ_MINUTE_CUTOFF", "0.9"))
 
 
 def parse_reset(text: str) -> float:
@@ -114,8 +121,8 @@ def snapshot() -> list[dict]:
 
 def guest_refusal() -> str | None:
     """Why guests are turned away right now, or None."""
-    limit = cutoff()
     for w in snapshot():
+        limit = minute_cutoff() if w["kind"] == "tokens" else cutoff()
         if w["used"] > limit:
             return (f"Groq {w['endpoint']} {w['kind']} is {w['used']:.0%} used "
                     f"(guest cutoff {limit:.0%}, resets in {w['resets_in_s']:.0f}s)")

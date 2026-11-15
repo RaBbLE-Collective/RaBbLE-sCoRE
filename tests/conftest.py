@@ -66,7 +66,7 @@ def data_dir(tmp_path, monkeypatch):
     for k in ("R2_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET", "R2_PREFIX",
               "R2_CLASS_A_BUDGET", "R2_CLASS_B_BUDGET", "GUEST_ISSUE_SECRET", "GUEST_DAILY_TURNS",
               "TRANSCRIPT_BACKEND", "R2_ALLOW_FRESH_START", "SNAPSHOT_KEEP", "SNAPSHOT_ALLOW_SHRINK",
-              "GUEST_GROQ_CUTOFF"):
+              "GUEST_GROQ_CUTOFF", "GUEST_GROQ_MINUTE_CUTOFF"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     db.close()
