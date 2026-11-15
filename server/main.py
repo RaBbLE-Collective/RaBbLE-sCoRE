@@ -54,8 +54,15 @@ _API_DOCS = os.getenv("API_DOCS", "false").strip().lower() in ("1", "true", "yes
 @asynccontextmanager
 async def _lifespan(_app):
     await snapshot.start()   # R2: restore the db if the disk is fresh, then snapshot after writes
-    yield
-    await snapshot.stop()    # one last upload on graceful shutdown
+    try:
+        yield
+    finally:
+        try:
+            await transcripts.stop()   # flush buffered transcripts to R2 before the final db snapshot
+        except BaseException:
+            logging.getLogger("rabble.main").exception("transcripts.stop() failed; continuing to the db flush")
+        finally:
+            await snapshot.stop()    # one last upload on graceful shutdown: ALWAYS runs
 
 
 app = FastAPI(

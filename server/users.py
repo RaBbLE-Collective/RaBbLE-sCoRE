@@ -75,16 +75,16 @@ def hash_api_key(key: str) -> str:
 
 
 _USER_COLS = ("id", "handle", "display_name", "email", "join_date", "intention",
-              "llm_backend", "byo_key_enc", "tier", "api_key")
-_INVITE_COLS = ("token", "created_by", "created_at", "expires_at", "note", "consumed", "consumed_by")
+              "llm_backend", "byo_key_enc", "tier", "api_key", "updated_at")
+_INVITE_COLS = ("token", "created_by", "created_at", "expires_at", "note", "consumed", "consumed_by", "updated_at")
 
 
 def _user(row: dict | None) -> Optional[UserProfile]:
-    return UserProfile(**row) if row else None
+    return UserProfile(**{k: v for k, v in row.items() if k != "updated_at"}) if row else None
 
 
 def _invite(row: dict | None) -> Optional[InviteToken]:
-    return InviteToken(**{**row, "consumed": bool(row["consumed"])}) if row else None
+    return InviteToken(**{**{k: v for k, v in row.items() if k != "updated_at"}, "consumed": bool(row["consumed"])}) if row else None
 
 
 def create_user(profile: UserProfile) -> UserProfile:
@@ -109,6 +109,7 @@ def get_user_by_api_key(api_key: str) -> Optional[UserProfile]:
 def save_user(profile: UserProfile) -> None:
     d = profile.model_dump()
     d["api_key"] = hash_api_key(d["api_key"])
+    d["updated_at"] = db.now_ts()
     sets = ", ".join(f"{c} = excluded.{c}" for c in _USER_COLS[1:])
     db.execute(
         f"INSERT INTO users ({', '.join(_USER_COLS)}) VALUES ({', '.join('?' * len(_USER_COLS))}) "
@@ -138,6 +139,7 @@ def create_invite(created_by: str, note: str = "", expires_days: int = 7) -> Inv
 def _save_invite(invite: InviteToken) -> None:
     d = invite.model_dump()
     d["consumed"] = int(invite.consumed)
+    d["updated_at"] = db.now_ts()
     sets = ", ".join(f"{c} = excluded.{c}" for c in _INVITE_COLS[1:])
     db.execute(
         f"INSERT INTO invites ({', '.join(_INVITE_COLS)}) VALUES ({', '.join('?' * len(_INVITE_COLS))}) "
@@ -164,8 +166,8 @@ def consume_invite(token: str, user_id: str) -> bool:
     if now > expires:
         return False
     # The WHERE keeps two racing consumers from both winning.
-    return db.execute("UPDATE invites SET consumed = 1, consumed_by = ? WHERE token = ? AND consumed = 0",
-                      (user_id, token)) == 1
+    return db.execute("UPDATE invites SET consumed = 1, consumed_by = ?, updated_at = ? WHERE token = ? AND consumed = 0",
+                      (user_id, db.now_ts(), token)) == 1
 
 
 def list_invites() -> list[InviteToken]:

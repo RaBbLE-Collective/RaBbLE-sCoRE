@@ -46,6 +46,8 @@ def _seed(r2, n=1):
     db.clear_dirty()
     snapshot.state, snapshot.hold, snapshot._known, snapshot._marker_done = "disabled", None, None, False
     snapshot.baseline, snapshot.latest = {"users": 0, "invites": 0}, {}
+    snapshot.fallback_hold, snapshot._ptr_etag = None, snapshot._UNKNOWN
+    snapshot._protect.clear()
 
 
 def test_local_only_does_nothing(data_dir):
@@ -62,7 +64,7 @@ def test_each_upload_is_a_new_key_with_pointer_marker_and_usage(fresh):
     assert snapshot.flush() is True
     keys = _snap_keys(fresh)
     assert len(keys) == 2 and keys[0] != keys[1]                    # nothing overwritten
-    assert all(k.endswith("Z.db") and "score-2" in k for k in keys)
+    assert all(k.endswith("Z.db") and "score-g0000000" in k for k in keys)
     ptr = json.loads(fresh.objects[POINTER])
     assert P + ptr["key"] == keys[-1] and ptr["users"] == 2 and len(ptr["sha256"]) == 64
     assert P + "snapshots/INITIALIZED" in fresh.objects
@@ -78,16 +80,24 @@ def test_restore_reads_the_pointer(fresh):
     assert snapshot.baseline["users"] == 2
 
 
-def test_corrupt_latest_object_falls_back_to_an_older_snapshot(fresh):
+def test_corrupt_latest_object_is_a_held_fallback_not_a_silent_downgrade(fresh, caplog):
     snapshot.try_restore()
     _seed(fresh, 3)
     newest = _snap_keys(fresh)[-1]
     fresh.objects[newest] = b"this is not a sqlite database"
-    assert snapshot.try_restore() == "restored"
+    with caplog.at_level("ERROR", logger="rabble.snapshot"):
+        assert snapshot.try_restore() == "restored"
     assert users.get_user("s1") is not None and users.get_user("s2") is None   # the second newest was used
+    assert snapshot.fallback_hold and snapshot.fallback_hold["source"].endswith("Z.db")
+    assert not snapshot.uploads_enabled() and "UPLOADS ON HOLD" in caplog.text
+    assert snapshot.baseline["users"] == 3                          # the pointer's count, not the older snapshot's
+    users.create_user(_user("later"))
+    fresh.calls.clear()
+    assert snapshot.flush() is False and _puts(fresh) == []         # nothing goes up, nothing is pruned
+    assert newest in fresh.objects
 
 
-def test_sha_mismatch_and_missing_object_fall_back(fresh):
+def test_sha_mismatch_and_missing_object_fall_back_with_a_hold(fresh):
     snapshot.try_restore()
     _seed(fresh, 3)
     keys = _snap_keys(fresh)
@@ -96,14 +106,63 @@ def test_sha_mismatch_and_missing_object_fall_back(fresh):
     del fresh.objects[keys[1]]                                      # and one missing
     assert snapshot.try_restore() == "restored"
     assert users.get_user("s0") is not None and users.get_user("s1") is None
+    assert snapshot.fallback_hold and not snapshot.uploads_enabled()
 
 
-def test_corrupt_pointer_uses_the_newest_snapshot(fresh):
+def test_corrupt_pointer_restores_the_newest_but_holds(fresh):
     snapshot.try_restore()
     _seed(fresh, 2)
     fresh.objects[POINTER] = b"{ nope"
     assert snapshot.try_restore() == "restored"
     assert users.get_user("s1") is not None
+    assert snapshot.fallback_hold and not snapshot.uploads_enabled()
+
+
+def test_a_single_miss_on_the_pointer_object_is_retried_not_fallen_back(fresh):
+    snapshot.try_restore()
+    _seed(fresh, 3)
+    ptr = json.loads(fresh.objects[POINTER])["key"]
+
+    class Once:
+        def __init__(self, fake):
+            self.fake, self.missed = fake, False
+
+        def get(self, key):
+            if key.endswith(ptr) and not self.missed:
+                self.missed = True
+                return None
+            return self.fake.get(key)
+
+        def __getattr__(self, n):
+            return getattr(self.fake, n)
+    storage.set_client(Once(fresh))
+    assert snapshot.try_restore() == "restored"
+    assert snapshot.fallback_hold is None and users.get_user("s2") is not None
+
+
+def test_ack_resumes_uploads_persists_across_restart_and_protects_newer_keys(fresh, monkeypatch):
+    monkeypatch.setenv("SNAPSHOT_KEEP", "2")
+    monkeypatch.setenv("SNAPSHOT_KEEP_HOURLY_H", "0")
+    monkeypatch.setenv("SNAPSHOT_KEEP_DAILY_D", "0")
+    snapshot.try_restore()
+    _seed(fresh, 4)
+    keys = _snap_keys(fresh)
+    newest = keys[-1]
+    fresh.objects[newest] = b"garbage"
+    assert snapshot.try_restore() == "restored"
+    source = snapshot.fallback_hold["source"]
+    db.close()                                                      # restart on the same disk: still held
+    snapshot.state, snapshot.fallback_hold = "disabled", None
+    assert snapshot.try_restore() == "present" and snapshot.fallback_hold
+    assert snapshot.flush() is False
+    monkeypatch.setenv("SNAPSHOT_ACCEPT_FALLBACK", source)
+    users.create_user(_user("after"))
+    for i in range(6):
+        users.create_user(_user(f"x{i}"))
+        assert snapshot.flush() is True
+    assert snapshot.fallback_hold is None and newest in fresh.objects   # never pruned
+    assert newest[len(P):] in json.loads(fresh.objects[POINTER])["protect"]
+    assert not db.db_path().with_name(".restore-hold").exists()
 
 
 def test_all_snapshots_corrupt_is_a_failure_never_fresh(fresh):
@@ -156,6 +215,8 @@ def test_a_small_shrink_inside_ten_percent_is_fine(fresh):
 
 def test_prune_keeps_n_and_never_the_newest_or_the_pointer(fresh, monkeypatch):
     monkeypatch.setenv("SNAPSHOT_KEEP", "3")
+    monkeypatch.setenv("SNAPSHOT_KEEP_HOURLY_H", "0")
+    monkeypatch.setenv("SNAPSHOT_KEEP_DAILY_D", "0")
     snapshot.try_restore()
     for i in range(6):
         users.create_user(_user(f"u{i}"))
@@ -365,3 +426,129 @@ def test_start_retries_the_restore_in_the_background(fresh, monkeypatch):
         await snapshot.stop()
     asyncio.run(go())
     assert snapshot.state == "restored" and users.get_user("s0") is not None
+
+
+# ── single writer: generations and the pointer fence ──────────────────────────
+
+def test_a_snapshot_key_can_never_be_overwritten(fresh):
+    snapshot.try_restore()
+    users.create_user(_user())
+    snapshot.flush()
+    key = snapshot.latest["key"]
+    with pytest.raises(storage.PreconditionFailed):
+        storage.put(key, b"x", if_none_match="*")
+    assert snapshot._gen(key) == 1 and snapshot.latest["writer"] == snapshot.INSTANCE
+
+
+def test_a_second_writer_is_fenced_and_remerged_without_losing_rows(fresh):
+    snapshot.try_restore()
+    users.create_user(_user("a"))
+    assert snapshot.flush()
+    # instance B (a deploy overlap) uploads a newer lineage and moves the pointer
+    b_key = P + "snapshots/score-g00000002-20261115T000000Z.db"
+    fresh.objects[b_key] = fresh.objects[P + snapshot.latest["key"]]
+    fresh.objects[POINTER] = json.dumps({"key": b_key[len(P):], "gen": 2, "writer": "other",
+                                         "sha256": __import__("hashlib").sha256(fresh.objects[b_key]).hexdigest(),
+                                         "users": 1, "invites": 0}).encode()
+    before = fresh.objects[POINTER]
+    users.create_user(_user("only-on-a"))                           # A keeps taking writes
+    assert snapshot.flush() is False
+    assert snapshot.state == "failed" and fresh.objects[POINTER] == before     # the pointer is B's still
+    assert snapshot.try_restore() == "restored"                     # re-merge
+    assert users.get_user("only-on-a") is not None and users.get_user("a") is not None
+    assert snapshot.flush() is True
+    ptr = json.loads(fresh.objects[POINTER])
+    assert ptr["gen"] == 3 and ptr["writer"] == snapshot.INSTANCE
+    assert snapshot.fallback_hold is None
+
+
+def test_stop_remerges_a_fenced_writer_so_its_rows_survive_the_shutdown(fresh):
+    async def go():
+        await snapshot.start()
+        users.create_user(_user("a"))
+        snapshot.flush()
+        fresh.objects[POINTER] = json.dumps({"key": snapshot.latest["key"], "gen": 9, "writer": "other",
+                                             "users": 1, "invites": 0,
+                                             "sha256": snapshot.latest["sha256"]}).encode()
+        users.create_user(_user("last"))
+        await snapshot.stop()
+    asyncio.run(go())
+    ptr = json.loads(fresh.objects[POINTER])
+    assert ptr["writer"] == snapshot.INSTANCE and ptr["gen"] >= 10
+    db.close()
+    db.db_path().unlink()
+    snapshot.state, snapshot._known, snapshot._ptr_etag = "disabled", None, snapshot._UNKNOWN
+    assert snapshot.try_restore() == "restored" and users.get_user("last") is not None
+
+
+def test_a_db_on_disk_with_an_unreadable_pointer_is_held_not_baseline_zero(fresh):
+    snapshot.try_restore()
+    for i in range(5):
+        users.create_user(_user(f"u{i}"))
+    snapshot.flush()
+    db.close()
+    db.db_path().unlink()
+    db.conn()                                                       # an empty local db, no .restore-pending
+    snapshot.state, snapshot._ptr_etag = "disabled", snapshot._UNKNOWN
+
+    class NoPointer:
+        def get(self, key):
+            if key.endswith("latest.json"):
+                raise RuntimeError("R2 503")
+            return fresh.get(key)
+
+        def __getattr__(self, n):
+            return getattr(fresh, n)
+    storage.set_client(NoPointer())
+    assert snapshot.try_restore() == "present" and snapshot.hold
+    users.create_user(_user("one"))
+    before = list(_snap_keys(fresh))
+    assert snapshot.flush() is False and _snap_keys(fresh) == before
+    storage.set_client(fresh)                                       # the pointer is readable again: baseline 5
+    # pass 5: the lineage check now runs first: the db does not descend from the pointer, so it
+    # is merged with the snapshot (all 5 users back) instead of tripping the shrink gate
+    assert snapshot.flush() is False and snapshot.state == "failed"
+    assert snapshot.try_restore() == "restored"
+    assert len(users.list_handles()) == 6
+
+
+# ── retention ─────────────────────────────────────────────────────────────────
+
+def test_tiered_retention_keeps_newest_hourly_and_daily(data_dir):
+    now = __import__("datetime").datetime(2026, 11, 15, 12, 0, tzinfo=__import__("datetime").timezone.utc)
+    from datetime import timedelta
+    known = sorted(f"snapshots/score-g{n:08d}-{(now - timedelta(minutes=30 * (400 - n))).strftime('%Y%m%dT%H%M%SZ')}.db"
+                   for n in range(1, 401))                          # 400 snapshots, 30 min apart (~8 days)
+    keep = snapshot._keep_set(known, now)
+    assert set(known[-8:]) <= keep                                  # the newest N
+    assert len(keep) < len(known) and len(keep) > 8
+    day = {k[-19:-11] for k in keep}
+    assert len(day) >= 8                                            # every day is represented
+    recent = [k for k in keep if (now - snapshot._ts(k)) <= timedelta(hours=48)]
+    assert len({snapshot._ts(k).strftime("%Y%m%d%H") for k in recent}) >= 47   # one per hour
+    assert snapshot._keep_set(["snapshots/score-weird.db"], now) == {"snapshots/score-weird.db"}
+
+
+def test_guest_burst_does_not_wipe_history_within_minutes(fresh):
+    snapshot.try_restore()
+    users.create_user(_user("first"))
+    snapshot.flush()
+    first = snapshot.latest["key"]
+    for i in range(20):                                             # far more than SNAPSHOT_KEEP uploads
+        users.create_user(_user(f"g{i}"))
+        snapshot.flush()
+    assert P + first in fresh.objects                               # the hourly/daily tier kept the oldest
+
+
+def test_late_restore_merge_keeps_guest_caps_and_meta(fresh):
+    snapshot.try_restore()
+    _seed(fresh)
+    flaky = _FlakyGet(fresh)
+    storage.set_client(flaky)
+    assert snapshot.try_restore() == "failed"
+    db.execute("INSERT INTO guest_turns_by_user (day, user_id, n) VALUES ('2026-11-15', 'g', 7)")
+    db.execute("INSERT INTO guest_issue (hour, n) VALUES ('2026-11-15T10', 4)")
+    flaky.fail_get = False
+    assert snapshot.try_restore() == "restored"
+    assert db.query("SELECT n FROM guest_turns_by_user WHERE user_id = 'g'")[0]["n"] == 7
+    assert db.query("SELECT n FROM guest_issue")[0]["n"] == 4

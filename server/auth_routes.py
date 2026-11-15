@@ -95,6 +95,14 @@ def _profile_to_dict(profile: UserProfile) -> dict:
     return d
 
 
+def _require_durable() -> None:
+    """Writes that mint or change credentials are refused while snapshot uploads are off (a failed or
+    fenced restore, a hold): the only ways out are a redeploy onto a fresh disk, which would drop them."""
+    if not snapshot.uploads_enabled():
+        raise HTTPException(503, "Account changes are paused while storage recovers; nothing was saved. "
+                                 "Try again shortly.", headers={"Retry-After": "300"})
+
+
 # ── Legacy /auth/* endpoints (backward compat) ─────────────────────────────────
 
 @router.post("/register", status_code=201)
@@ -103,6 +111,7 @@ async def register(body: RegisterRequest):
     Off unless ALLOW_REGISTER=true: it is open to anyone and returns a working API key."""
     if os.getenv("ALLOW_REGISTER", "").lower() not in ("1", "true", "yes"):
         raise HTTPException(404, "Not found")
+    _require_durable()
     base_handle = re.sub(r"[^a-z0-9]", "-", body.name.lower().strip())[:20].strip("-") or "user"
     handle = base_handle
     existing_handles = user_store.list_handles()
@@ -158,6 +167,7 @@ async def me(user: dict = Depends(auth.require_user)):
 
 @member_router.post("/admin/invites", status_code=201)
 async def create_invite(body: InviteCreateRequest, admin: dict = Depends(_require_admin)):
+    _require_durable()
     invite = user_store.create_invite(
         created_by=admin["id"],
         note=body.note or "",
@@ -262,6 +272,7 @@ async def summon(body: SummonRequest):
     if not _HANDLE_RE.match(body.handle):
         raise HTTPException(422, "handle must be 1–24 lowercase alphanumeric + hyphens, not starting with hyphen")
 
+    _require_durable()
     if body.llm_backend not in _VALID_BACKENDS:
         raise HTTPException(422, f"llm_backend must be one of: {', '.join(sorted(_VALID_BACKENDS))}")
 
@@ -326,6 +337,7 @@ async def issue_guest(body: Optional[GuestRequest] = None,
         raise HTTPException(404, "Not found")
     if not x_guest_secret or not hmac.compare_digest(x_guest_secret.encode(), secret.encode()):
         raise HTTPException(403, "Invalid guest secret")
+    _require_durable()
     spent = storage.exhausted()
     if spent:
         raise HTTPException(503, "Guest sign-up is paused: this month's storage allowance is used up. "
@@ -352,6 +364,7 @@ async def get_profile(user: dict = Depends(auth.require_user)):
 async def update_profile(body: ProfileUpdateRequest, user: dict = Depends(auth.require_user)):
     if guests.is_guest(user):
         raise HTTPException(403, "Guest accounts cannot edit their profile.")
+    _require_durable()
     profile = user_store.get_user(user["sub"])
     if not profile:
         raise HTTPException(404, "Profile not found")

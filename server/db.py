@@ -30,6 +30,11 @@ _hooks: list[Callable[[], None]] = []
 dirty_since: float | None = None   # monotonic time of the first unsnapshotted write
 
 
+def now_ts() -> str:
+    """Row timestamp: UTC, fixed width (microseconds always present), so string order is time order."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
 def db_path() -> Path:
     return Path(os.getenv("DATA_DIR", "data")) / "score.db"
 
@@ -155,25 +160,47 @@ def backup(dest: Path) -> None:
 
 def replace_with(snapshot: bytes, merge_local: bool) -> None:
     """Swap in a restored snapshot. With merge_local, rows written locally since (users,
-    invites, guest and R2 counters) are folded into it first, so a late restore loses nothing."""
+    invites, guest counters and caps, R2 counters, missing meta) are folded into it first, so a late restore loses nothing."""
     with _lock:
         path = db_path()
         tmp = path.with_suffix(".restore")
         tmp.write_bytes(snapshot)
         close()
         if merge_local and path.exists():
+            lc = sqlite3.connect(path)             # a local db from before a migration gets it first
+            try:
+                _migrate(lc)
+            finally:
+                lc.close()
             c = sqlite3.connect(tmp)
             try:
                 _migrate(c)
                 c.execute("ATTACH ? AS loc", (str(path),))
+                # Rows on both sides: the newer updated_at wins; rows only local are added.
                 for table, key in (("users", "id"), ("invites", "token")):
                     cols = [r[1] for r in c.execute(f"PRAGMA main.table_info({table})")]
                     lcols = {r[1] for r in c.execute(f"PRAGMA loc.table_info({table})")}
                     use = ", ".join(x for x in cols if x in lcols)
                     c.execute(f"INSERT INTO main.{table} ({use}) SELECT {use} FROM loc.{table} "
                               f"WHERE {key} NOT IN (SELECT {key} FROM main.{table})")
+                    # consumed state (invites) only moves forward: it is excluded from the newer-wins copy
+                    sets = ", ".join(f"{x} = l.{x}" for x in cols
+                                     if x in lcols and x != key and not (table == "invites" and x in ("consumed", "consumed_by")))
+                    c.execute(f"UPDATE main.{table} AS m SET {sets} FROM loc.{table} AS l "
+                              f"WHERE m.{key} = l.{key} AND l.updated_at > m.updated_at")
+                c.execute("UPDATE main.invites AS m SET consumed = 1, consumed_by = COALESCE(m.consumed_by, l.consumed_by), "
+                          "updated_at = MAX(m.updated_at, l.updated_at) FROM loc.invites AS l "
+                          "WHERE m.token = l.token AND l.consumed = 1 AND m.consumed = 0")
+                c.execute("UPDATE main.invites AS m SET consumed_by = l.consumed_by FROM loc.invites AS l "
+                          "WHERE m.token = l.token AND m.consumed = 1 AND m.consumed_by IS NULL")
                 c.execute("INSERT INTO main.guest_turns (day, n) SELECT day, n FROM loc.guest_turns WHERE true "
                           "ON CONFLICT(day) DO UPDATE SET n = MAX(n, excluded.n)")
+                # per-guest daily cap and hourly issuance limit must not reset on a late restore
+                c.execute("INSERT INTO main.guest_turns_by_user (day, user_id, n) SELECT day, user_id, n FROM loc.guest_turns_by_user "
+                          "WHERE true ON CONFLICT(day, user_id) DO UPDATE SET n = MAX(n, excluded.n)")
+                c.execute("INSERT INTO main.guest_issue (hour, n) SELECT hour, n FROM loc.guest_issue "
+                          "WHERE true ON CONFLICT(hour) DO UPDATE SET n = MAX(n, excluded.n)")
+                c.execute("INSERT OR IGNORE INTO main.meta (key, value) SELECT key, value FROM loc.meta")   # restored values win
                 c.execute("INSERT INTO main.r2_usage (month, class_a, class_b) SELECT month, class_a, class_b FROM loc.r2_usage "
                           "WHERE true ON CONFLICT(month) DO UPDATE SET class_a = MAX(class_a, excluded.class_a), "
                           "class_b = MAX(class_b, excluded.class_b)")

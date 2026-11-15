@@ -29,8 +29,15 @@ class FakeR2:
         if self.fail:
             raise RuntimeError("R2 down")
 
-    def put(self, key, data, content_type="application/octet-stream"):
+    def put(self, key, data, content_type="application/octet-stream", if_match=None, if_none_match=None):
         self._do("put", key)
+        import hashlib
+        import storage
+        cur = self.objects.get(key)
+        if if_none_match == "*" and cur is not None:
+            raise storage.PreconditionFailed("412 exists")
+        if if_match and (cur is None or hashlib.md5(cur).hexdigest() != if_match):
+            raise storage.PreconditionFailed("412 etag mismatch")
         self.objects[key] = data
 
     def get(self, key):
@@ -69,6 +76,12 @@ def data_dir(tmp_path, monkeypatch):
     import snapshot
     snapshot.state, snapshot.hold, snapshot._known, snapshot._marker_done = "disabled", None, None, False
     snapshot.baseline, snapshot.latest = {"users": 0, "invites": 0}, {}
+    snapshot.fallback_hold, snapshot._ptr_etag = None, snapshot._UNKNOWN
+    snapshot._protect.clear()
+    snapshot._last_put_key = None
+    monkeypatch.setenv("SNAPSHOT_POINTER_RETRY_S", "0")
+    for k in ("SNAPSHOT_ACCEPT_FALLBACK", "SNAPSHOT_KEEP_HOURLY_H", "SNAPSHOT_KEEP_DAILY_D"):
+        monkeypatch.delenv(k, raising=False)
     import groqmeter
     groqmeter.reset()
     yield tmp_path

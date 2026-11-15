@@ -46,6 +46,10 @@ class Unavailable(Exception):
     """No R2 (local-only mode) or this month's budget is spent: use local disk."""
 
 
+class PreconditionFailed(RuntimeError):
+    """A conditional PUT (If-Match / If-None-Match) was refused: another writer got there first."""
+
+
 # ── SigV4 ─────────────────────────────────────────────────────────────────────
 
 def _hmac(key: bytes, msg: str) -> bytes:
@@ -92,10 +96,12 @@ class S3Client:
         self.http = http or httpx.Client(timeout=30)
 
     def _request(self, method: str, key: str = "", query: dict | None = None,
-                 body: bytes = b"", content_type: str | None = None) -> httpx.Response:
+                 body: bytes = b"", content_type: str | None = None,
+                 conditions: dict | None = None) -> httpx.Response:
         path = "/" + quote(f"{self.bucket}/{key}" if key else self.bucket, safe="/-_.~")
         query = query or {}
         extra = {"content-type": content_type} if content_type else {}
+        extra.update(conditions or {})
         headers = sign_headers(method, self.host, path, query, extra, hashlib.sha256(body).hexdigest(),
                                self.access_key, self.secret_key, self.region,
                                datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
@@ -105,12 +111,21 @@ class S3Client:
                                  headers=headers)
 
     @staticmethod
-    def _check(r: httpx.Response, what: str) -> None:
+    def _check(r: httpx.Response, what: str, conditional: bool = False) -> None:
+        if r.status_code in (409, 412) and what == "put" and conditional:   # only a refused condition is a fence
+            raise PreconditionFailed(f"R2 {what} {r.status_code}: {r.text[:200]}")
         if r.status_code >= 300:
             raise RuntimeError(f"R2 {what} {r.status_code}: {r.text[:200]}")
 
-    def put(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> None:
-        self._check(self._request("PUT", key, body=data, content_type=content_type), "put")
+    def put(self, key: str, data: bytes, content_type: str = "application/octet-stream",
+            if_match: str | None = None, if_none_match: str | None = None) -> None:
+        cond = {}
+        if if_match:
+            cond["If-Match"] = f'"{if_match}"'
+        if if_none_match:
+            cond["If-None-Match"] = if_none_match
+        self._check(self._request("PUT", key, body=data, content_type=content_type, conditions=cond),
+                    "put", conditional=bool(cond))
 
     def get(self, key: str) -> bytes | None:
         r = self._request("GET", key)
@@ -262,8 +277,16 @@ def _client_for(cls: str):
     return client
 
 
-def put(key: str, data: bytes, content_type: str = "application/octet-stream") -> None:
-    _client_for("class_a").put(prefix() + key, data, content_type)
+def put(key: str, data: bytes, content_type: str = "application/octet-stream", *,
+        if_match: str | None = None, if_none_match: str | None = None) -> None:
+    """if_match = the md5 etag we last saw; if_none_match="*" = create only. A refusal raises
+    PreconditionFailed (single-writer fencing for the snapshot pointer)."""
+    cond = {}
+    if if_match:
+        cond["if_match"] = if_match
+    if if_none_match:
+        cond["if_none_match"] = if_none_match
+    _client_for("class_a").put(prefix() + key, data, content_type, **cond)
 
 
 def get(key: str) -> bytes | None:
