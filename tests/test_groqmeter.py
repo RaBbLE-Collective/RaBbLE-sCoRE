@@ -46,7 +46,7 @@ def test_under_at_and_over_the_cutoff(data_dir):
 
 
 def test_any_window_over_the_cutoff_refuses(data_dir):
-    groqmeter.record("chat", "m", {**_h("requests", 1000, 900), **_h("tokens", 8000, 1000, "5s")})
+    groqmeter.record("chat", "m", {**_h("requests", 1000, 900), **_h("tokens", 8000, 400, "5s")})
     assert "tokens" in groqmeter.guest_refusal()
     groqmeter.record("tts", "orpheus", _h("requests", 100, 99))
     assert len(groqmeter.state()["windows"]) == 3
@@ -65,6 +65,15 @@ def test_cutoff_is_configurable(data_dir, monkeypatch):
     groqmeter.record("chat", "m", _h(limit=100, remaining=40))       # 60% used
     assert groqmeter.guest_refusal()
     monkeypatch.setenv("GUEST_GROQ_CUTOFF", "0.8")
+    assert groqmeter.guest_refusal() is None
+
+
+def test_minute_token_window_has_its_own_looser_cutoff(data_dir, monkeypatch):
+    groqmeter.record("chat", "m", _h("tokens", 8000, 2900, "30s"))   # 64% used: one guest's own history
+    assert groqmeter.guest_refusal() is None
+    groqmeter.record("chat", "m", _h("tokens", 8000, 700, "30s"))    # 91%
+    assert "tokens" in groqmeter.guest_refusal()
+    monkeypatch.setenv("GUEST_GROQ_MINUTE_CUTOFF", "0.95")
     assert groqmeter.guest_refusal() is None
 
 
