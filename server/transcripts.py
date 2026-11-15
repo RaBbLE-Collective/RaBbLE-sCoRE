@@ -1,12 +1,12 @@
 """
-Transcript persistence — RaBbLE training data capture.
+Transcript persistence — RaBbLE training data capture. /chat and session turns only.
 
 Backends (set via TRANSCRIPT_BACKEND env var):
-  r2   — Cloudflare R2 via management API (durable; requires CF_ACCOUNT_ID,
-          CF_R2_TOKEN with Workers R2 Storage:Edit, CF_R2_BUCKET)
+  r2   — object per conversation, transcripts/YYYY-MM-DD/<session>.json, through
+          storage.py (R2_* env; counted against the monthly budget)
   file — DATA_DIR/transcripts/YYYY-MM-DD.jsonl (default; ephemeral on Render free tier)
 
-R2 fallback: if R2 write fails, the entry falls back to file automatically.
+Fallback: if R2 is unset, over budget or the write fails, the entry goes to the file.
 
 Privacy contract:
   - session_id is a random UUID generated per conversation — never the user_id
@@ -14,25 +14,20 @@ Privacy contract:
   - Only message content, tier, workflow type, and timestamp are captured
 """
 
+import asyncio
 import json
 import logging
 import os
 import uuid
 from datetime import datetime, timezone
 
-import httpx
+import storage
 
 logger = logging.getLogger("rabble.transcripts")
 
-DATA_DIR      = os.getenv("DATA_DIR", "/tmp/rabble-data")
-_BACKEND      = os.getenv("TRANSCRIPT_BACKEND", "file")
-_CF_ACCOUNT   = os.getenv("CF_ACCOUNT_ID", "")
-_CF_R2_TOKEN  = os.getenv("CF_R2_TOKEN", "")
-_CF_R2_BUCKET = os.getenv("CF_R2_BUCKET", "")
 
-
-def _r2_ready() -> bool:
-    return bool(_CF_ACCOUNT and _CF_R2_TOKEN and _CF_R2_BUCKET)
+def _data_dir() -> str:
+    return os.getenv("DATA_DIR", "/tmp/rabble-data")
 
 
 async def record(
@@ -51,7 +46,7 @@ async def record(
         "messages":      messages,
     }
 
-    if _BACKEND == "r2" and _r2_ready():
+    if os.getenv("TRANSCRIPT_BACKEND", "file") == "r2":
         await _write_r2(session_id, ts, entry)
     else:
         _write_file(ts, entry)
@@ -60,23 +55,13 @@ async def record(
 async def _write_r2(session_id: str, ts: str, entry: dict) -> None:
     date = ts[:10]  # YYYY-MM-DD
     key  = f"transcripts/{date}/{session_id}.json"
-    url  = (
-        f"https://api.cloudflare.com/client/v4/accounts/{_CF_ACCOUNT}"
-        f"/r2/buckets/{_CF_R2_BUCKET}/objects/{key}"
-    )
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.put(
-                url,
-                content=json.dumps(entry, ensure_ascii=False).encode(),
-                headers={
-                    "Authorization": f"Bearer {_CF_R2_TOKEN}",
-                    "Content-Type":  "application/json",
-                },
-            )
-            if not resp.is_success:
-                raise RuntimeError(f"R2 {resp.status_code}: {resp.text[:200]}")
-            logger.debug("transcript saved to R2: %s/%s", date, session_id)
+        await asyncio.to_thread(storage.put, key, json.dumps(entry, ensure_ascii=False).encode(),
+                                "application/json")
+        logger.debug("transcript saved to R2: %s/%s", date, session_id)
+    except storage.Unavailable as exc:
+        logger.debug("transcript to file, R2 unavailable: %s", exc)
+        _write_file(ts, entry)
     except Exception as exc:
         logger.error("transcript R2 write failed, falling back to file: %s", exc)
         _write_file(ts, entry)
@@ -84,7 +69,7 @@ async def _write_r2(session_id: str, ts: str, entry: dict) -> None:
 
 def _write_file(ts: str, entry: dict) -> None:
     date = ts[:10]
-    path = os.path.join(DATA_DIR, "transcripts", f"{date}.jsonl")
+    path = os.path.join(_data_dir(), "transcripts", f"{date}.jsonl")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     try:
         with open(path, "a") as f:

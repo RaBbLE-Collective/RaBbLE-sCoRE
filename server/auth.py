@@ -98,12 +98,15 @@ async def require_user(
         from auth_routes import verify_api_key  # avoid circular at module load
         user = verify_api_key(x_api_key)
         if user:
-            return {
+            claims = {
                 "sub":    user["id"],
                 "name":   user["name"],
                 "handle": user.get("handle", ""),
                 "tier":   user.get("tier", "free"),
             }
+            if claims["tier"] == "guest":
+                claims["llm_backend"] = _GUEST["llm_backend"]   # per-device guests: Groq only too
+            return claims
         raise HTTPException(401, "Invalid API key")
 
     # Demo mode: unauthenticated guest, loopback only unless DEMO_MODE_PUBLIC
@@ -117,9 +120,9 @@ async def require_user(
 
 
 async def require_member(user: dict = Depends(require_user)) -> dict:
-    """require_user, minus the demo guest. Every public guest shares the id "guest", so anything
+    """require_user, minus the demo guest and per-device guest accounts (tier "guest"). Every public guest shares the id "guest", so anything
     stored per user (sessions, workflows) would be readable by every other guest."""
-    if user.get("sub") == _GUEST["sub"]:
+    if user.get("sub") == _GUEST["sub"] or user.get("tier") == "guest":
         raise HTTPException(403, "Sign in to keep conversations; guests can use /api/v1/chat.")
     return user
 

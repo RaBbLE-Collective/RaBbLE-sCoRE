@@ -27,6 +27,7 @@ Env:
   BEAM_NODE_DEADLINE_S seconds to wait for a linked laptop node before falling back (default 25)
   BEAM_HISTORY_TURNS   conversation turns remembered per device (default 8)
   BEAM_CAPTURE_MAX_S   longest capture recording accepted, seconds (default 600)
+  GUEST_DAILY_TURNS    turns per UTC day shared by all per-device guest accounts (default 400)
 """
 
 import array
@@ -48,8 +49,11 @@ import agents
 import audit
 import auth
 import capture
+import groqmeter
+import guests
 import llm
 import node
+import translate
 from tools import server_time
 
 logger = logging.getLogger("rabble.beam")
@@ -116,6 +120,11 @@ def _prune_kept(key: str):
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
+def _pin_guest(user: dict) -> dict:
+    """Per-device guests (tier "guest") run on Groq only, whatever BEAM_LLM_CHAIN says."""
+    return {**user, "llm_backend": guests.BACKEND} if guests.is_guest(user) else user
+
+
 def _authorize(ws: WebSocket) -> dict | None:
     header = ws.headers.get("authorization", "")
     token = header[7:].strip() if header.lower().startswith("bearer ") else ""
@@ -126,9 +135,9 @@ def _authorize(ws: WebSocket) -> dict | None:
         from auth_routes import verify_api_key  # avoid circular at module load
         user = verify_api_key(token)
         if user:
-            return {"sub": user["id"], "name": user["name"], "tier": user.get("tier", "free")}
+            return _pin_guest({"sub": user["id"], "name": user["name"], "tier": user.get("tier", "free")})
         try:
-            return auth.decode_token(token)
+            return _pin_guest(auth.decode_token(token))
         except Exception:
             return None
     if os.getenv("BEAM_ALLOW_GUEST", "").lower() in ("1", "true", "yes"):
@@ -196,6 +205,7 @@ async def transcribe(client: httpx.AsyncClient, pcm: bytes, timeout: float = 30)
         data={"model": STT_MODEL, "response_format": "json", "temperature": "0"},
         timeout=timeout,
     )
+    groqmeter.record("stt", STT_MODEL, response.headers)
     if response.status_code == 429:
         raise SpeechLimited("speech-to-text")
     if response.status_code != 200:
@@ -210,6 +220,7 @@ async def synthesize(client: httpx.AsyncClient, text: str, voice: str = TTS_VOIC
         json={"model": TTS_MODEL, "voice": voice, "input": text, "response_format": "wav"},
         timeout=30,
     )
+    groqmeter.record("tts", TTS_MODEL, response.headers)
     if response.status_code == 429:
         raise SpeechLimited("text-to-speech")
     if response.status_code != 200:
@@ -285,6 +296,7 @@ class BeamSession:
         self.turn: int | None = None
         self.turn_mode = "voice"
         self.speak = True
+        self.lang = translate.DEFAULT_LANG
         self.voice = TTS_VOICE
         self.note_id = None
         self.started = None
@@ -294,10 +306,14 @@ class BeamSession:
         self.client = httpx.AsyncClient()
         chain_env = os.getenv("BEAM_LLM_CHAIN", "").strip() or DEFAULT_CHAIN
         self.chain = llm.parse_model_chain(chain_env)
+        if guests.is_guest(user):
+            self.chain = [n for n in self.chain if n["provider"] == "groq"] or llm.parse_model_chain(DEFAULT_CHAIN)
 
     def turn_chain(self) -> list[dict]:
         """Voice turns: the owner's laptop node first when one is linked and healthy,
         then BEAM_LLM_CHAIN. Capture shaping keeps plain self.chain (spec D4)."""
+        if guests.is_guest(self.user):
+            return self.chain   # a guest has no node of its own
         return [{**n, "device_id": self.device} for n in node.node_route(self.user["sub"])] + self.chain
 
     async def send(self, msg: dict):
@@ -336,7 +352,8 @@ class BeamSession:
         elif kind == "turn.begin":
             self.cancel_task()
             self.turn, self.turn_mode = turn, msg.get("mode", "voice")
-            self.speak = bool(msg.get("speak", True)) and self.turn_mode == "voice"
+            self.speak = bool(msg.get("speak", True)) and self.turn_mode in ("voice", "translate")
+            self.lang = translate.clean_lang(msg.get("lang"))
             voice = str(msg.get("voice", "")).lower()
             self.voice = voice if voice in TTS_VOICES else TTS_VOICE
             self.pcm = bytearray()
@@ -350,11 +367,13 @@ class BeamSession:
                 text = str(msg.get("text", ""))
                 await self.send({"type": "sent", "turn": turn})
                 self.task = asyncio.create_task(self.run_turn(turn, text=text))
-        elif kind == "turn.end" and turn == self.turn and self.turn_mode in ("voice", "capture"):
+        elif kind == "turn.end" and turn == self.turn and self.turn_mode in ("voice", "capture", "translate"):
             pcm, self.pcm = bytes(self.pcm), bytearray()
             await self.send({"type": "sent", "turn": turn})
             if self.turn_mode == "capture":
                 self.task = asyncio.create_task(self.run_capture(turn, pcm=pcm))
+            elif self.turn_mode == "translate":
+                self.task = asyncio.create_task(self.run_turn(turn, pcm=pcm, lang=self.lang))
             else:
                 self.task = asyncio.create_task(self.run_turn(turn, pcm=pcm))
         elif kind == "note.saved":
@@ -385,9 +404,24 @@ class BeamSession:
 
     # ── a turn ──
 
-    async def run_turn(self, turn: int, pcm: bytes | None = None, text: str | None = None):
+    async def guest_ok(self, turn: int) -> bool:
+        """A per-device guest spends one of the day's shared turns; out of them, the device is told."""
+        if not guests.is_guest(self.user):
+            return True
+        reason = guests.spend(self.user["sub"])
+        if reason is None:
+            return True
+        logger.info("beam guest refused: %s", reason)
+        await self.send({"type": "error", "turn": turn, "text": "GUEST LIMIT REACHED", "reason": reason})
+        return False
+
+    async def run_turn(self, turn: int, pcm: bytes | None = None, text: str | None = None,
+                       lang: str | None = None):
+        """A voice or text turn; with lang, a translate turn: same wire, but the model only
+        translates (plain chain, no node, no history) and the speech is the translation."""
         t0 = time.monotonic()
         marks = {}
+        workflow = "translate" if lang else "voice"
         try:
             if pcm is not None:
                 secs = len(pcm) / (RATE * 2)
@@ -401,10 +435,18 @@ class BeamSession:
                     await self.send({"type": "error", "turn": turn, "text": "DIDN'T CATCH THAT"})
                     return
                 await self.send({"type": "heard", "turn": turn, "text": text, "final": True})
+            if not await self.guest_ok(turn):   # after the TOO SHORT and STT checks: those cost no guest turn
+                return
 
-            history = _history.setdefault(self.history_key(), [])
-            messages = history + [{"role": "user", "content": text}]
-            system = agents.rabble_system_prompt("default", "fast") + VOICE_PROMPT
+            if lang:
+                history = None
+                system, messages = translate.build_prompt(text, lang)
+                chain = self.chain
+            else:
+                history = _history.setdefault(self.history_key(), [])
+                messages = history + [{"role": "user", "content": text}]
+                system = agents.rabble_system_prompt("default", "fast") + VOICE_PROMPT
+                chain = self.turn_chain()
 
             # Speech runs beside the writing: a queue of chunks, said in order.
             speech: asyncio.Queue[str | None] = asyncio.Queue()
@@ -412,7 +454,7 @@ class BeamSession:
             chunker = Chunker()
             reply = []
             async for piece in llm.stream_chat(messages, system, model_tier="fast",
-                                               chain=self.turn_chain(), user=self.user, max_tokens=600,
+                                               chain=chain, user=self.user, max_tokens=600,
                                                extra_body=LLM_EXTRA):
                 if "first_text" not in marks:
                     marks["first_text"] = time.monotonic() - t0
@@ -428,12 +470,13 @@ class BeamSession:
                 await speaker
 
             full = "".join(reply).strip()
-            history.extend([{"role": "user", "content": text}, {"role": "assistant", "content": full}])
-            del history[:-2 * HISTORY_TURNS]
+            if history is not None:
+                history.extend([{"role": "user", "content": text}, {"role": "assistant", "content": full}])
+                del history[:-2 * HISTORY_TURNS]
             await self.send({"type": "done", "turn": turn})
             marks["done"] = time.monotonic() - t0
             logger.info("beam turn %s done: %s", turn, " ".join(f"{k}={v:.2f}s" for k, v in marks.items()))
-            audit.log(user_id=self.user["sub"], action="beam", tier="fast", workflow_type="voice", status=200)
+            audit.log(user_id=self.user["sub"], action="beam", tier="fast", workflow_type=workflow, status=200)
         except asyncio.CancelledError:
             raise
         except SpeechLimited as exc:
@@ -441,7 +484,7 @@ class BeamSession:
             await self.send({"type": "error", "turn": turn, "text": "SPEECH LIMIT REACHED"})
         except Exception as exc:
             logger.exception("beam turn %s failed", turn)
-            audit.log(user_id=self.user["sub"], action="beam", tier="fast", workflow_type="voice",
+            audit.log(user_id=self.user["sub"], action="beam", tier="fast", workflow_type=workflow,
                       status=500, error=str(exc))
             try:
                 await self.send({"type": "error", "turn": turn, "text": "sCoRE HIT A SNAG"})
@@ -471,6 +514,8 @@ class BeamSession:
                 return
             if source == "voice":
                 await self.send({"type": "heard", "turn": turn, "text": text, "final": True})
+            if not await self.guest_ok(turn):
+                return
 
             shaped = await self.shape(text, source)
             created = capture.local_time(self.started, self.tz)

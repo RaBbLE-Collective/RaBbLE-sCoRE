@@ -3,6 +3,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import logging
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -12,6 +13,8 @@ import auth
 import llm
 import agents
 import audit
+import guests
+import snapshot
 import rate_limit
 import tools
 import transcripts
@@ -48,7 +51,15 @@ VERSION = _read_version()
 # reconnaissance on a public instance. Off unless API_DOCS=true (a laptop may turn them on).
 _API_DOCS = os.getenv("API_DOCS", "false").strip().lower() in ("1", "true", "yes")
 
+@asynccontextmanager
+async def _lifespan(_app):
+    await snapshot.start()   # R2: restore the db if the disk is fresh, then snapshot after writes
+    yield
+    await snapshot.stop()    # one last upload on graceful shutdown
+
+
 app = FastAPI(
+    lifespan=_lifespan,
     title="RaBbLE",
     description="Benevolent Behavioral Learning Engine — Agentic Intelligence API",
     version=VERSION,
@@ -270,6 +281,7 @@ async def chat(
         wf_type     = req.workflow_type
 
     rate_limit.apply_user_limit(user_id, routed_tier, user_tier)
+    guests.require_turn(user)   # after the per-user limiter: a throttled request spends no guest turn
 
     user_profile = _load_user_profile(user)
     system_prompt = agents.rabble_system_prompt(wf_type, routed_tier)
@@ -320,6 +332,7 @@ async def chat_complete(
         wf_type     = req.workflow_type
 
     rate_limit.apply_user_limit(user_id, routed_tier, user_tier)
+    guests.require_turn(user)   # after the per-user limiter: a throttled request spends no guest turn
 
     user_profile = _load_user_profile(user)
     system_prompt = agents.rabble_system_prompt(wf_type, routed_tier)
