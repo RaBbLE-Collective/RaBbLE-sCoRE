@@ -1,4 +1,6 @@
 import httpx, os, json, logging, asyncio, shlex
+
+import groqmeter
 from typing import AsyncGenerator
 
 logger = logging.getLogger("rabble.llm")
@@ -423,7 +425,9 @@ def _log_request_start(operation: str, tier: str, candidate: dict, messages: lis
     )
     return meta
 
-def _log_response_status(operation: str, meta: dict, status_code: int):
+def _log_response_status(operation: str, meta: dict, status_code: int, headers=None):
+    if headers is not None and meta["provider"] == "groq":
+        groqmeter.record("chat", meta["model"], headers)
     logger.warning(
         "LLM response operation=%s provider=%s tier=%s model=%s status=%s",
         operation,
@@ -654,7 +658,7 @@ async def stream_chat(
                     },
                     timeout=60,
                 ) as response:
-                    _log_response_status("stream_chat", meta, response.status_code)
+                    _log_response_status("stream_chat", meta, response.status_code, response.headers)
                     if response.status_code != 200:
                         body = await response.aread()
                         last_error = RuntimeError(
@@ -730,7 +734,7 @@ async def complete_chat(
                     _log_fallback("complete_chat", meta, exc.__class__.__name__)
                     continue
                 raise last_error
-            _log_response_status("complete_chat", meta, response.status_code)
+            _log_response_status("complete_chat", meta, response.status_code, response.headers)
             if response.status_code == 200:
                 return response.json()["choices"][0]["message"]["content"]
             last_error = _response_error(response, meta)
@@ -780,7 +784,7 @@ async def chat_with_tools(
                     _log_fallback("chat_with_tools", meta, exc.__class__.__name__)
                     continue
                 raise last_error
-            _log_response_status("chat_with_tools", meta, response.status_code)
+            _log_response_status("chat_with_tools", meta, response.status_code, response.headers)
             if response.status_code != 200:
                 last_error = _response_error(response, meta)
                 if _is_retryable_status(response.status_code) and index < len(candidates):

@@ -5,7 +5,8 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger("rabble.audit")
 
-LOG_PATH = os.getenv("AUDIT_LOG_PATH", "audit.jsonl")
+# Under DATA_DIR unless AUDIT_LOG_PATH says otherwise, so the log lives (and is exported) with the data.
+LOG_PATH = os.getenv("AUDIT_LOG_PATH") or os.path.join(os.getenv("DATA_DIR", "data"), "audit.jsonl")
 
 
 def log(
@@ -29,6 +30,7 @@ def log(
     if error:         entry["error"]          = error
 
     try:
+        os.makedirs(os.path.dirname(LOG_PATH) or ".", exist_ok=True)
         with open(LOG_PATH, "a") as f:
             f.write(json.dumps(entry) + "\n")
     except OSError as exc:

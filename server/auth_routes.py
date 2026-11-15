@@ -4,12 +4,18 @@ import hmac
 import secrets
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Depends, Header
+from fastapi import APIRouter, HTTPException, Depends, Header, Request
 from pydantic import BaseModel, EmailStr
 
 import auth
+import db
+import groqmeter
+import guests
+import snapshot
+import storage
 import users as user_store
 from users import UserProfile, InviteToken
 
@@ -47,6 +53,10 @@ class InviteCreateRequest(BaseModel):
     expires_days: int = 7
 
 
+class GuestRequest(BaseModel):
+    label: Optional[str] = None
+
+
 class SummonRequest(BaseModel):
     invite_token: str
     handle: str
@@ -65,10 +75,14 @@ class ProfileUpdateRequest(BaseModel):
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-def _require_admin(x_admin_key: Optional[str] = Header(default=None, alias="X-Admin-Key"),
-                   user: dict = Depends(auth.require_user)) -> dict:
+async def _require_admin(request: Request,
+                         x_admin_key: Optional[str] = Header(default=None, alias="X-Admin-Key"),
+                         creds=Depends(auth._bearer),
+                         x_api_key: Optional[str] = Header(default=None, alias="X-API-Key")) -> dict:
+    # A valid X-Admin-Key is enough on its own; otherwise the caller must be an admin-tier user.
     if _ADMIN_KEY and x_admin_key and hmac.compare_digest(x_admin_key.encode(), _ADMIN_KEY.encode()):
         return _ADMIN_USER
+    user = await auth.require_user(request, creds, x_api_key)   # 401 without credentials
     if user.get("tier") == "admin":
         return user
     raise HTTPException(403, "Admin access required")
@@ -81,6 +95,14 @@ def _profile_to_dict(profile: UserProfile) -> dict:
     return d
 
 
+def _require_durable() -> None:
+    """Writes that mint or change credentials are refused while snapshot uploads are off (a failed or
+    fenced restore, a hold): the only ways out are a redeploy onto a fresh disk, which would drop them."""
+    if not snapshot.uploads_enabled():
+        raise HTTPException(503, "Account changes are paused while storage recovers; nothing was saved. "
+                                 "Try again shortly.", headers={"Retry-After": "300"})
+
+
 # ── Legacy /auth/* endpoints (backward compat) ─────────────────────────────────
 
 @router.post("/register", status_code=201)
@@ -89,6 +111,7 @@ async def register(body: RegisterRequest):
     Off unless ALLOW_REGISTER=true: it is open to anyone and returns a working API key."""
     if os.getenv("ALLOW_REGISTER", "").lower() not in ("1", "true", "yes"):
         raise HTTPException(404, "Not found")
+    _require_durable()
     base_handle = re.sub(r"[^a-z0-9]", "-", body.name.lower().strip())[:20].strip("-") or "user"
     handle = base_handle
     existing_handles = user_store.list_handles()
@@ -144,6 +167,7 @@ async def me(user: dict = Depends(auth.require_user)):
 
 @member_router.post("/admin/invites", status_code=201)
 async def create_invite(body: InviteCreateRequest, admin: dict = Depends(_require_admin)):
+    _require_durable()
     invite = user_store.create_invite(
         created_by=admin["id"],
         note=body.note or "",
@@ -158,6 +182,89 @@ async def create_invite(body: InviteCreateRequest, admin: dict = Depends(_requir
     }
 
 
+# ── Admin: inventory and export (counts and sizes only, no content) ────────────
+
+
+def _data_dir() -> Path:
+    return Path(os.getenv("DATA_DIR", "data"))
+
+
+def _transcript_dir() -> Path:
+    return Path(os.getenv("DATA_DIR", "/tmp/rabble-data")) / "transcripts"
+
+
+def _line_count(path: Path) -> int:
+    try:
+        with open(path, "rb") as f:
+            return sum(1 for _ in f)
+    except OSError:
+        return 0
+
+
+@member_router.get("/admin/inventory")
+async def inventory(admin: dict = Depends(_require_admin)):
+    import audit
+    by_tier = {r["tier"]: r["n"] for r in db.query("SELECT tier, COUNT(*) AS n FROM users GROUP BY tier")}
+    invites = db.query_one("SELECT COUNT(*) AS n, COALESCE(SUM(consumed), 0) AS used FROM invites") or {}
+    db_file = db.db_path()
+    tdir = _transcript_dir()
+    files = sorted(tdir.glob("*")) if tdir.is_dir() else []
+    nested = [f for f in tdir.glob("*/*.json")] if tdir.is_dir() else []
+    return {
+        "users": {"total": sum(by_tier.values()), "by_tier": by_tier, "guests": by_tier.get("guest", 0)},
+        "invites": {"total": invites.get("n", 0), "consumed": int(invites.get("used", 0))},
+        "guest_turns_today": guests.turns_today(),
+        "guest_daily_limit": guests.daily_limit(),
+        "db": {"path": db_file.name, "bytes": db_file.stat().st_size if db_file.exists() else 0},
+        "transcripts": {
+            "files": [{"name": f.name, "bytes": f.stat().st_size} for f in files if f.is_file()],
+            "entries": sum(_line_count(f) for f in files if f.suffix == ".jsonl") + len(nested),
+        },
+        "audit_lines": _line_count(Path(audit.LOG_PATH)),
+        "r2": {
+            "mode": storage.mode(),
+            "usage": storage.usage(),
+            "budgets": storage.budgets(),
+            "exhausted": storage.exhausted(),
+            "last_snapshot": db.meta_get("last_snapshot"),
+            "restore": snapshot.state,
+            "uploads_enabled": snapshot.uploads_enabled() and storage.configured(),
+            "snapshots": snapshot.status(),
+        },
+        "groq": groqmeter.state(),
+    }
+
+
+@member_router.get("/admin/export")
+async def export(admin: dict = Depends(_require_admin)):
+    """A tar.gz to pull before a redeploy: db snapshot, the DATA_DIR audit log, transcripts on disk.
+    Holds hashed API keys, BYO keys encrypted under JWT_SECRET and conversation text: admin only,
+    and treat the file as a secret."""
+    import audit
+    import tarfile
+    import tempfile
+    from starlette.background import BackgroundTask
+    from fastapi.responses import FileResponse
+    out = tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False)
+    out.close()
+    try:
+        with tempfile.TemporaryDirectory() as d, tarfile.open(out.name, mode="w:gz") as tar:
+            snap = Path(d) / "score.db"
+            db.backup(snap)
+            tar.add(snap, arcname="score.db")
+            log = Path(audit.LOG_PATH)
+            if log.is_file() and log.resolve().parent == _data_dir().resolve():
+                tar.add(log, arcname="audit.jsonl")     # only the DATA_DIR log, never an arbitrary path
+            if _transcript_dir().is_dir():
+                tar.add(_transcript_dir(), arcname="transcripts")
+    except Exception:
+        os.unlink(out.name)
+        raise
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return FileResponse(out.name, media_type="application/gzip", filename=f"score-export-{stamp}.tar.gz",
+                        background=BackgroundTask(os.unlink, out.name))
+
+
 # ── Public: summon (register via invite) ───────────────────────────────────────
 
 @member_router.post("/users/summon", status_code=201)
@@ -165,6 +272,7 @@ async def summon(body: SummonRequest):
     if not _HANDLE_RE.match(body.handle):
         raise HTTPException(422, "handle must be 1–24 lowercase alphanumeric + hyphens, not starting with hyphen")
 
+    _require_durable()
     if body.llm_backend not in _VALID_BACKENDS:
         raise HTTPException(422, f"llm_backend must be one of: {', '.join(sorted(_VALID_BACKENDS))}")
 
@@ -219,6 +327,29 @@ async def summon(body: SummonRequest):
     }
 
 
+# ── Public: per-device guest (issued to a holder of GUEST_ISSUE_SECRET) ─────────
+
+@member_router.post("/users/guest", status_code=201)
+async def issue_guest(body: Optional[GuestRequest] = None,
+                      x_guest_secret: Optional[str] = Header(default=None, alias="X-Guest-Secret")):
+    secret = guests.issue_secret()
+    if not secret:
+        raise HTTPException(404, "Not found")
+    if not x_guest_secret or not hmac.compare_digest(x_guest_secret.encode(), secret.encode()):
+        raise HTTPException(403, "Invalid guest secret")
+    _require_durable()
+    spent = storage.exhausted()
+    if spent:
+        raise HTTPException(503, "Guest sign-up is paused: this month's storage allowance is used up. "
+                                 "It resumes next month.")
+    if not guests.take_issue_slot():
+        raise HTTPException(429, f"Too many guest accounts issued this hour (limit {guests.issue_limit()}). "
+                                 "Try again later.", headers={"Retry-After": "3600"})
+    profile, api_key = guests.create_guest(body.label if body and body.label else "")
+    logger.info("guest issued user_id=%s handle=%s", profile.id, profile.handle)
+    return {"api_key": api_key, "handle": profile.handle}
+
+
 # ── Authenticated: profile ─────────────────────────────────────────────────────
 
 @member_router.get("/users/me")
@@ -231,6 +362,9 @@ async def get_profile(user: dict = Depends(auth.require_user)):
 
 @member_router.put("/users/me")
 async def update_profile(body: ProfileUpdateRequest, user: dict = Depends(auth.require_user)):
+    if guests.is_guest(user):
+        raise HTTPException(403, "Guest accounts cannot edit their profile.")
+    _require_durable()
     profile = user_store.get_user(user["sub"])
     if not profile:
         raise HTTPException(404, "Profile not found")
