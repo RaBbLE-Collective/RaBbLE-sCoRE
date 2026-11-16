@@ -7,3 +7,4 @@ cryptography
 bcrypt
 pydantic[email]
 tzdata
+psycopg[binary]>=3.2

@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import hmac
@@ -249,9 +250,14 @@ async def export(admin: dict = Depends(_require_admin)):
     out.close()
     try:
         with tempfile.TemporaryDirectory() as d, tarfile.open(out.name, mode="w:gz") as tar:
-            snap = Path(d) / "score.db"
-            db.backup(snap)
-            tar.add(snap, arcname="score.db")
+            if db.is_postgres():       # no file to copy: ship every table as JSON (provider backups are separate)
+                snap = Path(d) / "db.json"
+                snap.write_text(json.dumps(db.export_json(), indent=1, default=str))
+                tar.add(snap, arcname="db.json")
+            else:
+                snap = Path(d) / "score.db"
+                db.backup(snap)
+                tar.add(snap, arcname="score.db")
             log = Path(audit.LOG_PATH)
             if log.is_file() and log.resolve().parent == _data_dir().resolve():
                 tar.add(log, arcname="audit.jsonl")     # only the DATA_DIR log, never an arbitrary path

@@ -226,7 +226,8 @@ def usage(month: str | None = None) -> dict:
 def merge_usage(month: str, class_a: int, class_b: int) -> None:
     """Keep the larger counts: the db after a restore can lag the usage object in R2."""
     db.execute("INSERT INTO r2_usage (month, class_a, class_b) VALUES (?, ?, ?) ON CONFLICT(month) DO UPDATE "
-               "SET class_a = MAX(class_a, excluded.class_a), class_b = MAX(class_b, excluded.class_b)",
+               "SET class_a = CASE WHEN excluded.class_a > r2_usage.class_a THEN excluded.class_a ELSE r2_usage.class_a END, "
+               "class_b = CASE WHEN excluded.class_b > r2_usage.class_b THEN excluded.class_b ELSE r2_usage.class_b END",
                (month, class_a, class_b), track=False)
 
 
@@ -257,7 +258,7 @@ def record(cls: str) -> None:
     """Count one request without checking the budget."""
     a, b = (1, 0) if cls == "class_a" else (0, 1)
     db.execute("INSERT INTO r2_usage (month, class_a, class_b) VALUES (?, ?, ?) ON CONFLICT(month) DO UPDATE "
-               "SET class_a = class_a + excluded.class_a, class_b = class_b + excluded.class_b",
+               "SET class_a = r2_usage.class_a + excluded.class_a, class_b = r2_usage.class_b + excluded.class_b",
                (_month(), a, b), track=False)
 
 

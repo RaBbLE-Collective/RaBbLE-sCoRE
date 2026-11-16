@@ -443,6 +443,8 @@ def load_usage() -> None:
 
 def flush() -> bool:
     """Upload a snapshot now if the db changed. True if one went up."""
+    if db.is_postgres():
+        return False
     with _flush_lock:   # the shutdown flush waits for one still on the wire
         return _flush()
 
@@ -678,6 +680,10 @@ async def start() -> None:
     """Call at app startup, before anything touches the db."""
     global _task
     global state
+    if db.is_postgres():
+        state = "disabled"
+        logger.info("Postgres backend: durable, no R2 db snapshots")
+        return
     if not storage.configured():
         state = "disabled"
         logger.info("R2 not configured: local-only mode, no snapshots")
@@ -693,7 +699,7 @@ async def stop() -> None:
     if _task:
         _task.cancel()
         _task = None
-    if storage.configured():
+    if storage.configured() and not db.is_postgres():
         for _ in range(2):                         # a failed or fenced writer merges its rows back before the end
             if state == "failed":
                 await asyncio.to_thread(try_restore)
