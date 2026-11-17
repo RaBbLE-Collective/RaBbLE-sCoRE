@@ -84,7 +84,7 @@ async def _require_admin(request: Request,
     if _ADMIN_KEY and x_admin_key and hmac.compare_digest(x_admin_key.encode(), _ADMIN_KEY.encode()):
         return _ADMIN_USER
     user = await auth.require_user(request, creds, x_api_key)   # 401 without credentials
-    if user.get("tier") == "admin":
+    if user.get("tier") == "admin" and not user.get("device_id"):   # a device key never reaches /admin
         return user
     raise HTTPException(403, "Admin access required")
 
@@ -431,6 +431,9 @@ async def update_profile(body: ProfileUpdateRequest, user: dict = Depends(auth.r
 def verify_api_key(key: str) -> dict | None:
     if _ADMIN_KEY and hmac.compare_digest(key.encode(), _ADMIN_KEY.encode()):
         return _ADMIN_USER
+    if key.startswith("rbdv_"):
+        import devices   # a Pocket's device key resolves to its owner, plus device_id
+        return devices.resolve(key)
     profile = user_store.get_user_by_api_key(key)
     if profile:
         return {

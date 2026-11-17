@@ -1,0 +1,244 @@
+"""Device keys (AC7): members mint keys for their Pockets; a key resolves to its owner."""
+
+import asyncio
+import json
+
+import pytest
+from fastapi.testclient import TestClient
+
+import accounts
+import beam
+import db
+import devices
+import mailer
+import rate_limit
+import users
+
+PW = "correct horse battery"
+
+
+@pytest.fixture()
+def env(data_dir, monkeypatch):
+    for k in ("ACCOUNT_CAP", "REQUIRE_VERIFIED_EMAIL", "AUTH_IP_HEADER", "MAIL_PROVIDER", "SIGNUP_INVITE_ONLY",
+              "RABBLE_ADMIN_KEY", "DEVICE_LIMIT", "BEAM_DEVICE_TOKEN"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("DEMO_MODE", "false")
+    rate_limit._windows.clear()
+    devices._touched.clear()
+    mailer.set_mailer(mailer.ConsoleMailer())
+    import main
+    yield TestClient(main.app)
+    mailer.set_mailer(None)
+    rate_limit._windows.clear()
+    devices._touched.clear()
+
+
+def member(c, name="alice"):
+    tok = users.create_invite(created_by="t").token
+    r = c.post("/api/v1/auth/signup", json={"username": name, "email": f"{name}@example.com",
+                                            "password": PW, "invite_token": tok})
+    assert r.status_code == 201
+    t = c.post("/api/v1/auth/login", json={"identifier": name, "password": PW}).json()["token"]
+    return {"Authorization": f"Bearer {t}"}
+
+
+def mint(c, h, label="Pocket"):
+    return c.post("/api/v1/devices", json={"label": label}, headers=h)
+
+
+class _WS:
+    def __init__(self, key):
+        self.headers = {"authorization": f"Bearer {key}"}
+
+
+def test_create_list_revoke(env):
+    h = member(env)
+    r = mint(env, h, "Desk Pocket")
+    assert r.status_code == 201
+    d = r.json()
+    assert set(d) == {"id", "label", "key", "created_at"} and d["key"].startswith("rbdv_") and d["label"] == "Desk Pocket"
+    listed = env.get("/api/v1/devices", headers=h).json()["devices"]
+    assert len(listed) == 1 and "key" not in listed[0]
+    assert set(listed[0]) == {"id", "label", "created_at", "last_seen", "revoked"} and listed[0]["revoked"] is False
+    assert env.delete(f"/api/v1/devices/{d['id']}", headers=h).status_code == 200
+    listed = env.get("/api/v1/devices", headers=h).json()["devices"]
+    assert len(listed) == 1 and listed[0]["revoked"] is True      # history stays
+
+
+def test_label_validation(env):
+    h = member(env)
+    assert env.post("/api/v1/devices", json={"label": ""}, headers=h).status_code == 422
+    assert env.post("/api/v1/devices", json={"label": "x" * 41}, headers=h).status_code == 422
+    assert env.post("/api/v1/devices", json={"label": "   "}, headers=h).status_code == 422
+
+
+def test_key_shown_once_only_hash_stored(env):
+    h = member(env)
+    key = mint(env, h).json()["key"]
+    assert key not in json.dumps(db.export_json(), default=str)
+    assert key not in json.dumps(env.get("/api/v1/devices", headers=h).json())
+    row = db.query_one("SELECT key_hash FROM devices")
+    assert row["key_hash"] == devices._hash(key)
+
+
+def test_limit_and_slot_freed_by_revoke(env, monkeypatch):
+    h = member(env)
+    ids = [mint(env, h, f"p{i}").json()["id"] for i in range(3)]
+    r = mint(env, h, "p4")
+    assert r.status_code == 409 and "limit" in r.json()["detail"].lower()
+    env.delete(f"/api/v1/devices/{ids[0]}", headers=h)
+    assert mint(env, h, "p4").status_code == 201
+    monkeypatch.setenv("DEVICE_LIMIT", "0")
+    assert devices.limit() == 1
+    monkeypatch.setenv("DEVICE_LIMIT", "junk")
+    assert devices.limit() == 3
+
+
+def test_mint_is_rate_limited(env, monkeypatch):
+    monkeypatch.setenv("DEVICE_LIMIT", "100")
+    h = member(env)
+    codes = [mint(env, h).status_code for _ in range(11)]
+    assert codes[:10] == [201] * 10 and codes[10] == 429
+
+
+def test_cross_account_isolation(env):
+    a, b = member(env, "alice"), member(env, "bobby")
+    did = mint(env, a).json()["id"]
+    assert env.get("/api/v1/devices", headers=b).json()["devices"] == []
+    assert env.delete(f"/api/v1/devices/{did}", headers=b).status_code == 404
+    assert env.delete("/api/v1/devices/nope", headers=a).status_code == 404
+    assert env.get("/api/v1/devices", headers=a).json()["devices"][0]["revoked"] is False
+
+
+def test_guest_and_anonymous_refused(env):
+    assert env.post("/api/v1/devices", json={"label": "x"}).status_code in (401, 403)
+    assert env.get("/api/v1/devices").status_code in (401, 403)
+    assert env.delete("/api/v1/devices/x").status_code in (401, 403)
+    users.create_user(users.UserProfile(id="g1", handle="g1", display_name="G", join_date="2026-01-01", intention="",
+                                        api_key="rbbl_guestkey", tier="guest"))
+    r = env.post("/api/v1/devices", json={"label": "x"}, headers={"X-API-Key": "rbbl_guestkey"})
+    assert r.status_code == 403
+
+
+def test_device_key_authenticates_as_owner_http_and_beam(env):
+    h = member(env)
+    d = mint(env, h).json()
+    me = env.get("/api/v1/auth/me", headers={"X-API-Key": d["key"]})
+    assert me.status_code == 200
+    owner = accounts.by_username("alice")["user_id"]
+    assert me.json().get("id") == owner or me.json().get("sub") == owner or owner in json.dumps(me.json())
+    claims = beam._authorize(_WS(d["key"]))
+    assert claims["sub"] == owner and claims["device_id"] == d["id"] and claims["tier"] == "free"
+    from auth_routes import verify_api_key
+    v = verify_api_key(d["key"])
+    assert v["id"] == owner and v["device_id"] == d["id"] and v["handle"] == "alice"
+
+
+def test_tier_is_read_live(env):
+    h = member(env)
+    d = mint(env, h).json()
+    uid = accounts.by_username("alice")["user_id"]
+    p = users.get_user(uid)
+    p.tier = "pro"
+    users.save_user(p)
+    assert beam._authorize(_WS(d["key"]))["tier"] == "pro"
+
+
+def test_revoked_unknown_and_guest_owner_refused(env):
+    h = member(env)
+    d = mint(env, h).json()
+    assert beam._authorize(_WS(d["key"])) is not None
+    env.delete(f"/api/v1/devices/{d['id']}", headers=h)
+    assert beam._authorize(_WS(d["key"])) is None
+    assert env.get("/api/v1/auth/me", headers={"X-API-Key": d["key"]}).status_code == 401
+    assert env.get("/api/v1/auth/me", headers={"X-API-Key": "rbdv_nonsense"}).status_code == 401
+    d2 = mint(env, h).json()
+    uid = accounts.by_username("alice")["user_id"]
+    p = users.get_user(uid)
+    p.tier = "guest"
+    users.save_user(p)
+    assert beam._authorize(_WS(d2["key"])) is None
+    db.execute("DELETE FROM users WHERE id = ?", (uid,))
+    assert devices.resolve(d2["key"]) is None
+
+
+def _admin_owner(env):
+    h = member(env, "boss")
+    uid = accounts.by_username("boss")["user_id"]
+    p = users.get_user(uid)
+    p.tier = "admin"
+    users.save_user(p)
+    h = {"Authorization": "Bearer " + env.post("/api/v1/auth/login", json={"identifier": "boss", "password": PW}).json()["token"]}
+    return h
+
+
+def test_device_key_cannot_reach_admin_even_for_admin_owner(env):
+    h = _admin_owner(env)
+    assert env.get("/api/v1/admin/invites", headers=h).status_code == 200
+    d = mint(env, h).json()
+    assert env.get("/api/v1/admin/invites", headers={"X-API-Key": d["key"]}).status_code == 403
+    assert env.post("/api/v1/admin/invites", json={}, headers={"X-API-Key": d["key"]}).status_code == 403
+    assert beam._authorize(_WS(d["key"]))["tier"] == "pro"
+
+
+def test_device_key_cannot_mint_or_manage_devices(env):
+    h = member(env)
+    d = mint(env, h).json()
+    k = {"X-API-Key": d["key"]}
+    assert env.post("/api/v1/devices", json={"label": "x"}, headers=k).status_code == 403
+    assert env.get("/api/v1/devices", headers=k).status_code == 403
+    assert env.delete(f"/api/v1/devices/{d['id']}", headers=k).status_code == 403
+    assert len(env.get("/api/v1/devices", headers=h).json()["devices"]) == 1
+
+
+def test_last_seen_throttled(env, monkeypatch):
+    h = member(env)
+    d = mint(env, h).json()
+    t = [1000.0]
+    monkeypatch.setattr(devices.time, "monotonic", lambda: t[0])
+    monkeypatch.setattr(devices, "_now", lambda: f"stamp{t[0]}")
+    assert db.query_one("SELECT last_seen FROM devices")["last_seen"] == ""
+    devices.resolve(d["key"])
+    assert db.query_one("SELECT last_seen FROM devices")["last_seen"] == "stamp1000.0"
+    t[0] = 1030.0
+    devices.resolve(d["key"])
+    assert db.query_one("SELECT last_seen FROM devices")["last_seen"] == "stamp1000.0"   # within 60 s: no write
+    t[0] = 1061.0
+    devices.resolve(d["key"])
+    assert db.query_one("SELECT last_seen FROM devices")["last_seen"] == "stamp1061.0"
+
+
+def test_device_key_survives_revoke_all(env):
+    """Password reset and logout end sessions, not Pockets: a device key is revoked only by its owner."""
+    h = member(env)
+    d = mint(env, h).json()
+    uid = accounts.by_username("alice")["user_id"]
+    accounts.revoke_all(uid)
+    assert env.get("/api/v1/auth/me", headers=h).status_code == 401
+    assert env.get("/api/v1/auth/me", headers={"X-API-Key": d["key"]}).status_code == 200
+    assert beam._authorize(_WS(d["key"]))["sub"] == uid
+
+
+def test_shared_beam_token_and_guest_keys_unchanged(env, monkeypatch):
+    monkeypatch.setenv("BEAM_DEVICE_TOKEN", "shared-secret")
+    assert beam._authorize(_WS("shared-secret")) == {"sub": "pocket", "name": "RaBbLE-Pocket", "tier": "pro"}
+
+
+# ── store level, SQLite and Postgres ──────────────────────────────────────────
+
+@pytest.fixture()
+def store(backend, data_dir):
+    devices._touched.clear()
+    db.conn()
+    return backend
+
+
+def test_store_roundtrip(store):
+    a = accounts.create_account("mark", "m@example.com", PW)
+    d = devices.create(a["user_id"], "P1")
+    assert devices.resolve(d["key"])["id"] == a["user_id"]
+    assert devices.list_for(a["user_id"])[0]["last_seen"] != ""
+    assert devices.revoke(a["user_id"], d["id"]) is True
+    assert devices.resolve(d["key"]) is None
+    assert devices.revoke("other", d["id"]) is False
+    assert [r["id"] for r in db.export_json()["devices"]] == [d["id"]]
