@@ -58,10 +58,6 @@ class GuestRequest(BaseModel):
     label: Optional[str] = None
 
 
-class GuestRequest(BaseModel):
-    label: Optional[str] = None
-
-
 class SummonRequest(BaseModel):
     invite_token: str
     handle: str
