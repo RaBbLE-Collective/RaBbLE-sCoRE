@@ -642,3 +642,70 @@ def test_prune_survives_concurrent_inserts():
             rate_limit.peek("x", 60, 1)
     finally:
         stop.set(); t.join()
+
+
+# ── invites (EA gate) ──────────────────────────────────────────────────────────
+
+def _invite(**kw):
+    import users
+    return users.create_invite(created_by="test", **kw).token
+
+
+def signup_inv(c, tok, username="mark", email="mark@example.com", password=PW):
+    return c.post("/api/v1/auth/signup", json={"username": username, "email": email, "password": password, "invite_token": tok})
+
+
+def test_invite_only_needs_a_live_invite(env, monkeypatch):
+    c, box = env
+    monkeypatch.setenv("SIGNUP_INVITE_ONLY", "true")
+    assert signup(c).status_code == 403
+    assert signup_inv(c, "not-a-token").status_code == 403
+    tok = _invite()
+    r = signup_inv(c, tok)
+    assert r.status_code == 201 and r.json()["email_verified"] is True and r.json()["verification_sent"] is False
+    assert not box.outbox                                           # no mail needed
+    assert login(c).status_code == 200                              # signed in with no verification step
+    assert signup_inv(c, tok, username="again", email="again@example.com").status_code == 403   # single use
+
+
+def test_expired_invite_refused(env, monkeypatch):
+    c, box = env
+    monkeypatch.setenv("SIGNUP_INVITE_ONLY", "true")
+    tok = _invite()
+    db.execute("UPDATE invites SET expires_at = '2000-01-01T00:00:00+00:00' WHERE token = ?", (tok,))
+    assert signup_inv(c, tok).status_code == 403
+
+
+def test_invite_works_with_no_mailer_and_past_the_cap(env, monkeypatch):
+    """Mark's first accounts: mail not set up yet, signups closed, an invite still gets in."""
+    c, box = env
+    mailer.set_mailer(None)
+    monkeypatch.setenv("ACCOUNT_CAP", "0")
+    assert signup(c).status_code in (403, 503)                      # the public door is shut
+    assert signup_inv(c, _invite()).status_code == 201
+    assert login(c).status_code == 200
+
+
+def test_invalid_invite_refused_even_when_open(env):
+    c, box = env
+    assert signup_inv(c, "nope").status_code == 403
+
+
+def test_invite_does_not_probe_emails(env):
+    c, box = env
+    ready(c, box)                                                   # mark@example.com is a verified account
+    tok = _invite()
+    taken = signup_inv(c, tok, username="other", email="mark@example.com")
+    new = signup_inv(c, _invite(), username="other2", email="new@example.com")
+    assert taken.status_code == new.status_code == 201
+    assert taken.json()["message"] == new.json()["message"] and taken.json()["email_verified"] == new.json()["email_verified"]
+    assert accounts.by_username("other") is None                    # nothing was created for the taken email
+
+
+def test_admin_route_makes_an_invite_that_signs_up(env, monkeypatch):
+    c, box = env
+    import auth_routes
+    monkeypatch.setattr(auth_routes, "_ADMIN_KEY", "admin-key-test")
+    monkeypatch.setenv("SIGNUP_INVITE_ONLY", "true")
+    tok = c.post("/api/v1/admin/invites", json={}, headers={"X-Admin-Key": "admin-key-test"}).json()["token"]
+    assert signup_inv(c, tok).status_code == 201

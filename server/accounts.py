@@ -9,6 +9,11 @@ Env (all read per call, so none needs a restart except JWT_SECRET):
   ACCOUNT_CAP              (0 closes signup) max non-guest accounts (users.tier != "guest"; with REQUIRE_VERIFIED_EMAIL only
                            verified ones count, and unverified accounts older than 7 days are purged); default 100. Past it, signup
                            answers with the persona waitlist line. Invalid value = 100.
+  SIGNUP_INVITE_ONLY       default false. When true, signup needs a live invite_token (made with
+                           POST /api/v1/admin/invites). Whatever this says, a valid invite_token skips the
+                           cap and the email check: the account is created verified, no mail is sent, and
+                           the invite is spent. An invite proves you chose the person, not that the
+                           address is theirs; password reset by email proves that once mail exists.
   REQUIRE_VERIFIED_EMAIL   default true. When true, login is refused (403 email_not_verified) until the
                            emailed link is used. Signup itself always works and sends the verify mail.
   AUTH_LINK_BASE           base of the links in mail (/verify-email?token=, /reset-password?token=);
@@ -77,6 +82,20 @@ def _int(name: str, default: int, minimum: int = 1) -> int:
 
 def account_cap() -> int:
     return _int("ACCOUNT_CAP", 100, minimum=0)      # 0 closes signup
+
+
+def invite_only() -> bool:
+    return _flag("SIGNUP_INVITE_ONLY", False)
+
+
+def live_invite(token: str):
+    """The invite if it exists, is unspent and unexpired; else None (does not spend it)."""
+    inv = user_store.get_invite(token.strip()) if token and token.strip() else None
+    if not inv or inv.consumed:
+        return None
+    exp = datetime.fromisoformat(inv.expires_at)
+    exp = exp if exp.tzinfo else exp.replace(tzinfo=timezone.utc)
+    return inv if datetime.now(timezone.utc) <= exp else None
 
 
 def require_verified() -> bool:

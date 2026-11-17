@@ -14,6 +14,7 @@ from pydantic import BaseModel, EmailStr, Field
 
 import accounts
 import auth
+import users as user_store
 import mailer
 import rate_limit
 from auth_routes import _require_durable
@@ -35,6 +36,7 @@ class SignupRequest(BaseModel):
     username: str = Field(max_length=64)
     email: EmailStr
     password: str = Field(max_length=1024)
+    invite_token: str = Field(default="", max_length=128)
 
 
 class LoginRequest(BaseModel):
@@ -153,9 +155,14 @@ def signup(body: SignupRequest, request: Request, bg: BackgroundTasks):
     problem = accounts.username_problem(username) or accounts.password_problem(body.password, username, email)
     if problem:
         raise HTTPException(422, problem)
-    if accounts.count_accounts() >= accounts.account_cap():
+    invite = accounts.live_invite(body.invite_token) if body.invite_token.strip() else None
+    if body.invite_token.strip() and not invite:
+        raise HTTPException(403, "That invite is invalid, used or expired.")
+    if invite is None and accounts.invite_only():
+        raise HTTPException(403, "Sign-up is by invitation for now.")
+    if invite is None and accounts.count_accounts() >= accounts.account_cap():
         return JSONResponse({"detail": WAITLIST, "waitlist": True}, status_code=403)
-    if not _mail_ready():
+    if invite is None and not _mail_ready():
         raise HTTPException(503, "Sign-up is not open yet: email is not set up.")
     # A taken username is answered first and the same whatever the email is, so it cannot be used to probe
     # emails. After that the reply is identical (and costs the same Argon2 work) whether the email is new,
@@ -166,6 +173,9 @@ def signup(body: SignupRequest, request: Request, bg: BackgroundTasks):
         raise HTTPException(409, "That username is taken.")
     created = {"username": username, "email_verified": False, "verification_sent": True,
                "message": "Account created. Check your email for the verification link."}
+    if invite:      # same reply shape on every invited path, so an invite cannot be used to probe emails
+        created = {"username": username, "email_verified": True, "verification_sent": False,
+                   "message": "Account created. You can sign in."}
     if existing and existing["email_verified"]:
         accounts.hash_pw(body.password)
         bg.add_task(_send_already_registered, email)
@@ -180,8 +190,14 @@ def signup(body: SignupRequest, request: Request, bg: BackgroundTasks):
         bg.add_task(_send_already_registered, email)    # lost a race on the email
         return JSONResponse(created, status_code=201)
     accounts.purge_expired()
-    bg.add_task(_send_link, acct["user_id"], "verify")
-    logger.info("account created user_id=%s", acct["user_id"])
+    if invite:
+        if not user_store.consume_invite(invite.token, acct["user_id"]):    # lost a race for the invite
+            accounts.drop_unverified(email)
+            raise HTTPException(403, "That invite is invalid, used or expired.")
+        accounts.mark_verified(acct["user_id"])
+    else:
+        bg.add_task(_send_link, acct["user_id"], "verify")
+    logger.info("account created user_id=%s invited=%s", acct["user_id"], bool(invite))
     return JSONResponse(created, status_code=201)
 
 
