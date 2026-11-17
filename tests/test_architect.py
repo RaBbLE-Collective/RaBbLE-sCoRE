@@ -151,3 +151,93 @@ def test_invite_lifetime_is_bounded(env, monkeypatch):
     assert env.post("/api/v1/admin/invites", json={"expires_days": 3650}, headers=h).status_code == 422
     assert env.post("/api/v1/admin/invites", json={"expires_days": 30, "note": "x" * 121}, headers=h).status_code == 422
     assert env.post("/api/v1/admin/invites", json={"expires_days": 30}, headers=h).status_code == 201
+
+
+# ── reserved names, reset exemption, non-human accounts ────────────────────────
+
+import make_entity  # noqa: E402
+
+
+@pytest.mark.parametrize("name", ["RaBbLE-Architect", "architect1", "rabble_admin", "myadmin", "Rabble", "the-rabble"])
+def test_brand_and_office_names_are_reserved_at_signup(env, name):
+    r = env.post("/api/v1/auth/signup", json={"username": name, "email": "x@example.com", "password": "correct horse battery"})
+    assert r.status_code == 422 and "reserved" in r.json()["detail"]
+
+
+def test_the_tool_defaults_to_the_architect_office_name(env, monkeypatch):
+    run_tool(monkeypatch, [], ["", "arch@example.com"], [PW, PW])      # blank name takes the default
+    assert accounts.by_username("rabble-architect")["username"] == "RaBbLE-Architect"
+    assert login(env, "rabblE-architect", PW).json()["tier"] == "admin"
+
+
+def test_email_reset_never_reaches_the_architect(env, monkeypatch):
+    box = mailer.ConsoleMailer()
+    mailer.set_mailer(box)
+    make(monkeypatch)
+    r = env.post("/api/v1/auth/forgot-password", json={"email": "arch@example.com"})
+    assert r.status_code == 200 and not box.outbox                      # same reply as any account, no mail
+    uid = accounts.by_username("architect")["user_id"]
+    raw = accounts.issue_token(uid, "reset")                            # even a minted token is refused
+    bad = env.post("/api/v1/auth/reset-password", json={"token": raw, "new_password": "brand new long passphrase"})
+    assert bad.status_code == 400
+    assert login(env, "architect", PW).status_code == 200               # password unchanged
+
+
+def run_entity(monkeypatch, argv, answers):
+    monkeypatch.setattr(sys, "argv", ["make_entity"] + argv)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    a = iter(answers)
+    monkeypatch.setattr("builtins.input", lambda *_: next(a))
+    make_entity.main()
+
+
+def entity_key(out: str) -> str:
+    import re
+    return re.search(r"(rbbl_[\w-]+)", out).group(1)
+
+
+def test_entity_tool_refuses_a_pipe(data_dir, monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["make_entity"])
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    with pytest.raises(SystemExit):
+        make_entity.main()
+    assert db.query_one("SELECT COUNT(*) AS n FROM accounts")["n"] == 0
+
+
+def test_entity_account_uses_a_key_and_cannot_sign_in(env, monkeypatch, capsys):
+    run_entity(monkeypatch, [], [""])                                   # default name RaBbLE
+    key = entity_key(capsys.readouterr().out)
+    acct = accounts.by_username("rabble")
+    assert acct["kind"] == "entity" and acct["email_verified"] == 1
+    # the key authenticates as a member with the entity tier
+    me = env.get("/api/v1/auth/me", headers={"X-API-Key": key})
+    assert me.status_code == 200 and me.json()["tier"] == "entity" and me.json()["name"] == "RaBbLE"
+    # but nothing else: no password sign-in (by name or its placeholder email), no admin, no reset
+    assert login(env, "RaBbLE", "anything at all here").status_code == 401
+    assert login(env, "rabble@entity.invalid", key).status_code == 401
+    assert env.post("/api/v1/admin/invites", json={}, headers={"X-API-Key": key}).status_code == 403
+    box = mailer.ConsoleMailer(); mailer.set_mailer(box)
+    env.post("/api/v1/auth/forgot-password", json={"email": "rabble@entity.invalid"})
+    assert not box.outbox
+    # only the hash of the key is stored; the entity does not use a human slot under the cap
+    assert key not in str(db.query("SELECT * FROM users")) and accounts.count_accounts() == 0
+
+
+def test_entity_key_rotation_ends_the_old_key(env, monkeypatch, capsys):
+    run_entity(monkeypatch, [], ["RaBbLE"])
+    old = entity_key(capsys.readouterr().out)
+    run_entity(monkeypatch, ["--rotate-key"], ["RaBbLE"])
+    new = entity_key(capsys.readouterr().out)
+    assert old != new
+    assert env.get("/api/v1/auth/me", headers={"X-API-Key": old}).status_code == 401
+    assert env.get("/api/v1/auth/me", headers={"X-API-Key": new}).status_code == 200
+
+
+def test_entity_rotation_refuses_a_human(env, monkeypatch):
+    import users
+    tok = users.create_invite(created_by="t").token
+    env.post("/api/v1/auth/signup", json={"username": "person1", "email": "p1@example.com",
+                                          "password": "correct horse battery", "invite_token": tok})
+    with pytest.raises(SystemExit):
+        run_entity(monkeypatch, ["--rotate-key"], ["person1"])

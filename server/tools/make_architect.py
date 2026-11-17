@@ -5,7 +5,8 @@ Run it yourself, in a real terminal, on a machine that has the database in its e
     cd server && ../.venv/bin/python tools/make_architect.py
 It asks for the username, email and password with hidden input, and never prints or logs the password.
 It refuses to run without a terminal, so nothing can pipe a password into it. The account is created
-verified (no mail needed) with tier "admin"; signup can never produce that tier.
+verified (no mail needed) with tier "admin"; signup can never produce that tier or a name containing
+rabble, architect or admin. Email reset is switched off for admins: recovery is this tool.
 
   --promote         the account (by username or email) already exists: make it admin, keep its password
   --reset-password  the break-glass: set a new password for an existing admin and end all its sessions.
@@ -70,7 +71,7 @@ def main() -> None:
         print(f"Password changed for {acct['username']}; every session was ended.")
         return
 
-    username = input("Architect username [architect]: ").strip() or "architect"
+    username = input("Architect username [RaBbLE-Architect]: ").strip() or "RaBbLE-Architect"
     if not _USER.match(username):
         sys.exit("Username: 3-24 characters, letters, digits, '-' or '_'.")
     email = input("Architect email (the RaBbLE address you control): ").strip().lower()

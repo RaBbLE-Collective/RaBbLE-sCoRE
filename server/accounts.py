@@ -55,7 +55,10 @@ logger = logging.getLogger("rabble.accounts")
 
 _ph = PasswordHasher()   # Argon2id, library defaults, random per-hash salt
 _USERNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{2,23}$")
-_RESERVED = {"architect", "admin", "administrator", "root", "system", "guest", "rabble", "support", "me", "api", "null", "pocket"}
+_RESERVED = {"administrator", "root", "system", "guest", "support", "me", "api", "null", "pocket", "collective", "grimoire"}
+# Refused anywhere in a name, so nobody can pose as the Collective, the entity or its offices
+# (RaBbLE-Architect, rabble_admin, architect1). The local tools in tools/ bypass this on purpose.
+_RESERVED_WORDS = ("rabble", "architect", "admin")
 PW_MIN, PW_MAX = 10, 128
 _dummy_hash: str | None = None
 
@@ -184,7 +187,8 @@ def password_problem(pw: str, username: str, email: str) -> Optional[str]:
 def username_problem(name: str) -> Optional[str]:
     if not _USERNAME_RE.match(name):
         return "Username must be 3-24 characters: letters, digits, '-' or '_', starting with a letter or digit."
-    if name.lower() in _RESERVED:
+    low = name.lower()
+    if low in _RESERVED or any(w in low for w in _RESERVED_WORDS):
         return "That username is reserved."
     return None
 
@@ -196,10 +200,10 @@ def count_accounts() -> int:
     verified ones (an unverified signup must not be able to fill the rooms)."""
     if require_verified():
         return int(db.query_one("SELECT COUNT(*) AS n FROM users u JOIN accounts a ON a.user_id = u.id "
-                                "WHERE u.tier NOT IN ('guest', 'admin') AND a.email_verified = 1")["n"]) + \
-               int(db.query_one("SELECT COUNT(*) AS n FROM users u WHERE u.tier NOT IN ('guest', 'admin') "
+                                "WHERE u.tier NOT IN ('guest', 'admin', 'entity') AND a.email_verified = 1")["n"]) + \
+               int(db.query_one("SELECT COUNT(*) AS n FROM users u WHERE u.tier NOT IN ('guest', 'admin', 'entity') "
                                 "AND u.id NOT IN (SELECT user_id FROM accounts)")["n"])
-    return int(db.query_one("SELECT COUNT(*) AS n FROM users WHERE tier NOT IN ('guest', 'admin')")["n"])
+    return int(db.query_one("SELECT COUNT(*) AS n FROM users WHERE tier NOT IN ('guest', 'admin', 'entity')")["n"])
 
 
 def by_user_id(user_id: str) -> Optional[dict]:
@@ -219,8 +223,10 @@ def by_identifier(ident: str) -> Optional[dict]:
     return by_email(ident) if "@" in ident else by_username(ident)
 
 
-def create_account(username: str, email: str, password: str) -> dict:
-    """Insert accounts then users; a duplicate (pre-checked, and enforced by the unique indexes) raises
+def create_account(username: str, email: str, password: Optional[str], *, kind: str = "human",
+                   tier: str = "free", api_key: Optional[str] = None) -> dict:
+    """password None = nobody can sign in with one (a non-human account, kind "entity"; it uses api_key).
+    Insert accounts then users; a duplicate (pre-checked, and enforced by the unique indexes) raises
     ValueError('username'|'email'). If the users write fails, the accounts row is removed again."""
     email_l = email.strip().lower()
     if by_username(username) or username.lower() in user_store.list_handles():
@@ -231,9 +237,11 @@ def create_account(username: str, email: str, password: str) -> dict:
     now = db.now_ts()
     try:
         db.execute(
-            "INSERT INTO accounts (user_id, username, username_lower, email, email_lower, password_hash, "
-            "email_verified, sessions_valid_after, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 0, '', ?, ?)",
-            (uid, username, username.lower(), email_l, email_l, hash_pw(password), now, now))
+            "INSERT INTO accounts (user_id, username, username_lower, email, email_lower, password_hash, kind, "
+            "email_verified, sessions_valid_after, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, '', ?, ?)",
+            (uid, username, username.lower(), email_l, email_l,
+             hash_pw(password if password is not None else secrets.token_urlsafe(48)),   # an unknown secret: nobody signs in
+             kind, now, now))
     except Exception:
         if by_username(username):       # lost a race on a unique index
             raise ValueError("username")
@@ -244,7 +252,7 @@ def create_account(username: str, email: str, password: str) -> dict:
         user_store.create_user(UserProfile(
             id=uid, handle=username.lower(), display_name=username, email=email_l,
             join_date=datetime.now(timezone.utc).isoformat(), intention="", llm_backend="hosted_groq",
-            tier="free", api_key=f"rbbl_{secrets.token_urlsafe(32)}"))   # never shown: not a credential
+            tier=tier, api_key=api_key or f"rbbl_{secrets.token_urlsafe(32)}"))   # human accounts: never shown, not a credential
     except Exception:
         db.execute("DELETE FROM accounts WHERE user_id = ?", (uid,))
         raise
@@ -271,6 +279,16 @@ def username_taken(username: str, except_user_id: str = "") -> bool:
     if a and a["user_id"] != except_user_id:
         return True
     return username.lower() in user_store.list_handles() and not (a and a["user_id"] == except_user_id)
+
+
+def reset_allowed(acct: dict) -> bool:
+    """Email reset is for ordinary human accounts only. An admin's recovery is the database break-glass
+    (tools/make_architect.py --reset-password) and a non-human account has no mailbox: whoever controls
+    an inbox must never be able to take over the Architect or the entity."""
+    if acct.get("kind", "human") != "human":
+        return False
+    row = db.query_one("SELECT tier FROM users WHERE id = ?", (acct["user_id"],))
+    return not row or row["tier"] != "admin"
 
 
 def set_password(user_id: str, password: str) -> None:

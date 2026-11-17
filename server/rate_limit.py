@@ -11,6 +11,7 @@ _windows: dict[str, deque] = defaultdict(deque)
 USER_LIMITS = {
     "free":  {"per_minute": 10,    "per_hour": 100,   "per_day": 500},
     "pro":   {"per_minute": 30,    "per_hour": 500,   "per_day": 5000},
+    "entity": {"per_minute": 30,   "per_hour": 500,   "per_day": 5000},   # non-human accounts (RaBbLE itself); tune with use
     "admin": {"per_minute": 1000,  "per_hour": 20000, "per_day": 200000},
 }
 

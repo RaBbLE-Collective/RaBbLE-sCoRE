@@ -214,7 +214,7 @@ def login(body: LoginRequest, request: Request):
     _limit(f"auth:login:acct:{who}:{_h(ip)}", 900, 10)
     _limit(f"auth:login:acct-all:{who}", 3600, 60)
     ok, rehash = accounts.verify_or_dummy(body.password, acct["password_hash"] if acct else None)
-    if not (acct and ok):
+    if not (acct and ok) or acct["kind"] != "human":      # a non-human account never signs in with a password
         raise HTTPException(401, _BAD_LOGIN)
     if rehash:
         accounts.set_password(acct["user_id"], body.password)
@@ -244,7 +244,7 @@ def resend_verification(body: EmailRequest, request: Request, bg: BackgroundTask
     _limit(f"auth:resend:ip:{_ip(request)}", 3600, 10)
     email = str(body.email).strip().lower()
     acct = accounts.by_email(email)
-    if acct and not acct["email_verified"] and _quota(
+    if acct and acct["kind"] == "human" and not acct["email_verified"] and _quota(
             (f"auth:resend:acct:{_h(email)}:{_h(_ip(request))}", 3600, 3), (f"auth:resend:acct-all:{_h(email)}", 3600, 10)):
         bg.add_task(_send_link, acct["user_id"], "verify")
     return _RESEND_REPLY
@@ -257,7 +257,7 @@ def forgot_password(body: EmailRequest, request: Request, bg: BackgroundTasks):
     acct = accounts.by_email(email)
     # Over the per-account limit the mail is silently skipped: the reply never changes.
     # Per account and IP, so one caller cannot use up the owner's allowance; a looser cap covers all callers.
-    if acct and _quota((f"auth:forgot:acct:{_h(email)}:{_h(_ip(request))}", 3600, 3), (f"auth:forgot:acct-all:{_h(email)}", 3600, 10)):
+    if acct and accounts.reset_allowed(acct) and _quota((f"auth:forgot:acct:{_h(email)}:{_h(_ip(request))}", 3600, 3), (f"auth:forgot:acct-all:{_h(email)}", 3600, 10)):
         bg.add_task(_send_link, acct["user_id"], "reset")
     return _FORGOT_REPLY
 
@@ -269,7 +269,7 @@ def reset_password(body: ResetRequest, request: Request):
     bad = HTTPException(400, "That reset link is invalid or has expired.")
     uid = accounts.peek_token(body.token, "reset")
     acct = accounts.by_user_id(uid) if uid else None
-    if not acct:
+    if not acct or not accounts.reset_allowed(acct):
         raise bad
     problem = accounts.password_problem(body.new_password, acct["username"], acct["email"])
     if problem:

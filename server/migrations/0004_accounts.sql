@@ -7,6 +7,7 @@ CREATE TABLE accounts (
     email                TEXT NOT NULL,
     email_lower          TEXT NOT NULL,
     password_hash        TEXT NOT NULL,
+    kind                 TEXT NOT NULL DEFAULT 'human',   -- human | entity (a non-human account: API key only, no sign-in)
     email_verified       INTEGER NOT NULL DEFAULT 0,
     sessions_valid_after TEXT NOT NULL DEFAULT '',
     created_at           TEXT NOT NULL,
