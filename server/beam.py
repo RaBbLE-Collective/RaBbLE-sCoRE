@@ -53,6 +53,7 @@ import groqmeter
 import guests
 import llm
 import node
+import pocket_store
 import translate
 from tools import server_time
 
@@ -339,6 +340,17 @@ class BeamSession:
     def history_key(self) -> str:
         return f"{self.user['sub']}:{self.device}"
 
+    def persist(self, what: str, fn, *args):
+        """Keep Pocket data for real member accounts only. A store failure is logged, never raised:
+        a turn or capture must not break because the portal copy could not be written."""
+        if not pocket_store.persists(self.user):
+            return None
+        try:
+            return fn(self.user["sub"], *args)
+        except Exception as exc:
+            logger.warning("beam could not persist %s: %s", what, type(exc).__name__)
+            return None
+
     # ── messages ──
 
     async def on_text(self, raw: str):
@@ -386,6 +398,12 @@ class BeamSession:
                 _kept[key] = left
             else:
                 _kept.pop(key, None)
+        elif kind == "new_convo":
+            # A fresh thread: forget this device's recent history (everyone) and rotate the kept
+            # conversation (members only; others get null).
+            _history.pop(self.history_key(), None)
+            cid = self.persist("new conversation", pocket_store.new_conversation, self.device)
+            await self.send({"type": "convo_new", "id": cid})
         elif kind == "turn.cancel":
             if turn == self.turn:
                 self.cancel_task()
@@ -476,6 +494,8 @@ class BeamSession:
             if history is not None:
                 history.extend([{"role": "user", "content": text}, {"role": "assistant", "content": full}])
                 del history[:-2 * HISTORY_TURNS]
+                self.persist("turn", pocket_store.append_turns, self.device,
+                             [("user", text), ("assistant", full)])
             await self.send({"type": "done", "turn": turn})
             marks["done"] = time.monotonic() - t0
             logger.info("beam turn %s done: %s", turn, " ".join(f"{k}={v:.2f}s" for k, v in marks.items()))
@@ -526,6 +546,8 @@ class BeamSession:
             md = capture.assemble_note(note_id, created, self.device, source, duration, text, shaped)
             note = {"id": note_id, "title": capture.note_title(md), "md": md,
                     "path": capture.note_path(note_id, created), "ts": time.time()}
+            self.persist("note", pocket_store.save_note, note_id, self.device, note["title"], source,
+                         created.isoformat(), md, note["ts"])
             _keep_note(self.history_key(), note)   # kept first: the link may drop mid-send
             await self.send_note(turn, note)
             await self.send({"type": "done", "turn": turn})

@@ -24,6 +24,7 @@ import sessions as session_store
 from auth_routes import router as auth_router, member_router
 from accounts_routes import router as accounts_router
 from devices_routes import router as devices_router
+from pocket_routes import router as pocket_router
 from beam import router as beam_router
 from node import router as node_router
 
@@ -106,6 +107,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(accounts_router)   # AC2 sign-in (accounts.py)
 app.include_router(devices_router)   # AC7 device keys (devices.py)
+app.include_router(pocket_router)   # Pocket notes and conversations per member (pocket_store.py)
 app.include_router(member_router)
 app.include_router(beam_router)   # RaBbLE-Pocket's voice link (beam.py)
 app.include_router(node_router)   # laptop node link (node.py)
