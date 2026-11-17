@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Depends, Header, Request
-from pydantic import BaseModel, EmailStr
+from pydantic import Field, BaseModel, EmailStr
 
 import auth
 import db
@@ -50,8 +50,8 @@ class LoginRequest(BaseModel):
 
 
 class InviteCreateRequest(BaseModel):
-    note: Optional[str] = None
-    expires_days: int = 7
+    note: Optional[str] = Field(default=None, max_length=120)
+    expires_days: int = Field(default=7, ge=1, le=30)
 
 
 class GuestRequest(BaseModel):

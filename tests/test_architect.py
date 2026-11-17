@@ -142,3 +142,12 @@ def test_reset_password_ends_sessions_and_is_admin_only(env, monkeypatch):
                                           "password": "correct horse battery", "invite_token": tok})
     with pytest.raises(SystemExit):
         run_tool(monkeypatch, ["--reset-password"], ["plain1"], ["x" * 20, "x" * 20])
+
+
+def test_invite_lifetime_is_bounded(env, monkeypatch):
+    make(monkeypatch)
+    h = bearer(env, "architect", PW)
+    assert env.post("/api/v1/admin/invites", json={"expires_days": 0}, headers=h).status_code == 422
+    assert env.post("/api/v1/admin/invites", json={"expires_days": 3650}, headers=h).status_code == 422
+    assert env.post("/api/v1/admin/invites", json={"expires_days": 30, "note": "x" * 121}, headers=h).status_code == 422
+    assert env.post("/api/v1/admin/invites", json={"expires_days": 30}, headers=h).status_code == 201
