@@ -6,8 +6,10 @@
     "enabled": true
   },
   // Keep-warm: the free-tier host sleeps after ~15 min idle (≈30 s cold start).
-  // Pinging /health every 10 min keeps one service awake within the 750 h/mo allowance.
+  // Pinging /health keeps one service awake within the 750 h/mo allowance. */14 fires at
+  // :00 :14 :28 :42 :56 (max gap 14 min, under the 15 min sleep): 120 runs a day, 0.12% of the
+  // Workers Free 100k/day (S333; was */10 = 144).
   "triggers": {
-    "crons": ["*/10 * * * *"]
+    "crons": ["*/14 * * * *"]
   }
 }

@@ -40,3 +40,4 @@ GEMINI.md
 server/data/
 tui/target/
 tui/.cargo/
+.neon

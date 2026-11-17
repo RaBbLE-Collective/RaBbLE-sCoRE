@@ -2,6 +2,14 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _sqlite_unless_parametrized(monkeypatch):
+    """Render (and a developer shell) export DATABASE_URL: tests run on SQLite unless they ask for
+    the `backend` fixture, which opts into Postgres explicitly via TEST_DATABASE_URL."""
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("DATABASE_SCHEMA", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _no_real_usage_tracker(tmp_path_factory, monkeypatch):
     """The header reads the OS tracker's cache; tests must not depend on the machine they run on."""
     monkeypatch.setenv("RABBLE_USAGE_FILE", str(tmp_path_factory.mktemp("usage") / "none.json"))
@@ -103,3 +111,29 @@ def _audit_to_tmp(tmp_path_factory, monkeypatch):
     """Beam and chat tests log to the audit file: keep it out of the repo."""
     import audit
     monkeypatch.setattr(audit, "LOG_PATH", str(tmp_path_factory.mktemp("audit") / "audit.jsonl"))
+
+
+# ── Postgres backend for parametrized tests ──────────────────────────────────
+# TEST_DATABASE_URL must be set explicitly (a DIRECT, non-pooled url: search_path is session state).
+# Each test gets a throwaway schema, dropped afterwards. DATABASE_URL is never used here.
+
+@pytest.fixture(params=["sqlite", "postgres"])
+def backend(request, monkeypatch):
+    import uuid
+    import db
+    if request.param == "sqlite":
+        yield "sqlite"
+        return
+    url = os.environ.get("TEST_DATABASE_URL")
+    if not url:
+        pytest.skip("TEST_DATABASE_URL not set")
+    if "-pooler" in url:
+        pytest.skip("TEST_DATABASE_URL must be a direct (non-pooled) url")
+    schema = "test_" + uuid.uuid4().hex[:12]
+    monkeypatch.setenv("DATABASE_URL", url)
+    monkeypatch.setenv("DATABASE_SCHEMA", schema)
+    yield "postgres"
+    db.close()
+    import psycopg
+    with psycopg.connect(url, autocommit=True) as c:
+        c.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')

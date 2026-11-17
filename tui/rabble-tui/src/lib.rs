@@ -10,6 +10,7 @@ pub mod sessions;
 pub mod run;
 pub mod spike;
 pub mod theme;
+pub mod thinking;
 pub mod transcript;
 pub mod usage;
 pub mod util;

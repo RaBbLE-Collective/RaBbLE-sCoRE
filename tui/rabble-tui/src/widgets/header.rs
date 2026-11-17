@@ -2,7 +2,7 @@
 //! showing, the header is `FACE_ROWS` (full) or `FACE_COMPACT_ROWS` (micro) tall: the left columns belong to the mark and the
 //! text lines sit beside it.
 
-use ratatui::{buffer::Buffer, layout::Rect, text::{Line, Span}};
+use ratatui::{buffer::Buffer, layout::Rect, style::Modifier, text::{Line, Span}};
 
 use crate::{theme::Theme, usage::{self, Usage}, wrap::{clean, spans_width, str_width}};
 
@@ -207,7 +207,22 @@ pub fn draw_divider(area: Rect, buf: &mut Buffer, th: &Theme, label: &str, phase
     let cell = |x: usize| Span::styled(rule.clone(), th.flow(x, w, phase, th.border));
     let mut spans: Vec<Span<'static>> = (0..n).map(cell).collect();
     if lw > 0 {
-        spans.push(Span::styled(format!(" {label} "), th.accent));
+        spans.push(Span::raw(" "));
+        if th.animates() {
+            // a bright band sweeps along the label, about twice a cycle of the rule: the pondering shimmer
+            let n = lw as f64;
+            let head = (phase * 6.0).rem_euclid(n + 8.0) - 4.0;
+            let mut col = 0.0;
+            for ch in label.chars() {
+                let near = 1.0 - ((col - head).abs() / 3.0).min(1.0);
+                let st = if near > 0.5 { th.text.add_modifier(Modifier::BOLD) } else if near > 0.0 { th.secondary } else { th.accent };
+                spans.push(Span::styled(ch.to_string(), st));
+                col += crate::wrap::str_width(&ch.to_string()) as f64;
+            }
+        } else {
+            spans.push(Span::styled(label.to_owned(), th.accent));
+        }
+        spans.push(Span::raw(" "));
         spans.push(cell(w - 1));
     }
     buf.set_line(area.x, area.y, &Line::from(spans), area.width);

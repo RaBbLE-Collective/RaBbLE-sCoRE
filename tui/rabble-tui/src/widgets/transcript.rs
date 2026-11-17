@@ -21,6 +21,8 @@ pub const REFOCUS_GUARD: Duration = Duration::from_millis(400);
 pub const FACE_MIN_ROWS: usize = 2;
 const TITLE_MAX: usize = 100;
 const RESULT_MAX: usize = 60;
+/// Rows of a thought shown collapsed (the tail: where the reasoning has got to); Ctrl-O expands.
+const THOUGHT_ROWS: usize = 6;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Item {
@@ -29,6 +31,10 @@ pub enum Item {
     Tool { id: String, organ: String, name: String, line: String, input: String, result: Option<(bool, String)> },
     Notice { text: String, error: bool },
     Thinking,
+    /// The model's summarized thinking, dim and italic, never the answer. Lead chunks stream in as deltas.
+    Thought { organ: String, text: String },
+    /// The lead's todo list (TodoWrite): `(status, text)`, status = pending | in_progress | completed. Only the latest stays.
+    Todos(Vec<(String, String)>),
     /// `/face`: room for the full face, which the app paints over these rows. Dropped on the next submit.
     Face,
 }
@@ -235,6 +241,34 @@ impl Transcript {
         }
     }
 
+    /// A chunk of the model's thinking: appended to the thought in progress, else a new one.
+    pub fn thought(&mut self, organ: &str, text: &str) {
+        let (organ, text) = (clean(organ), clean(text));
+        if text.trim().is_empty() {
+            return;
+        }
+        self.drop_transient();
+        if let Some(Entry { item: Item::Thought { organ: o, text: t }, dirty, .. }) = self.entries.last_mut() {
+            if *o == organ {
+                t.push_str(&text);
+                *dirty = true;
+                self.stale = true;
+                return;
+            }
+        }
+        self.end_stream();
+        self.push(Item::Thought { organ, text });
+    }
+
+    /// A new todo list replaces the earlier one, so the plan stays one block.
+    pub fn todos(&mut self, list: Vec<(String, String)>) {
+        self.drop_transient();
+        self.end_stream();
+        // the newest list sits at the bottom, where the work is; the earlier one goes
+        self.entries.retain(|e| !matches!(e.item, Item::Todos(_)));
+        self.push(Item::Todos(list));
+    }
+
     /// Remove the "thinking" placeholder (anything transient).
     pub fn drop_transient(&mut self) {
         if self.entries.last().is_some_and(|e| e.item == Item::Thinking) {
@@ -305,7 +339,7 @@ impl Transcript {
         self.expanded = !self.expanded;
         self.sel.clear();
         for e in &mut self.entries {
-            if matches!(e.item, Item::Tool { .. }) {
+            if matches!(e.item, Item::Tool { .. } | Item::Thought { .. }) {
                 e.dirty = true;
             }
         }
@@ -446,6 +480,43 @@ impl Transcript {
             }
             Item::Face => vec![Line::default(); face_rows],
             Item::Thinking => vec![Line::from(Span::styled(format!("{}{}", "thinking", g.ellipsis), th.muted))],
+            Item::Todos(list) => {
+                let plain = g.rule == '-';
+                let done = list.iter().filter(|(st, _)| st == "completed").count();
+                let mut v = vec![Line::from(Span::styled(format!("  Todos {done}/{}", list.len()), th.secondary))];
+                for (st, text) in list {
+                    let (mark, style) = match (st.as_str(), plain) {
+                        ("completed", false) => ("☒", th.muted.add_modifier(Modifier::CROSSED_OUT)),
+                        ("completed", true) => ("[x]", th.muted),
+                        ("in_progress", false) => ("◼", th.accent.add_modifier(Modifier::BOLD)),
+                        ("in_progress", true) => ("[>]", th.accent),
+                        (_, false) => ("☐", th.text),
+                        (_, true) => ("[ ]", th.text),
+                    };
+                    v.extend(wrap::wrap(&[Span::styled(clean(text), style)], w, &[Span::styled(format!("    {mark} "), style)], &[Span::raw("      ")]));
+                }
+                v.push(Line::default());
+                v
+            }
+            Item::Thought { organ, text } => {
+                let st = th.muted.add_modifier(Modifier::ITALIC);
+                let who = if organ == "rabble" || organ.is_empty() { String::new() } else { format!("{} ", crate::crew::display(organ)) };
+                let mut v = vec![Line::from(Span::styled(format!("  ∴ {who}thinking"), st))];
+                let body: Vec<Line<'static>> = text
+                    .trim()
+                    .split('\n')
+                    .filter(|l| !l.trim().is_empty())
+                    .flat_map(|l| wrap::wrap(&[Span::styled(l.to_owned(), st)], w, &[Span::raw("    ")], &[Span::raw("    ")]))
+                    .collect();
+                if !expanded && body.len() > THOUGHT_ROWS {
+                    v.push(Line::from(Span::styled(format!("    {} {} earlier lines", g.ellipsis, body.len() - THOUGHT_ROWS), st)));
+                    v.extend(body[body.len() - THOUGHT_ROWS..].iter().cloned());
+                } else {
+                    v.extend(body);
+                }
+                v.push(Line::default());
+                v
+            }
             Item::Notice { text, error } => {
                 let st = if *error { th.error } else { th.muted };
                 let first = [Span::styled(format!("{} ", g.bullet), st)];

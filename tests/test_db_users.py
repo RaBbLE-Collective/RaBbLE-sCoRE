@@ -10,6 +10,22 @@ import users
 from users import InviteToken, UserProfile
 
 
+# Every test here runs on SQLite, and on Postgres when TEST_DATABASE_URL is set (see conftest.backend).
+
+@pytest.fixture(autouse=True)
+def _backend(backend):
+    return backend
+
+
+sqlite_only = pytest.mark.usefixtures("_sqlite_only")
+
+
+@pytest.fixture()
+def _sqlite_only(backend):
+    if backend != "sqlite":
+        pytest.skip("SQLite-specific")
+
+
 def _profile(i="u1", handle="h1", key="rbbl_a"):
     return UserProfile(id=i, handle=handle, display_name="N", join_date="2026-01-01", intention="x",
                        api_key=key, byo_key_enc="enc")
@@ -68,9 +84,10 @@ def test_migrations_are_recorded_and_idempotent(data_dir):
     db.close()
     db.conn()
     rows = db.query("SELECT version FROM schema_migrations")
-    assert [r["version"] for r in rows] == ["0001_init", "0002_guest_caps", "0003_updated_at"]
+    assert [r["version"] for r in rows] == ["0001_init", "0002_guest_caps", "0003_updated_at", "0004_accounts"]
 
 
+@sqlite_only
 def test_backup_is_a_consistent_copy(data_dir, tmp_path):
     users.create_user(_profile())
     out = tmp_path / "copy.db"
@@ -85,9 +102,10 @@ def test_writes_mark_dirty_but_bookkeeping_does_not(data_dir):
     db.meta_set("k", "v")
     assert db.dirty_since is None
     users.create_user(_profile())
-    assert db.dirty_since is not None
+    assert (db.dirty_since is not None) == (not db.is_postgres())   # snapshots are SQLite-only
 
 
+@sqlite_only
 def test_failed_migration_leaves_nothing_half_applied(tmp_path, monkeypatch):
     import sqlite3
     mig = tmp_path / "mig"

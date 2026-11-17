@@ -73,6 +73,10 @@ fn paint(term: &mut Term, app: &mut App) -> io::Result<()> {
 fn apply_effects(app: &mut App, term: &mut Term) -> io::Result<()> {
     for e in app.effects.drain(..) {
         match e {
+            Effect::Notify(t) => {
+                let t: String = t.chars().filter(|c| !c.is_control() && *c != ';').take(120).collect();
+                term.backend_mut().write_all(format!("\x07\x1b]777;notify;RaBbLE;{t}\x07").as_bytes())?;
+            }
             Effect::Copy(t) => {
                 term.backend_mut().write_all(util::osc52(&t).as_bytes())?;
                 std::thread::spawn(move || util::copy_to_system(&t));
@@ -202,7 +206,7 @@ pub fn run(o: Opts) -> io::Result<Option<String>> {
                         app.on_msg(m);
                     }
                 }
-                Err(RecvTimeoutError::Timeout) => app.dirty |= app.needs_tick(),
+                Err(RecvTimeoutError::Timeout) => app.dirty |= app.needs_tick() || app.wants_second_tick(),
                 Err(RecvTimeoutError::Disconnected) => return Ok(()),
             }
             // then the engine's frames, at most one queue's worth per paint
