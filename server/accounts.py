@@ -55,7 +55,7 @@ logger = logging.getLogger("rabble.accounts")
 
 _ph = PasswordHasher()   # Argon2id, library defaults, random per-hash salt
 _USERNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{2,23}$")
-_RESERVED = {"admin", "administrator", "root", "system", "guest", "rabble", "support", "me", "api", "null", "pocket"}
+_RESERVED = {"architect", "admin", "administrator", "root", "system", "guest", "rabble", "support", "me", "api", "null", "pocket"}
 PW_MIN, PW_MAX = 10, 128
 _dummy_hash: str | None = None
 
@@ -196,10 +196,10 @@ def count_accounts() -> int:
     verified ones (an unverified signup must not be able to fill the rooms)."""
     if require_verified():
         return int(db.query_one("SELECT COUNT(*) AS n FROM users u JOIN accounts a ON a.user_id = u.id "
-                                "WHERE u.tier <> 'guest' AND a.email_verified = 1")["n"]) + \
-               int(db.query_one("SELECT COUNT(*) AS n FROM users u WHERE u.tier <> 'guest' "
+                                "WHERE u.tier NOT IN ('guest', 'admin') AND a.email_verified = 1")["n"]) + \
+               int(db.query_one("SELECT COUNT(*) AS n FROM users u WHERE u.tier NOT IN ('guest', 'admin') "
                                 "AND u.id NOT IN (SELECT user_id FROM accounts)")["n"])
-    return int(db.query_one("SELECT COUNT(*) AS n FROM users WHERE tier <> 'guest'")["n"])
+    return int(db.query_one("SELECT COUNT(*) AS n FROM users WHERE tier NOT IN ('guest', 'admin')")["n"])
 
 
 def by_user_id(user_id: str) -> Optional[dict]:

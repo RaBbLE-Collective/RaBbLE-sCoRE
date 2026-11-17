@@ -169,11 +169,14 @@ async def me(user: dict = Depends(auth.require_user)):
 @member_router.post("/admin/invites", status_code=201)
 async def create_invite(body: InviteCreateRequest, admin: dict = Depends(_require_admin)):
     _require_durable()
+    who = admin.get("id") or admin.get("sub", "admin")      # the shared key is {"id"}, a signed-in admin is JWT claims {"sub"}
     invite = user_store.create_invite(
-        created_by=admin["id"],
+        created_by=who,
         note=body.note or "",
         expires_days=body.expires_days,
     )
+    import audit
+    audit.log(who, "admin.invite.create", 201, tier="admin", resource_id=invite.token[:6])
     base_url = os.getenv("FRONTEND_URL", "https://joinrabble.world")
     return {
         "token":      invite.token,
@@ -181,6 +184,34 @@ async def create_invite(body: InviteCreateRequest, admin: dict = Depends(_requir
         "expires_at": invite.expires_at,
         "note":       invite.note,
     }
+
+
+def _invite_row(i) -> dict:
+    from datetime import datetime, timezone
+    exp = datetime.fromisoformat(i.expires_at)
+    exp = exp if exp.tzinfo else exp.replace(tzinfo=timezone.utc)
+    state = "used" if i.consumed else ("expired" if datetime.now(timezone.utc) > exp else "live")
+    return {"token": i.token if state == "live" else i.token[:6] + "...", "state": state, "note": i.note,
+            "created_by": i.created_by, "expires_at": i.expires_at, "consumed_by": i.consumed_by}
+
+
+@member_router.get("/admin/invites")
+async def list_invites(admin: dict = Depends(_require_admin)):
+    """Newest first. A token is shown in full only while it is still live."""
+    rows = sorted(user_store.list_invites(), key=lambda i: i.expires_at, reverse=True)
+    return {"invites": [_invite_row(i) for i in rows]}
+
+
+@member_router.delete("/admin/invites/{token}")
+async def revoke_invite(token: str, admin: dict = Depends(_require_admin)):
+    _require_durable()
+    inv = user_store.get_invite(token)
+    if not inv or inv.consumed:
+        raise HTTPException(404, "No unused invite with that token")
+    db.execute("DELETE FROM invites WHERE token = ? AND consumed = 0", (token,))
+    import audit
+    audit.log(admin.get("id") or admin.get("sub", "admin"), "admin.invite.revoke", 200, tier="admin", resource_id=token[:6])
+    return {"revoked": True}
 
 
 # ── Admin: inventory and export (counts and sizes only, no content) ────────────
