@@ -219,9 +219,77 @@ def test_device_key_survives_revoke_all(env):
     assert beam._authorize(_WS(d["key"]))["sub"] == uid
 
 
-def test_shared_beam_token_and_guest_keys_unchanged(env, monkeypatch):
+def test_shared_beam_token_and_guest_keys_refused_by_default(env, monkeypatch):
+    import guests
+    monkeypatch.delenv("BEAM_ALLOW_GUEST_POCKETS", raising=False)
     monkeypatch.setenv("BEAM_DEVICE_TOKEN", "shared-secret")
+    _, gkey = guests.create_guest("g")
+    assert beam._authorize(_WS("shared-secret")) is None
+    assert beam._authorize(_WS(gkey)) is None
+    from auth_routes import verify_api_key
+    gtok = auth_make_token(verify_api_key(gkey))
+    assert beam._authorize(_WS(gtok)) is None            # a JWT minted from a guest key is refused too
+
+
+def test_shared_beam_token_and_guest_keys_accepted_with_the_testing_flag(env, monkeypatch):
+    import guests
+    monkeypatch.setenv("BEAM_ALLOW_GUEST_POCKETS", "true")
+    monkeypatch.setenv("BEAM_DEVICE_TOKEN", "shared-secret")
+    _, gkey = guests.create_guest("g")
     assert beam._authorize(_WS("shared-secret")) == {"sub": "pocket", "name": "RaBbLE-Pocket", "tier": "pro"}
+    got = beam._authorize(_WS(gkey))
+    assert got["tier"] == "guest" and got["llm_backend"] == "hosted_groq"
+
+
+def auth_make_token(user):
+    import auth
+    return auth.make_token(user["id"], user["name"], user["tier"], user.get("handle", ""))
+
+
+def test_beam_accepts_only_device_keys_entities_and_member_jwts(env, monkeypatch):
+    monkeypatch.delenv("BEAM_ALLOW_GUEST_POCKETS", raising=False)
+    monkeypatch.delenv("BEAM_ALLOW_GUEST", raising=False)
+    h = member(env)
+    uid = accounts.by_username("alice")["user_id"]
+    assert beam._authorize(_WS(h["Authorization"].split()[1]))["sub"] == uid          # member JWT
+    assert beam._authorize(_WS(mint(env, h).json()["key"]))["sub"] == uid             # device key
+    legacy = users.get_user(uid).api_key
+    assert beam._authorize(_WS(legacy)) is None                                        # a plain member api key
+    accounts.create_account("rabble-e", "e@example.com", None, kind="entity", tier="entity", api_key="rbbl_entitykey")
+    assert beam._authorize(_WS("rbbl_entitykey"))["tier"] == "entity"                  # entity keys keep working
+    monkeypatch.setattr("auth_routes._ADMIN_KEY", "adminkey")
+    assert beam._authorize(_WS("adminkey")) is None                                    # the shared admin key is no account
+    assert beam._authorize(_WS("not-a-key")) is None
+
+
+def test_beam_refusal_closes_with_a_distinct_reason(env, monkeypatch):
+    import json as _json
+    from starlette.websockets import WebSocketDisconnect
+    monkeypatch.delenv("BEAM_ALLOW_GUEST_POCKETS", raising=False)
+    monkeypatch.delenv("BEAM_ALLOW_GUEST", raising=False)
+    monkeypatch.setenv("BEAM_DEVICE_TOKEN", "shared-secret")
+    with pytest.raises(WebSocketDisconnect) as bad:
+        with env.websocket_connect("/api/v1/beam", headers={"Authorization": "Bearer shared-secret"}):
+            pass
+    assert bad.value.code == 4401 and bad.value.reason.startswith("key not accepted")
+    with pytest.raises(WebSocketDisconnect) as none:
+        with env.websocket_connect("/api/v1/beam"):
+            pass
+    assert none.value.code == 4401 and none.value.reason == "device key required"
+
+
+def test_admin_is_exempt_from_the_device_limit_and_members_are_not(env, monkeypatch):
+    monkeypatch.setenv("DEVICE_LIMIT", "2")
+    h = member(env)
+    uid = accounts.by_username("alice")["user_id"]
+    assert [mint(env, h, f"p{i}").status_code for i in range(3)] == [201, 201, 409]
+    prof = users.get_user(uid)
+    prof.tier = "admin"
+    users.save_user(prof)
+    assert devices.is_exempt(uid) is True
+    for i in range(5):
+        assert devices.create(uid, f"dev{i}") is not None
+    assert devices.active_count(uid) == 7
 
 
 # ── store level, SQLite and Postgres ──────────────────────────────────────────

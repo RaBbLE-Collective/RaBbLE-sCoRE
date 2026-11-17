@@ -10,6 +10,17 @@ def _sqlite_unless_parametrized(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolated_data_dir(tmp_path_factory, monkeypatch):
+    """Usage metering and account events write to the db on every turn: no test may touch ./data/score.db.
+    Tests that want a clean db of their own ask for data_dir, which overrides this."""
+    import db
+    monkeypatch.setenv("DATA_DIR", str(tmp_path_factory.mktemp("data")))
+    db.close()
+    yield
+    db.close()
+
+
+@pytest.fixture(autouse=True)
 def _no_real_usage_tracker(tmp_path_factory, monkeypatch):
     """The header reads the OS tracker's cache; tests must not depend on the machine they run on."""
     monkeypatch.setenv("RABBLE_USAGE_FILE", str(tmp_path_factory.mktemp("usage") / "none.json"))

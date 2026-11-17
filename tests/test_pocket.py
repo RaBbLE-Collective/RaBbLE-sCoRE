@@ -19,7 +19,7 @@ PW = "correct horse battery"
 @pytest.fixture()
 def env(data_dir, monkeypatch):
     for k in ("ACCOUNT_CAP", "REQUIRE_VERIFIED_EMAIL", "AUTH_IP_HEADER", "MAIL_PROVIDER", "SIGNUP_INVITE_ONLY",
-              "RABBLE_ADMIN_KEY", "BEAM_DEVICE_TOKEN", "BEAM_ALLOW_GUEST"):
+              "RABBLE_ADMIN_KEY", "BEAM_DEVICE_TOKEN", "BEAM_ALLOW_GUEST", "BEAM_ALLOW_GUEST_POCKETS"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("DEMO_MODE", "false")
     rate_limit._windows.clear()
@@ -114,6 +114,7 @@ def test_turns_append_to_one_open_conversation(env):
 
 
 def test_guest_shared_pocket_and_entity_not_persisted(env, monkeypatch):
+    monkeypatch.setenv("BEAM_ALLOW_GUEST_POCKETS", "true")   # guest and shared-token Pockets are test-only
     # per-device guest (tier guest)
     profile, key = guests.create_guest("g")
     say(env, {"Authorization": f"Bearer {key}"})
@@ -219,6 +220,7 @@ def test_new_convo_clears_history_and_rotates(env):
 
 
 def test_new_convo_for_non_persisted_users(env, monkeypatch):
+    monkeypatch.setenv("BEAM_ALLOW_GUEST_POCKETS", "true")
     monkeypatch.setenv("BEAM_DEVICE_TOKEN", "shared-secret")
     h = {"Authorization": "Bearer shared-secret"}
     say(env, h)

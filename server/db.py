@@ -331,7 +331,8 @@ def clear_dirty() -> None:
     dirty_since = None
 
 
-EXPORT_TABLES = ("users", "invites", "accounts", "guest_turns", "guest_turns_by_user", "guest_issue", "r2_usage", "meta", "devices")
+EXPORT_TABLES = ("users", "invites", "accounts", "guest_turns", "guest_turns_by_user", "guest_issue", "r2_usage", "meta", "devices",
+                 "pocket_conversations", "pocket_turns", "pocket_notes", "usage_events", "account_limits", "account_events")
 
 
 def export_json() -> dict:
@@ -353,7 +354,8 @@ def backup(dest: Path) -> None:
 
 def replace_with(snapshot: bytes, merge_local: bool) -> None:
     """Swap in a restored snapshot. With merge_local, rows written locally since (users,
-    invites, guest counters and caps, R2 counters, missing meta) are folded into it first, so a late restore loses nothing."""
+    invites, devices, Pocket data, usage rows, account limits and events, guest counters and caps, R2 counters,
+    missing meta) are folded into it first, so a late restore loses nothing."""
     if is_postgres():
         raise RuntimeError("replace_with() is SQLite-only")
     with _lock:
@@ -406,6 +408,25 @@ def replace_with(snapshot: bytes, merge_local: bool) -> None:
                           "WHERE user_id NOT IN (SELECT id FROM skip_ids)")
                 c.execute("UPDATE main.devices AS m SET revoked = 1 FROM loc.devices AS l "
                           "WHERE m.id = l.id AND l.revoked = 1")
+                # Pocket data, usage rows and account events: rows only local are added (ids are random, so a row
+                # present on both sides is the same row); a conversation ended locally stays ended.
+                for table in ("pocket_conversations", "pocket_turns", "pocket_notes", "usage_events", "account_events"):
+                    tcols = [r[1] for r in c.execute(f"PRAGMA main.table_info({table})")]
+                    tl = {r[1] for r in c.execute(f"PRAGMA loc.table_info({table})")}
+                    use = ", ".join(x for x in tcols if x in tl)
+                    c.execute(f"INSERT OR IGNORE INTO main.{table} ({use}) SELECT {use} FROM loc.{table} "
+                              "WHERE user_id IS NULL OR user_id NOT IN (SELECT id FROM skip_ids)")
+                c.execute("UPDATE main.pocket_conversations AS m SET ended_at = l.ended_at FROM loc.pocket_conversations AS l "
+                          "WHERE m.id = l.id AND m.ended_at IS NULL AND l.ended_at IS NOT NULL")
+                # Per-account limits: the newer updated_at wins; accounts only local are added.
+                lcols = [r[1] for r in c.execute("PRAGMA main.table_info(account_limits)")]
+                ll = {r[1] for r in c.execute("PRAGMA loc.table_info(account_limits)")}
+                use = ", ".join(x for x in lcols if x in ll)
+                c.execute(f"INSERT OR IGNORE INTO main.account_limits ({use}) SELECT {use} FROM loc.account_limits "
+                          "WHERE user_id NOT IN (SELECT id FROM skip_ids)")
+                sets = ", ".join(f"{x} = l.{x}" for x in lcols if x in ll and x != "user_id")
+                c.execute(f"UPDATE main.account_limits AS m SET {sets} FROM loc.account_limits AS l "
+                          "WHERE m.user_id = l.user_id AND COALESCE(l.updated_at, '') > COALESCE(m.updated_at, '')")
                 c.execute("UPDATE main.auth_tokens AS m SET consumed = 1 FROM loc.auth_tokens AS l "
                           "WHERE m.token_hash = l.token_hash AND l.consumed = 1")
                 c.execute("UPDATE main.refresh_tokens AS m SET revoked = 1 FROM loc.refresh_tokens AS l "

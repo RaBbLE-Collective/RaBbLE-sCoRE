@@ -5,6 +5,9 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger("rabble.audit")
 
+# Actions that are model calls: recorded per call in usage_events, so not mirrored into account_events.
+_USAGE_ACTIONS = {"chat", "chat_complete", "session_message", "beam", "workflow_create", "workflow_step"}
+
 # Under DATA_DIR unless AUDIT_LOG_PATH says otherwise, so the log lives (and is exported) with the data.
 LOG_PATH = os.getenv("AUDIT_LOG_PATH") or os.path.join(os.getenv("DATA_DIR", "data"), "audit.jsonl")
 
@@ -35,3 +38,13 @@ def log(
             f.write(json.dumps(entry) + "\n")
     except OSError as exc:
         logger.error("audit log write failed: %s entry=%s", exc, entry)
+
+    # Mirror account-level actions into the database (the file is ephemeral on Render). Model calls are
+    # not mirrored: usage_events already holds every one of them.
+    if action not in _USAGE_ACTIONS:
+        try:
+            import account_events   # lazy: audit.py must import without a database
+            account_events.record(user_id, action, detail={k: v for k, v in entry.items()
+                                                           if k in ("status", "tier", "resource_id", "error")})
+        except Exception as exc:
+            logger.error("audit mirror failed: %s", type(exc).__name__)

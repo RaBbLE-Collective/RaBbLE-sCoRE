@@ -6,8 +6,10 @@ Run it yourself in a terminal against the database in your environment:
     cd server && set -a && . ../.env.local && set +a && ../.venv/bin/python tools/revoke_guests.py [--dry-run]
 
 It lists what it will delete (handles only), then asks you to type REVOKE. Members, the Architect and the entity
-are never touched (they are not tier "guest"). It does NOT turn guest minting off: a Pocket flashed afterwards
-still gets a fresh guest key until device pairing replaces that (set GUEST_ISSUE_SECRET empty to close it).
+are never touched (they are not tier "guest"). It does NOT turn guest minting off (guests remain possible for
+testing: unset GUEST_ISSUE_SECRET to close it). Since S347 the beam refuses guest keys and the shared
+BEAM_DEVICE_TOKEN unless BEAM_ALLOW_GUEST_POCKETS=true, so on production these accounts are already useless on a
+Pocket; this deletes them and their counters.
 """
 
 import argparse

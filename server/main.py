@@ -1,4 +1,4 @@
-import os, json
+import os, json, time
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -18,6 +18,7 @@ import snapshot
 import rate_limit
 import tools
 import transcripts
+import usage
 import workflows as wf_store
 import users as user_store
 import sessions as session_store
@@ -25,6 +26,7 @@ from auth_routes import router as auth_router, member_router
 from accounts_routes import router as accounts_router
 from devices_routes import router as devices_router
 from pocket_routes import router as pocket_router
+from usage_routes import router as usage_router
 from beam import router as beam_router
 from node import router as node_router
 
@@ -108,6 +110,7 @@ app.include_router(auth_router)
 app.include_router(accounts_router)   # AC2 sign-in (accounts.py)
 app.include_router(devices_router)   # AC7 device keys (devices.py)
 app.include_router(pocket_router)   # Pocket notes and conversations per member (pocket_store.py)
+app.include_router(usage_router)   # usage totals, limits and the account event log (usage.py)
 app.include_router(member_router)
 app.include_router(beam_router)   # RaBbLE-Pocket's voice link (beam.py)
 app.include_router(node_router)   # laptop node link (node.py)
@@ -216,10 +219,17 @@ async def _resolve_tools(
     """
     if tier == "fast":
         return messages
+    sink: dict = {}
+    t0 = time.monotonic()
     try:
-        result = await llm.chat_with_tools(
-            messages, system_prompt, tools.ALL_TOOLS, model_tier=tier, user=user
-        )
+        try:
+            result = await llm.chat_with_tools(
+                messages, system_prompt, tools.ALL_TOOLS, model_tier=tier, user=user, sink=sink
+            )
+        except Exception:
+            usage.record(user or "unknown", "tool", workflow="tools", status=502, ms=(time.monotonic() - t0) * 1000, **sink)
+            raise
+        usage.record(user or "unknown", "tool", workflow="tools", status=200, ms=(time.monotonic() - t0) * 1000, **sink)
         if result["type"] != "tool_call":
             return messages
         doc = result["arguments"].get("doc", "?")
@@ -295,6 +305,7 @@ async def chat(
 
     rate_limit.apply_user_limit(user_id, routed_tier, user_tier)
     guests.require_turn(user)   # after the per-user limiter: a throttled request spends no guest turn
+    usage.check(user, "turn")   # the account's own allowance, before any model is called
 
     user_profile = _load_user_profile(user)
     system_prompt = agents.rabble_system_prompt(wf_type, routed_tier)
@@ -305,11 +316,14 @@ async def chat(
 
     async def _stream():
         assistant_chunks: list[str] = []
+        sink: dict = {}
+        t0, status = time.monotonic(), 499   # 499: the client went away before the end
         try:
-            async for chunk in llm.stream_chat(chat_messages, system_prompt, model_tier=routed_tier, user=user_profile):
+            async for chunk in llm.stream_chat(chat_messages, system_prompt, model_tier=routed_tier, user=user_profile, sink=sink):
                 assistant_chunks.append(chunk)
                 yield f"data: {json.dumps(chunk)}\n\n"
             full_response = "".join(assistant_chunks)
+            status = 200
             yield "data: [DONE]\n\n"
             audit.log(user_id=user_id, action="chat", tier=routed_tier, workflow_type=wf_type, status=200)
             await transcripts.record(
@@ -318,10 +332,13 @@ async def chat(
                 workflow_type=wf_type,
             )
         except Exception as exc:
+            status = 500
             logger.error("chat stream error user=%s: %s", user_id, exc)
             audit.log(user_id=user_id, action="chat", tier=routed_tier, workflow_type=wf_type, status=500, error=str(exc))
             yield f"data: {json.dumps('[RaBbLE: all providers unreachable — ' + str(exc) + ']')}\n\n"
             yield "data: [DONE]\n\n"
+        finally:
+            usage.record(user, "turn", workflow=wf_type, status=status, ms=(time.monotonic() - t0) * 1000, **sink)
 
     return StreamingResponse(_stream(), media_type="text/event-stream")
 
@@ -346,14 +363,19 @@ async def chat_complete(
 
     rate_limit.apply_user_limit(user_id, routed_tier, user_tier)
     guests.require_turn(user)   # after the per-user limiter: a throttled request spends no guest turn
+    usage.check(user, "turn")
 
     user_profile = _load_user_profile(user)
     system_prompt = agents.rabble_system_prompt(wf_type, routed_tier)
+    sink: dict = {}
+    t0 = time.monotonic()
     try:
-        content = await llm.complete_chat(req.messages, system_prompt, model_tier=routed_tier, user=user_profile)
+        content = await llm.complete_chat(req.messages, system_prompt, model_tier=routed_tier, user=user_profile, sink=sink)
+        usage.record(user, "turn", workflow=wf_type, status=200, ms=(time.monotonic() - t0) * 1000, **sink)
         audit.log(user_id=user_id, action="chat_complete", tier=routed_tier, workflow_type=wf_type, status=200)
         return {"content": content, "workflow_type": wf_type, "tier": routed_tier}
     except Exception as exc:
+        usage.record(user, "turn", workflow=wf_type, status=502, ms=(time.monotonic() - t0) * 1000, **sink)
         audit.log(user_id=user_id, action="chat_complete", tier=routed_tier, workflow_type=wf_type, status=500, error=str(exc))
         raise HTTPException(502, f"LLM error: {exc}")
 
@@ -370,6 +392,7 @@ async def create_workflow(
     user_tier = user.get("tier", "free")
 
     rate_limit.apply_user_limit(user_id, req.model_tier, user_tier)
+    usage.check(user, "turn")
 
     record = wf_store.create(user_id, req.workflow_type, req.goal, req.model_tier)
     wf_id  = record["id"]
@@ -379,13 +402,17 @@ async def create_workflow(
     wf_store.set_state(wf_id, "running")
 
     system_prompt = agents.rabble_system_prompt(req.workflow_type, req.model_tier)
+    sink: dict = {}
+    t0 = time.monotonic()
     try:
         response = await llm.complete_chat(
             [{"role": "user", "content": init_content}],
             system_prompt,
             model_tier=req.model_tier,
             user=_load_user_profile(user),
+            sink=sink,
         )
+        usage.record(user, "turn", workflow=f"workflow:{req.workflow_type}", status=200, ms=(time.monotonic() - t0) * 1000, **sink)
         wf_store.add_message(wf_id, "assistant", response)
         wf_store.set_state(
             wf_id, "awaiting_input",
@@ -394,6 +421,7 @@ async def create_workflow(
         )
         audit.log(user_id=user_id, action="workflow_create", workflow_type=req.workflow_type, tier=req.model_tier, status=201)
     except Exception as exc:
+        usage.record(user, "turn", workflow=f"workflow:{req.workflow_type}", status=502, ms=(time.monotonic() - t0) * 1000, **sink)
         wf_store.set_state(wf_id, "failed", result=str(exc))
         audit.log(user_id=user_id, action="workflow_create", workflow_type=req.workflow_type, tier=req.model_tier, status=502, error=str(exc))
         raise HTTPException(502, f"Workflow init failed: {exc}")
@@ -441,6 +469,7 @@ async def workflow_step(
         raise HTTPException(400, f"Workflow is '{record['state']}' — cannot accept input now")
 
     rate_limit.apply_user_limit(user_id, record["model_tier"], user_tier)
+    usage.check(user, "turn")
 
     wf_store.add_message(wf_id, "user", req.message)
     wf_store.set_state(wf_id, "running")
@@ -448,8 +477,11 @@ async def workflow_step(
     system_prompt = agents.rabble_system_prompt(record["type"], record["model_tier"])
     messages = wf_store.get(wf_id, user_id)["messages"]
 
+    sink: dict = {}
+    t0 = time.monotonic()
     try:
-        response = await llm.complete_chat(messages, system_prompt, model_tier=record["model_tier"], user=_load_user_profile(user))
+        response = await llm.complete_chat(messages, system_prompt, model_tier=record["model_tier"], user=_load_user_profile(user), sink=sink)
+        usage.record(user, "turn", workflow=f"workflow:{record['type']}", status=200, ms=(time.monotonic() - t0) * 1000, **sink)
         step_num = len(record["steps"])
         wf_store.add_message(wf_id, "assistant", response)
         wf_store.set_state(
@@ -465,6 +497,7 @@ async def workflow_step(
             "step":     step_num,
         }
     except Exception as exc:
+        usage.record(user, "turn", workflow=f"workflow:{record['type']}", status=502, ms=(time.monotonic() - t0) * 1000, **sink)
         wf_store.set_state(wf_id, "failed", result=str(exc))
         audit.log(user_id=user_id, action="workflow_step", workflow_type=record["type"], tier=record["model_tier"], status=502, error=str(exc))
         raise HTTPException(502, f"Workflow step failed: {exc}")
@@ -542,6 +575,7 @@ async def session_message(
         routed_tier = req.model_tier
 
     rate_limit.apply_user_limit(user_id, routed_tier, user.get("tier", "free"))
+    usage.check(user, "turn")
 
     session_store.append_message(session_id, user_id, "user", req.content)
 
@@ -555,12 +589,15 @@ async def session_message(
 
     async def _stream():
         assistant_chunks: list[str] = []
+        sink: dict = {}
+        t0, status = time.monotonic(), 499
         try:
-            async for chunk in llm.stream_chat(chat_history, system_prompt, model_tier=routed_tier, user=user_profile):
+            async for chunk in llm.stream_chat(chat_history, system_prompt, model_tier=routed_tier, user=user_profile, sink=sink):
                 assistant_chunks.append(chunk)
                 yield f"data: {json.dumps(chunk)}\n\n"
             full_response = "".join(assistant_chunks)
             session_store.append_message(session_id, user_id, "assistant", full_response)
+            status = 200
             yield "data: [DONE]\n\n"
             audit.log(user_id=user_id, action="session_message", tier=routed_tier, status=200)
             await transcripts.record(
@@ -569,9 +606,12 @@ async def session_message(
                 workflow_type="session",
             )
         except Exception as exc:
+            status = 500
             logger.error("session stream error user=%s session=%s: %s", user_id, session_id, exc)
             audit.log(user_id=user_id, action="session_message", tier=routed_tier, status=500, error=str(exc))
             yield f"data: {json.dumps('[RaBbLE: all providers unreachable — ' + str(exc) + ']')}\n\n"
             yield "data: [DONE]\n\n"
+        finally:
+            usage.record(user, "turn", workflow="session", status=status, ms=(time.monotonic() - t0) * 1000, **sink)
 
     return StreamingResponse(_stream(), media_type="text/event-stream")

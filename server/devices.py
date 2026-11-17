@@ -11,6 +11,7 @@ cannot mint devices.
 
 Env (read per call):
   DEVICE_LIMIT   max active (not revoked) devices per member, default 3, minimum 1. Invalid value = 3.
+                 Admin-tier accounts are exempt (no limit).
 """
 
 import hashlib
@@ -47,13 +48,20 @@ def _public(row: dict) -> dict:
             "last_seen": row["last_seen"], "revoked": bool(row["revoked"])}
 
 
+def is_exempt(user_id: str) -> bool:
+    """Admin-tier accounts have no DEVICE_LIMIT."""
+    owner = user_store.get_user(user_id)
+    return bool(owner and owner.tier == "admin")
+
+
 def active_count(user_id: str) -> int:
     return db.query_one("SELECT COUNT(*) AS n FROM devices WHERE user_id = ? AND revoked = 0", (user_id,))["n"]
 
 
 def create(user_id: str, label: str) -> dict | None:
-    """Mint a device. Returns {id, label, key, created_at}, or None when the member is at DEVICE_LIMIT."""
-    if active_count(user_id) >= limit():
+    """Mint a device. Returns {id, label, key, created_at}, or None when the member is at DEVICE_LIMIT.
+    Admin accounts (the Architect) are exempt, so dev boards can be paired without a cap."""
+    if not is_exempt(user_id) and active_count(user_id) >= limit():
         return None
     key = PREFIX + secrets.token_urlsafe(32)
     row = {"id": secrets.token_hex(8), "label": label, "created_at": _now()}

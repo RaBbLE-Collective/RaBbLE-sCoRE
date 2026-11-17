@@ -395,6 +395,12 @@ def rotate_refresh(raw: str) -> Optional[tuple[str, str]]:
     return row["user_id"], child
 
 
+def presented_user(raw: str) -> Optional[str]:
+    """The account a refresh token belongs to (for the event log), or None."""
+    row = db.query_one("SELECT user_id FROM refresh_tokens WHERE token_hash = ?", (_sha(raw),))
+    return row["user_id"] if row else None
+
+
 def revoke_presented(raw: str) -> None:
     """Logout: the presented token's family dies, and so do this user's access JWTs (their other
     devices get a new one from their own refresh cookie)."""

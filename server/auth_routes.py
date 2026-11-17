@@ -355,6 +355,8 @@ async def summon(body: SummonRequest):
 
     token = auth.make_token(user_id, profile.display_name, profile.tier, profile.handle)
     logger.info("user summoned user_id=%s handle=%s", user_id, body.handle)
+    import account_events
+    account_events.record(user_id, "invite.redeem", detail={"via": "summon", "invite": body.invite_token[:6]})
     return {
         "api_key":    api_key,
         "user_id":    user_id,
