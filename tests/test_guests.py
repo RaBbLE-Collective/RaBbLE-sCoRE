@@ -21,6 +21,7 @@ def app(data_dir, monkeypatch):
     monkeypatch.setenv("DEMO_MODE", "true")
     monkeypatch.setenv("DEMO_MODE_PUBLIC", "true")
     monkeypatch.setenv("GUEST_ISSUE_SECRET", "s3cret-issue")
+    monkeypatch.setenv("BEAM_ALLOW_GUEST_POCKETS", "true")   # guest keys reach the beam only with this (testing flag)
     monkeypatch.delenv("API_DOCS", raising=False)
     import audit
     import auth

@@ -12,6 +12,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr, Field
 
+import account_events
 import accounts
 import auth
 import users as user_store
@@ -69,6 +70,14 @@ def _ip(request: Request) -> str:
 def _h(s: str) -> str:
     """Rate-limit keys are logged on a hit: keep typed names and emails out of the log."""
     return hashlib.sha256(s.encode()).hexdigest()[:16]
+
+
+def _ev(request: Request, user_id: str | None, event: str, detail=None) -> None:
+    """One account event (durable log). Never raises, never holds a password; the address is only its hash."""
+    try:
+        account_events.record(user_id, event, ip_hash=_h(_ip(request)), detail=detail)
+    except Exception:
+        logger.warning("account event %s not recorded", event)
 
 
 def _limit(key: str, window: int, n: int) -> None:
@@ -198,6 +207,9 @@ def signup(body: SignupRequest, request: Request, bg: BackgroundTasks):
     else:
         bg.add_task(_send_link, acct["user_id"], "verify")
     logger.info("account created user_id=%s invited=%s", acct["user_id"], bool(invite))
+    _ev(request, acct["user_id"], "signup", {"invited": bool(invite)})
+    if invite:
+        _ev(request, acct["user_id"], "invite.redeem", {"via": "signup", "invite": invite.token[:6]})
     return JSONResponse(created, status_code=201)
 
 
@@ -215,12 +227,16 @@ def login(body: LoginRequest, request: Request):
     _limit(f"auth:login:acct-all:{who}", 3600, 60)
     ok, rehash = accounts.verify_or_dummy(body.password, acct["password_hash"] if acct else None)
     if not (acct and ok) or acct["kind"] != "human":      # a non-human account never signs in with a password
+        # the account id when the name matched one; what was typed is never logged (it may be a password or an email)
+        _ev(request, acct["user_id"] if acct else None, "login.failure", "bad credentials" if acct else "unknown account")
         raise HTTPException(401, _BAD_LOGIN)
     if rehash:
         accounts.set_password(acct["user_id"], body.password)
     if accounts.require_verified() and not acct["email_verified"]:
+        _ev(request, acct["user_id"], "login.failure", "email not verified")
         return JSONResponse({"detail": "Verify your email first: check your inbox for the link.",
                              "code": "email_not_verified"}, status_code=403)
+    _ev(request, acct["user_id"], "login.success")
     return _session(acct)
 
 
@@ -236,6 +252,7 @@ def verify_email(body: TokenRequest, request: Request):
     if not uid:
         raise HTTPException(400, "That verification link is invalid or has expired.")
     accounts.mark_verified(uid)
+    _ev(request, uid, "email.verify")
     return {"message": "Email verified. You can sign in."}
 
 
@@ -259,6 +276,7 @@ def forgot_password(body: EmailRequest, request: Request, bg: BackgroundTasks):
     # Per account and IP, so one caller cannot use up the owner's allowance; a looser cap covers all callers.
     if acct and accounts.reset_allowed(acct) and _quota((f"auth:forgot:acct:{_h(email)}:{_h(_ip(request))}", 3600, 3), (f"auth:forgot:acct-all:{_h(email)}", 3600, 10)):
         bg.add_task(_send_link, acct["user_id"], "reset")
+        _ev(request, acct["user_id"], "password.reset_requested")
     return _FORGOT_REPLY
 
 
@@ -279,6 +297,7 @@ def reset_password(body: ResetRequest, request: Request):
     accounts.set_password(uid, body.new_password)
     accounts.mark_verified(uid)                # they just proved the mailbox
     accounts.revoke_all(uid)
+    _ev(request, uid, "password.reset_completed")
     return {"message": "Password changed. Sign in again."}
 
 
@@ -298,6 +317,12 @@ def refresh(request: Request):
 @router.post("/logout")
 def logout(request: Request):
     raw = request.cookies.get(COOKIE, "")
+    uid = None
     if raw:
+        try:
+            uid = accounts.presented_user(raw)
+        except Exception:
+            uid = None
         accounts.revoke_presented(raw)
+    _ev(request, uid, "logout")
     return _clear(JSONResponse({"ok": True}))

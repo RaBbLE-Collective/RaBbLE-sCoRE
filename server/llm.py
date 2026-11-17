@@ -598,6 +598,20 @@ async def _stream_subprocess(
     if text:
         yield text
 
+# ── Usage notes ───────────────────────────────────────────────────────────────
+
+def _note(sink: dict | None, candidate: dict, usage: dict | None = None) -> None:
+    """Tell the caller which provider/model answered and what it said it spent (usage.py records it).
+    The sink is a plain dict the caller passes in: provider, model, tokens_in, tokens_out."""
+    if sink is None:
+        return
+    sink["provider"], sink["model"] = candidate["provider"], candidate["model"]
+    if isinstance(usage, dict):
+        if usage.get("prompt_tokens") is not None:
+            sink["tokens_in"] = usage["prompt_tokens"]
+        if usage.get("completion_tokens") is not None:
+            sink["tokens_out"] = usage["completion_tokens"]
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 async def stream_chat(
@@ -608,10 +622,12 @@ async def stream_chat(
     chain: list[dict] | None = None,
     max_tokens: int = 1024,
     extra_body: dict | None = None,
+    sink: dict | None = None,
 ) -> AsyncGenerator[str, None]:
     """Stream a chat response, yielding clean text chunks (SSE parsed server-side).
 
-    `chain` overrides the tier's model chain (the beam pins Groq for speed)."""
+    `chain` overrides the tier's model chain (the beam pins Groq for speed).
+    `sink`, if given, is filled with provider, model and (when the provider reports them) tokens_in/tokens_out."""
     model_tier = _ensure_tier(model_tier)
     candidates = _resolve_candidates(model_tier, chain, user)
     last_error = None
@@ -619,6 +635,7 @@ async def stream_chat(
         for index, candidate in enumerate(candidates, start=1):
             if _provider(candidate["provider"]).get("type") == "node":
                 import node  # lazy: node.py is the cloud side of the node link
+                _note(sink, candidate)
                 try:
                     async for chunk in node.stream_turn(candidate, messages, system_prompt):
                         yield chunk
@@ -632,6 +649,7 @@ async def stream_chat(
 
             # Subprocess providers (CC, Codex) bypass HTTP
             if _provider(candidate["provider"]).get("type") == "subprocess":
+                _note(sink, candidate)
                 try:
                     async for chunk in _stream_subprocess(candidate, messages, system_prompt):
                         yield chunk
@@ -644,6 +662,10 @@ async def stream_chat(
                     raise last_error
 
             meta = _log_request_start("stream_chat", model_tier, candidate, messages, stream=True, attempt=index, total=len(candidates))
+            _note(sink, candidate)
+            if sink is not None:
+                sink.pop("tokens_in", None)    # a fallback attempt must not inherit the failed one's numbers
+                sink.pop("tokens_out", None)
             try:
                 async with client.stream(
                     "POST",
@@ -654,6 +676,8 @@ async def stream_chat(
                         "messages":   _build_messages(system_prompt, messages),
                         "stream":     True,
                         "max_tokens": max_tokens,
+                        # openai and openrouter send token counts only when asked; groq always does (x_groq)
+                        **({"stream_options": {"include_usage": True}} if candidate["provider"] in ("openai", "openrouter") else {}),
                         **(extra_body or {}),
                     },
                     timeout=60,
@@ -676,6 +700,7 @@ async def stream_chat(
                             break
                         try:
                             chunk = json.loads(payload)
+                            _note(sink, candidate, chunk.get("usage") or (chunk.get("x_groq") or {}).get("usage"))
                             text = chunk["choices"][0]["delta"].get("content") or ""
                             if text:
                                 yield text
@@ -697,14 +722,16 @@ async def complete_chat(
     system_prompt: str,
     model_tier: str = "medium",
     user: dict | None = None,
+    sink: dict | None = None,
 ) -> str:
-    """Non-streaming completion — use for structured extraction."""
+    """Non-streaming completion — use for structured extraction. `sink`: see stream_chat."""
     model_tier = _ensure_tier(model_tier)
     candidates = _resolve_candidates(model_tier, None, user)
     last_error = None
     async with httpx.AsyncClient() as client:
         for index, candidate in enumerate(candidates, start=1):
             if _provider(candidate["provider"]).get("type") == "subprocess":
+                _note(sink, candidate)
                 try:
                     chunks = [c async for c in _stream_subprocess(candidate, messages, system_prompt)]
                     return "".join(chunks)
@@ -716,6 +743,7 @@ async def complete_chat(
                     raise last_error
 
             meta = _log_request_start("complete_chat", model_tier, candidate, messages, stream=False, attempt=index, total=len(candidates))
+            _note(sink, candidate)
             try:
                 response = await client.post(
                     _provider(candidate["provider"])["url"],
@@ -736,7 +764,9 @@ async def complete_chat(
                 raise last_error
             _log_response_status("complete_chat", meta, response.status_code, response.headers)
             if response.status_code == 200:
-                return response.json()["choices"][0]["message"]["content"]
+                body = response.json()
+                _note(sink, candidate, body.get("usage"))
+                return body["choices"][0]["message"]["content"]
             last_error = _response_error(response, meta)
             if _is_retryable_status(response.status_code) and index < len(candidates):
                 _log_fallback("complete_chat", meta, f"http_{response.status_code}")
@@ -753,6 +783,7 @@ async def chat_with_tools(
     tools: list[dict],
     model_tier: str = "medium",
     user: dict | None = None,
+    sink: dict | None = None,
 ) -> dict:
     """
     Function-calling completion. Returns either:
@@ -765,6 +796,7 @@ async def chat_with_tools(
     async with httpx.AsyncClient() as client:
         for index, candidate in enumerate(candidates, start=1):
             meta = _log_request_start("chat_with_tools", model_tier, candidate, messages, stream=False, attempt=index, total=len(candidates))
+            _note(sink, candidate)
             try:
                 response = await client.post(
                     _provider(candidate["provider"])["url"],
@@ -792,7 +824,9 @@ async def chat_with_tools(
                     continue
                 raise last_error
 
-            message = response.json()["choices"][0]["message"]
+            body = response.json()
+            _note(sink, candidate, body.get("usage"))
+            message = body["choices"][0]["message"]
             if message.get("tool_calls"):
                 call = message["tool_calls"][0]["function"]
                 return {

@@ -1,16 +1,24 @@
 """
 Per-device guest accounts and their shared daily turn budget.
 
-A guest is a real account (tier "guest", handle guest-xxxxxx) issued by a trusted
-caller holding GUEST_ISSUE_SECRET, e.g. a Pocket's first connect. Guests are pinned to
-Groq and kept out of sessions and workflows; all guests together get GUEST_DAILY_TURNS
-(default 400) model turns per UTC day on the beam and /chat.
+A guest is a real account (tier "guest", handle guest-xxxxxx) issued by a trusted caller holding
+GUEST_ISSUE_SECRET (POST /api/v1/users/guest). S347: guests are for TESTING only, not a product path. A Pocket
+pairs to a real member account (a device key, devices.py); the beam refuses guest keys and the shared
+BEAM_DEVICE_TOKEN unless BEAM_ALLOW_GUEST_POCKETS=true (default false; beam._authorize). The public Pocket
+flasher never mints guests: only the owner's own flash script does, with the secret from his own environment.
+
+Guests are pinned to Groq and kept out of sessions and workflows; all guests together get GUEST_DAILY_TURNS
+(default 400) model turns per UTC day on the beam and /chat. A refused guest turn is written to the account
+event log (guest.limit).
+
+The public WEB demo guest (shared id "guest", auth.DEMO_MODE) is not a guest account and does not use this module.
 """
 
 import os
 import secrets
 from datetime import datetime, timezone
 
+import account_events
 import db
 import groqmeter
 from fastapi import HTTPException
@@ -87,11 +95,11 @@ def take_turn(user_id: str) -> bool:
 def spend(user_id: str) -> str | None:
     """Let a guest turn through, or say why not. Groq's own rate-limit headers come first (guests
     stop when any window is past GUEST_GROQ_CUTOFF so members keep the headroom), then the
-    daily pools, which are all there is on a cold start."""
-    reason = groqmeter.guest_refusal()
+    daily pools, which are all there is on a cold start. A refusal is logged as a guest.limit account event."""
+    reason = groqmeter.guest_refusal() or (None if take_turn(user_id) else "daily guest allowance used up")
     if reason:
-        return reason
-    return None if take_turn(user_id) else "daily guest allowance used up"
+        account_events.record(user_id, "guest.limit", detail=reason)
+    return reason
 
 
 def take_issue_slot() -> bool:

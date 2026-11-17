@@ -42,7 +42,8 @@ async def create_device(body: DeviceRequest, user: dict = Depends(_owner)):
 
 @router.get("")
 async def list_devices(user: dict = Depends(_owner)):
-    return {"devices": devices.list_for(user["sub"]), "limit": devices.limit()}
+    return {"devices": devices.list_for(user["sub"]),
+            "limit": None if devices.is_exempt(user["sub"]) else devices.limit()}   # null = no limit (admin)
 
 
 @router.delete("/{device_id}")

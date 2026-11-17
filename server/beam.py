@@ -9,14 +9,20 @@ pinned for speed, the device's recent conversation), streams the reply text
 back as it's written, and speaks it (Groq Orpheus) in chunks so the first one
 plays while the rest is still being written.
 
-Auth: the device sends "Authorization: Bearer <token>". Accepted: the
-BEAM_DEVICE_TOKEN env value, a member API key, or a sCoRE JWT. Without one the
-beam refuses, even in DEMO_MODE (it spends speech quota); BEAM_ALLOW_GUEST=true
-opens it on a trusted LAN for bench testing.
+Auth: the device sends "Authorization: Bearer <token>". Accepted: a device key
+(rbdv_..., minted by a member for their Pocket), an entity account's key, or a
+member/admin JWT. A Pocket belongs to a real member account (S347): the shared
+BEAM_DEVICE_TOKEN and guest keys are refused unless BEAM_ALLOW_GUEST_POCKETS=true
+(testing only). The refusal closes with code 4401 and reason "key not accepted: ..."
+(or "device key required" when no key was sent). BEAM_ALLOW_GUEST=true opens the
+beam with no token on a trusted LAN for bench testing. Every turn, speech request
+and capture is metered per account (usage.py): over a limit the device gets
+error "USAGE LIMIT REACHED" before the model is called.
 
 Env:
   GROQ_API_KEY         speech-to-text, text-to-speech and the default chain
-  BEAM_DEVICE_TOKEN    the token a Pocket sends (>beam.token= on the device)
+  BEAM_DEVICE_TOKEN    the shared token (only honoured with BEAM_ALLOW_GUEST_POCKETS=true)
+  BEAM_ALLOW_GUEST_POCKETS  true: accept BEAM_DEVICE_TOKEN and guest-tier keys (testing only, default false)
   BEAM_ALLOW_GUEST     true: no token needed (local dev only)
   BEAM_LLM_CHAIN       provider:model,... (default Groq gpt-oss-20b, then gpt-oss-120b)
                        a linked, healthy laptop node (server/node.py) is tried first per turn
@@ -53,7 +59,10 @@ import groqmeter
 import guests
 import llm
 import node
+import pocket_store
 import translate
+import usage
+from fastapi import HTTPException
 from tools import server_time
 
 logger = logging.getLogger("rabble.beam")
@@ -125,24 +134,53 @@ def _pin_guest(user: dict) -> dict:
     return {**user, "llm_backend": guests.BACKEND} if guests.is_guest(user) else user
 
 
-def _authorize(ws: WebSocket) -> dict | None:
+REASON_NO_KEY = "device key required"
+REASON_BAD_KEY = "key not accepted: pair this Pocket with a member account"
+
+
+def _guest_pockets() -> bool:
+    """BEAM_ALLOW_GUEST_POCKETS=true (testing only, default false): the shared BEAM_DEVICE_TOKEN and
+    guest-tier keys are accepted again. Production leaves it off: a Pocket is paired to a member account."""
+    return os.getenv("BEAM_ALLOW_GUEST_POCKETS", "").lower() in ("1", "true", "yes")
+
+
+def _bearer(ws: WebSocket) -> str:
     header = ws.headers.get("authorization", "")
-    token = header[7:].strip() if header.lower().startswith("bearer ") else ""
+    return header[7:].strip() if header.lower().startswith("bearer ") else ""
+
+
+def _authorize(ws: WebSocket) -> dict | None:
+    """Who the device is, or None. Accepted: a device key (rbdv_, tied to a member account), an entity
+    account's key, a member or admin JWT. Refused: the shared BEAM_DEVICE_TOKEN, guest-tier keys and JWTs,
+    the shared admin key and plain member API keys, unless BEAM_ALLOW_GUEST_POCKETS=true (the first two
+    kinds only). BEAM_ALLOW_GUEST=true (no token, LAN bench) is a separate, older opt-in."""
+    token = _bearer(ws)
     device_token = os.getenv("BEAM_DEVICE_TOKEN", "").strip()
+    guests_ok = _guest_pockets()
     if token:
         if device_token and hmac.compare_digest(token.encode(), device_token.encode()):
-            return {"sub": "pocket", "name": "RaBbLE-Pocket", "tier": "pro"}
+            return {"sub": "pocket", "name": "RaBbLE-Pocket", "tier": "pro"} if guests_ok else None
         from auth_routes import verify_api_key  # avoid circular at module load
         user = verify_api_key(token)
         if user:
-            claims = {"sub": user["id"], "name": user["name"], "tier": user.get("tier", "free")}
+            tier = user.get("tier", "free")
+            if user["id"] == "admin":                       # the shared admin key is not an account
+                return None
+            if not (token.startswith("rbdv_") or tier == "entity" or (tier == "guest" and guests_ok)):
+                return None                                 # plain member API keys, and guests unless allowed
+            claims = {"sub": user["id"], "name": user["name"], "tier": tier}
             if user.get("device_id"):
                 claims["device_id"] = user["device_id"]
             return _pin_guest(claims)
         try:
-            return _pin_guest(auth.decode_token(token))
+            claims = auth.decode_token(token)
         except Exception:
             return None
+        if claims.get("tier") == "guest" and not guests_ok:
+            return None
+        if claims.get("sub") in ("guest", "pocket"):        # the shared demo guest and shared-token identities
+            return None
+        return _pin_guest(claims)
     if os.getenv("BEAM_ALLOW_GUEST", "").lower() in ("1", "true", "yes"):
         return {"sub": "guest", "name": "Guest", "tier": "free"}
     return None
@@ -339,6 +377,17 @@ class BeamSession:
     def history_key(self) -> str:
         return f"{self.user['sub']}:{self.device}"
 
+    def persist(self, what: str, fn, *args):
+        """Keep Pocket data for real member accounts only. A store failure is logged, never raised:
+        a turn or capture must not break because the portal copy could not be written."""
+        if not pocket_store.persists(self.user):
+            return None
+        try:
+            return fn(self.user["sub"], *args)
+        except Exception as exc:
+            logger.warning("beam could not persist %s: %s", what, type(exc).__name__)
+            return None
+
     # ── messages ──
 
     async def on_text(self, raw: str):
@@ -386,6 +435,12 @@ class BeamSession:
                 _kept[key] = left
             else:
                 _kept.pop(key, None)
+        elif kind == "new_convo":
+            # A fresh thread: forget this device's recent history (everyone) and rotate the kept
+            # conversation (members only; others get null).
+            _history.pop(self.history_key(), None)
+            cid = self.persist("new conversation", pocket_store.new_conversation, self.device)
+            await self.send({"type": "convo_new", "id": cid})
         elif kind == "turn.cancel":
             if turn == self.turn:
                 self.cancel_task()
@@ -404,6 +459,53 @@ class BeamSession:
         if self.task and not self.task.done():
             self.task.cancel()
         self.task = None
+
+    # ── usage ──
+
+    def rec(self, kind: str, **fields) -> None:
+        """One usage row for this account (never raises). The device is the name it sent in hello."""
+        usage.record(self.user, kind, device=self.device if self.device != "unknown" else None, **fields)
+
+    async def usage_ok(self, turn: int, kind: str, amount: float = 0.0) -> bool:
+        """The account's allowance, before the call. Over it, the device is told and nothing is spent."""
+        try:
+            usage.check(self.user, kind, amount)
+            return True
+        except HTTPException as exc:
+            logger.info("beam usage limit: user=%s kind=%s", self.user["sub"], kind)
+            await self.send({"type": "error", "turn": turn, "text": "USAGE LIMIT REACHED", "reason": str(exc.detail)})
+            return False
+
+    async def stt(self, pcm: bytes, workflow: str, timeout: float = 30) -> str:
+        t0 = time.monotonic()
+        status = 200
+        try:
+            return await (transcribe(self.client, pcm) if timeout == 30 else transcribe(self.client, pcm, timeout=timeout))
+        except SpeechLimited:
+            status = 429
+            raise
+        except Exception:
+            status = 500
+            raise
+        finally:
+            self.rec("stt", workflow=workflow, provider="groq", model=STT_MODEL, status=status,
+                     audio_s=len(pcm) / (RATE * 2), ms=(time.monotonic() - t0) * 1000)
+
+    async def tts(self, text: str) -> bytes:
+        t0 = time.monotonic()
+        status, pcm = 200, b""
+        try:
+            pcm = await synthesize(self.client, text, self.voice)
+            return pcm
+        except SpeechLimited:
+            status = 429
+            raise
+        except Exception:
+            status = 500
+            raise
+        finally:
+            self.rec("tts", workflow="voice", provider="groq", model=TTS_MODEL, status=status, chars=len(text),
+                     audio_s=len(pcm) / (RATE * 2), ms=(time.monotonic() - t0) * 1000)
 
     # ── a turn ──
 
@@ -431,7 +533,12 @@ class BeamSession:
                 if secs < 0.3:
                     await self.send({"type": "error", "turn": turn, "text": "TOO SHORT TO HEAR"})
                     return
-                text = await transcribe(self.client, pcm)
+                if not await self.usage_ok(turn, "stt", secs):   # the account's allowance, before any speech or model call
+                    return
+            if not await self.usage_ok(turn, "turn"):
+                return
+            if pcm is not None:
+                text = await self.stt(pcm, workflow)
                 marks["stt"] = time.monotonic() - t0
                 logger.info("beam heard %.1fs -> %r (%.2fs)", secs, text, marks["stt"])
                 if not text:
@@ -456,16 +563,27 @@ class BeamSession:
             speaker = asyncio.create_task(self.speak_chunks(turn, speech, marks, t0)) if self.speak else None
             chunker = Chunker()
             reply = []
-            async for piece in llm.stream_chat(messages, system, model_tier="fast",
-                                               chain=chain, user=self.user, max_tokens=600,
-                                               extra_body=LLM_EXTRA):
-                if "first_text" not in marks:
-                    marks["first_text"] = time.monotonic() - t0
-                reply.append(piece)
-                await self.send({"type": "reply", "turn": turn, "text": piece})
-                if speaker:
-                    for chunk in chunker.feed(piece):
-                        await speech.put(chunk)
+            sink: dict = {}
+            tl, ustatus = time.monotonic(), 499
+            try:
+                async for piece in llm.stream_chat(messages, system, model_tier="fast",
+                                                   chain=chain, user=self.user, max_tokens=600,
+                                                   extra_body=LLM_EXTRA, sink=sink):
+                    if "first_text" not in marks:
+                        marks["first_text"] = time.monotonic() - t0
+                    reply.append(piece)
+                    await self.send({"type": "reply", "turn": turn, "text": piece})
+                    if speaker:
+                        for chunk in chunker.feed(piece):
+                            await speech.put(chunk)
+                ustatus = 200
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                ustatus = 500
+                raise
+            finally:
+                self.rec("turn", workflow=workflow, status=ustatus, ms=(time.monotonic() - tl) * 1000, **sink)
             if speaker:
                 for chunk in chunker.flush():
                     await speech.put(chunk)
@@ -476,6 +594,8 @@ class BeamSession:
             if history is not None:
                 history.extend([{"role": "user", "content": text}, {"role": "assistant", "content": full}])
                 del history[:-2 * HISTORY_TURNS]
+                self.persist("turn", pocket_store.append_turns, self.device,
+                             [("user", text), ("assistant", full)])
             await self.send({"type": "done", "turn": turn})
             marks["done"] = time.monotonic() - t0
             logger.info("beam turn %s done: %s", turn, " ".join(f"{k}={v:.2f}s" for k, v in marks.items()))
@@ -507,8 +627,13 @@ class BeamSession:
                 if len(pcm) / (RATE * 2) < 0.3:
                     await self.send({"type": "error", "turn": turn, "text": "TOO SHORT TO HEAR"})
                     return
+                if not await self.usage_ok(turn, "stt", len(pcm) / (RATE * 2)):
+                    return
+            if not await self.usage_ok(turn, "turn"):   # the shaping call is a turn; checked up front so nothing is lost after the cost
+                return
+            if pcm is not None:
                 # Whisper takes long audio badly (and a body limit): 5 min at a time.
-                texts = [await transcribe(self.client, pcm[i:i + STT_SEGMENT_BYTES], timeout=120)
+                texts = [await self.stt(pcm[i:i + STT_SEGMENT_BYTES], "capture", timeout=120)
                          for i in range(0, len(pcm), STT_SEGMENT_BYTES)]
                 text = " ".join(t for t in texts if t)
             text = (text or "").strip()
@@ -526,6 +651,8 @@ class BeamSession:
             md = capture.assemble_note(note_id, created, self.device, source, duration, text, shaped)
             note = {"id": note_id, "title": capture.note_title(md), "md": md,
                     "path": capture.note_path(note_id, created), "ts": time.time()}
+            self.persist("note", pocket_store.save_note, note_id, self.device, note["title"], source,
+                         created.isoformat(), md, note["ts"])
             _keep_note(self.history_key(), note)   # kept first: the link may drop mid-send
             await self.send_note(turn, note)
             await self.send({"type": "done", "turn": turn})
@@ -551,17 +678,24 @@ class BeamSession:
         failure, so the note still goes out with the transcript alone."""
         system, messages = capture.build_prompt(transcript, source)
 
+        sink: dict = {}
+
         async def collect() -> str:
             return "".join([p async for p in llm.stream_chat(
                 messages, system, model_tier="fast", chain=self.chain,
-                user=self.user, max_tokens=2000, extra_body=LLM_EXTRA)])
+                user=self.user, max_tokens=2000, extra_body=LLM_EXTRA, sink=sink)])
+        t0, status = time.monotonic(), 200
         try:
             return capture.parse_shaped(await asyncio.wait_for(collect(), SHAPE_TIMEOUT_S))
         except asyncio.CancelledError:
+            status = 499
             raise
         except Exception as exc:   # includes the timeout
+            status = 500
             logger.warning("beam capture shaping failed: %r", exc)
             return None
+        finally:
+            self.rec("turn", workflow="capture", status=status, ms=(time.monotonic() - t0) * 1000, **sink)
 
     async def send_note(self, turn: int, note: dict):
         parts = capture.split_parts(note["md"])
@@ -586,7 +720,12 @@ class BeamSession:
             if chunk and not quiet:
                 text = _speakable(chunk)
                 if text:
-                    nxt = asyncio.create_task(synthesize(self.client, text, self.voice))
+                    try:
+                        usage.check(self.user, "tts")
+                        nxt = asyncio.create_task(self.tts(text))
+                    except HTTPException:
+                        logger.info("beam TTS over the usage limit: rest of the reply is text only")
+                        quiet = True
             if pending:
                 try:
                     pcm = await pending
@@ -614,8 +753,10 @@ class BeamSession:
 async def beam(ws: WebSocket):
     user = _authorize(ws)
     if not user:
-        logger.warning("beam refused: no valid token from %s", ws.client.host if ws.client else "?")
-        await ws.close(code=4401, reason="device token required")
+        presented = bool(_bearer(ws))
+        logger.warning("beam refused: %s from %s", "key not accepted" if presented else "no key",
+                       ws.client.host if ws.client else "?")
+        await ws.close(code=4401, reason=REASON_BAD_KEY if presented else REASON_NO_KEY)
         return
     await ws.accept()
     session = BeamSession(ws, user)
