@@ -241,3 +241,49 @@ def test_entity_rotation_refuses_a_human(env, monkeypatch):
                                           "password": "correct horse battery", "invite_token": tok})
     with pytest.raises(SystemExit):
         run_entity(monkeypatch, ["--rotate-key"], ["person1"])
+
+
+# ── revoking guests ────────────────────────────────────────────────────────────
+
+import revoke_guests  # noqa: E402
+
+
+def _guest(n):
+    import users
+    key = f"rbbl_guestkey_{n}"
+    users.create_user(users.UserProfile(id=f"g{n}", handle=f"guest-{n}", display_name="Guest", join_date="2026-01-01",
+                                        intention="", api_key=key, tier="guest"))
+    db.execute("INSERT INTO guest_turns_by_user (day, user_id, n) VALUES ('2026-11-17', ?, 3)", (f"g{n}",))
+    return key
+
+
+def run_revoke(monkeypatch, argv, confirm):
+    monkeypatch.setattr(sys, "argv", ["revoke_guests"] + argv)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *_: confirm)
+    revoke_guests.main()
+
+
+def test_revoke_guests_ends_their_keys_and_spares_everyone_else(env, monkeypatch, capsys):
+    k1, k2 = _guest(1), _guest(2)
+    make(monkeypatch)                                                      # the Architect is not a guest
+    assert env.get("/api/v1/auth/me", headers={"X-API-Key": k1}).status_code == 200
+    run_revoke(monkeypatch, [], "REVOKE")
+    assert "Revoked 2 guest(s); 0 left." in capsys.readouterr().out
+    assert env.get("/api/v1/auth/me", headers={"X-API-Key": k1}).status_code == 401
+    assert env.get("/api/v1/auth/me", headers={"X-API-Key": k2}).status_code == 401
+    assert db.query_one("SELECT COUNT(*) AS n FROM guest_turns_by_user")["n"] == 0
+    assert login(env, "architect", PW).status_code == 200
+
+
+def test_revoke_guests_needs_the_word_and_a_terminal(env, monkeypatch):
+    _guest(1)
+    with pytest.raises(SystemExit):
+        run_revoke(monkeypatch, [], "yes")
+    assert db.query_one("SELECT COUNT(*) AS n FROM users WHERE tier = 'guest'")["n"] == 1
+    run_revoke(monkeypatch, ["--dry-run"], "REVOKE")
+    assert db.query_one("SELECT COUNT(*) AS n FROM users WHERE tier = 'guest'")["n"] == 1
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    with pytest.raises(SystemExit):
+        revoke_guests.main()

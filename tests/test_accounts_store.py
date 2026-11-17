@@ -71,3 +71,21 @@ def test_restore_merge_keeps_local_revocations(data_dir):
     db.conn()
     assert accounts.peek_token(reset, "reset") is None
     assert accounts.rotate_refresh(refresh) is None
+
+
+def test_export_and_restore_merge_keep_devices(data_dir):
+    """Local-only devices are added by a late restore, and a revocation made locally stays revoked."""
+    import devices
+    db.conn()
+    a = accounts.create_account("mark", "m@example.com", "correct horse battery")
+    kept = devices.create(a["user_id"], "old")
+    snap = data_dir / "snap.db"
+    db.backup(snap)                                      # old device live in the snapshot
+    new = devices.create(a["user_id"], "new")            # local-only since
+    devices.revoke(a["user_id"], kept["id"])             # revoked locally since
+    assert {r["id"] for r in db.export_json()["devices"]} == {kept["id"], new["id"]}
+    db.replace_with(snap.read_bytes(), merge_local=True)
+    db.close()
+    db.conn()
+    assert devices.resolve(kept["key"]) is None
+    assert devices.resolve(new["key"])["id"] == a["user_id"]

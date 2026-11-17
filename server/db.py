@@ -331,7 +331,7 @@ def clear_dirty() -> None:
     dirty_since = None
 
 
-EXPORT_TABLES = ("users", "invites", "accounts", "guest_turns", "guest_turns_by_user", "guest_issue", "r2_usage", "meta")
+EXPORT_TABLES = ("users", "invites", "accounts", "guest_turns", "guest_turns_by_user", "guest_issue", "r2_usage", "meta", "devices")
 
 
 def export_json() -> dict:
@@ -398,6 +398,14 @@ def replace_with(snapshot: bytes, merge_local: bool) -> None:
                     use = ", ".join(x for x in tcols if x in tl)
                     c.execute(f"INSERT OR IGNORE INTO main.{table} ({use}) SELECT {use} FROM loc.{table} "
                               "WHERE user_id NOT IN (SELECT id FROM skip_ids)")
+                # Device keys: local-only devices are added; a revocation made locally stays revoked.
+                dcols = [r[1] for r in c.execute("PRAGMA main.table_info(devices)")]
+                dl = {r[1] for r in c.execute("PRAGMA loc.table_info(devices)")}
+                use = ", ".join(x for x in dcols if x in dl)
+                c.execute(f"INSERT OR IGNORE INTO main.devices ({use}) SELECT {use} FROM loc.devices "
+                          "WHERE user_id NOT IN (SELECT id FROM skip_ids)")
+                c.execute("UPDATE main.devices AS m SET revoked = 1 FROM loc.devices AS l "
+                          "WHERE m.id = l.id AND l.revoked = 1")
                 c.execute("UPDATE main.auth_tokens AS m SET consumed = 1 FROM loc.auth_tokens AS l "
                           "WHERE m.token_hash = l.token_hash AND l.consumed = 1")
                 c.execute("UPDATE main.refresh_tokens AS m SET revoked = 1 FROM loc.refresh_tokens AS l "

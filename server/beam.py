@@ -135,7 +135,10 @@ def _authorize(ws: WebSocket) -> dict | None:
         from auth_routes import verify_api_key  # avoid circular at module load
         user = verify_api_key(token)
         if user:
-            return _pin_guest({"sub": user["id"], "name": user["name"], "tier": user.get("tier", "free")})
+            claims = {"sub": user["id"], "name": user["name"], "tier": user.get("tier", "free")}
+            if user.get("device_id"):
+                claims["device_id"] = user["device_id"]
+            return _pin_guest(claims)
         try:
             return _pin_guest(auth.decode_token(token))
         except Exception:

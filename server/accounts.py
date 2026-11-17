@@ -24,7 +24,8 @@ Env (all read per call, so none needs a restart except JWT_SECRET):
   AUTH_IP_HEADER           optional header naming the client IP behind a proxy (e.g. x-forwarded-for;
                            the LAST entry is used). Unset = the socket peer. Only set it behind a
                            proxy you control: a client can forge it otherwise.
-  MAIL_PROVIDER / MAIL_*   see mailer.py. Unset = no mail is sent (NullMailer); "console" prints links, dev only.
+  MAIL_PROVIDER / MAIL_*   see mailer.py. Unset = no mail is sent (NullMailer); "console" prints links, dev only;
+                           "resend" sends through Resend and needs RESEND_API_KEY (secret) and MAIL_FROM.
   REFRESH_GRACE_SECONDS    a refresh token used again within this many seconds (two tabs, a retry) is not
                            treated as theft; default 10.
   SESSION_CACHE_SECONDS    how long an access JWT's revocation check is cached per account, default 5. A logout

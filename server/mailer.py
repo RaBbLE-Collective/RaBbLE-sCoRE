@@ -12,12 +12,20 @@ Seam for a real sender: subclass Mailer, then register it in _SENDERS under a MA
 An unknown MAIL_PROVIDER, or MAIL_* set with no provider, raises: a misconfigured prod must not
 quietly fall back.
 
+ResendMailer (MAIL_PROVIDER=resend) posts to Resend's HTTPS API. It needs RESEND_API_KEY and MAIL_FROM,
+and get_mailer() raises RuntimeError naming whichever is missing. It retries once on a network error or
+5xx, never on 4xx, and raises on failure. It logs only the status, Resend's error name and the subject:
+never the key, the message, the link or the recipient.
+
 Env: MAIL_PROVIDER (name in _SENDERS, or "console"; unset = nothing is sent), MAIL_FROM (sender
-address, for real senders).
+address, for real senders), RESEND_API_KEY (secret, for "resend").
 """
 
 import logging
 import os
+import time
+
+import httpx
 
 logger = logging.getLogger("rabble.mailer")
 
@@ -46,7 +54,51 @@ class ConsoleMailer(Mailer):
         print(f"[mail:console] to={to} subject={subject}\n{text}", flush=True)
 
 
-_SENDERS: dict[str, type[Mailer]] = {}   # "smtp": SmtpMailer, ... (registered by the sender's module)
+_RESEND_URL = "https://api.resend.com/emails"
+
+
+def _post(url: str, headers: dict, body: dict, timeout: float) -> tuple[int, dict]:
+    """The only network call of ResendMailer (tests replace it). Returns (status, json or {})."""
+    r = httpx.post(url, headers=headers, json=body, timeout=timeout)
+    try:
+        data = r.json()
+    except ValueError:
+        data = {}
+    return r.status_code, data if isinstance(data, dict) else {}
+
+
+class ResendMailer(Mailer):
+    """MAIL_PROVIDER=resend. Needs RESEND_API_KEY and MAIL_FROM; a missing one raises at construction."""
+
+    def __init__(self):
+        for name in ("RESEND_API_KEY", "MAIL_FROM"):
+            if not os.getenv(name, "").strip():
+                raise RuntimeError(f"MAIL_PROVIDER=resend needs {name}")
+        self._key = os.environ["RESEND_API_KEY"].strip()
+        self._from = os.environ["MAIL_FROM"].strip()
+
+    def send(self, to: str, subject: str, text: str) -> None:
+        headers = {"Authorization": f"Bearer {self._key}", "Content-Type": "application/json"}
+        body = {"from": self._from, "to": [to], "subject": subject, "text": text}
+        for attempt in (1, 2):
+            try:
+                status, data = _post(_RESEND_URL, headers, body, 10)
+            except Exception as e:   # network error: log the type only, never the message
+                status, data = 0, {}
+                logger.warning("resend network error (%s): subject=%s", type(e).__name__, subject)
+            else:
+                if 200 <= status < 300:
+                    return
+                detail = str(data.get("name") or data.get("message") or "")[:100]
+                logger.warning("resend failed: status=%s error=%s subject=%s", status, detail, subject)
+            if attempt == 1 and (status == 0 or status >= 500):
+                time.sleep(1)
+                continue
+            break
+        raise RuntimeError(f"resend send failed (status {status})")
+
+
+_SENDERS: dict[str, type[Mailer]] = {"resend": ResendMailer}
 _console = ConsoleMailer()
 _null = NullMailer()
 _override: Mailer | None = None          # tests

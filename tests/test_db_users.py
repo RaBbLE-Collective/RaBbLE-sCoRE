@@ -84,7 +84,7 @@ def test_migrations_are_recorded_and_idempotent(data_dir):
     db.close()
     db.conn()
     rows = db.query("SELECT version FROM schema_migrations")
-    assert [r["version"] for r in rows] == ["0001_init", "0002_guest_caps", "0003_updated_at", "0004_accounts"]
+    assert [r["version"] for r in rows] == ["0001_init", "0002_guest_caps", "0003_updated_at", "0004_accounts", "0005_devices"]
 
 
 @sqlite_only

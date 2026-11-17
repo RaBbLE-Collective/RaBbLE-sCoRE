@@ -109,6 +109,8 @@ async def require_user(
                 "handle": user.get("handle", ""),
                 "tier":   user.get("tier", "free"),
             }
+            if user.get("device_id"):
+                claims["device_id"] = user["device_id"]
             if claims["tier"] == "guest":
                 claims["llm_backend"] = _GUEST["llm_backend"]   # per-device guests: Groq only too
             return claims
