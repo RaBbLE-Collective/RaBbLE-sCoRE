@@ -152,7 +152,7 @@ def test_concurrent_first_boot(backend):
                                   stderr=subprocess.PIPE, text=True) for _ in range(3)]
         outs = [p.communicate(timeout=120) + (p.returncode,) for p in procs]
         assert all(rc == 0 for _, _, rc in outs), [e[-300:] for _, e, _ in outs]
-        assert {o.strip() for o, _, _ in outs} == {"3"}
+        assert {o.strip() for o, _, _ in outs} == {str(len(os.listdir(os.path.join(SERVER, "migrations"))))}
     finally:
         import psycopg
         with psycopg.connect(env["DATABASE_URL"], autocommit=True) as c:

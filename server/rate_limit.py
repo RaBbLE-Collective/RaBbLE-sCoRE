@@ -20,7 +20,22 @@ TIER_WEIGHT = {"fast": 1, "medium": 2, "strong": 5}
 IP_LIMITS = {"per_minute": 20, "per_hour": 300}
 
 
+_last_prune = 0.0
+
+
+def _prune() -> None:
+    """Drop keys with nothing inside the longest window (a day), at most once a minute."""
+    global _last_prune
+    now = time.monotonic()
+    if now - _last_prune < 60:
+        return
+    _last_prune = now
+    for k in [k for k, dq in _windows.items() if not dq or dq[-1] < now - 86400]:
+        _windows.pop(k, None)
+
+
 def _evict_and_count(key: str, window_seconds: int) -> int:
+    _prune()
     now = time.monotonic()
     dq = _windows[key]
     cutoff = now - window_seconds
@@ -57,3 +72,13 @@ def apply_user_limit(user_id: str, model_tier: str = "fast", user_tier: str = "f
 def apply_ip_limit(ip: str) -> None:
     _check(f"ip:{ip}:m",  60,   IP_LIMITS["per_minute"], f"ip-{ip}-minute")
     _check(f"ip:{ip}:h",  3600, IP_LIMITS["per_hour"],   f"ip-{ip}-hour")
+
+
+def apply_limit(key: str, window_seconds: int, max_requests: int, label: str) -> None:
+    """Public sliding-window check for callers outside the chat paths (account sign-in)."""
+    _check(key, window_seconds, max_requests, label)
+
+
+def peek(key: str, window_seconds: int, max_requests: int) -> bool:
+    """True if one more hit would pass. Does not count a hit (used where an over-limit must stay silent)."""
+    return _evict_and_count(key, window_seconds) < max_requests

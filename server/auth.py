@@ -69,19 +69,24 @@ def startup_guard(argv: list[str] | None = None) -> None:
         )
 
 
-def make_token(user_id: str, name: str, tier: str = "free", handle: str = "") -> str:
-    return jwt.encode(
-        {"sub": user_id, "name": name, "handle": handle, "tier": tier, "exp": time.time() + TTL},
-        SECRET,
-        algorithm=ALGORITHM,
-    )
+def make_token(user_id: str, name: str, tier: str = "free", handle: str = "", acct: bool = False) -> str:
+    now = time.time()
+    claims = {"sub": user_id, "name": name, "handle": handle, "tier": tier, "iat": now, "exp": now + TTL}
+    if acct:
+        claims["acct"] = True   # sign-in account: decode_token also checks it was not revoked (accounts.py)
+    return jwt.encode(claims, SECRET, algorithm=ALGORITHM)
 
 
 def decode_token(token: str) -> dict:
     try:
-        return jwt.decode(token, SECRET, algorithms=[ALGORITHM])
+        claims = jwt.decode(token, SECRET, algorithms=[ALGORITHM])
     except JWTError:
         raise HTTPException(401, "Invalid or expired token")
+    if claims.get("acct"):
+        import accounts   # avoid circular at module load
+        if not accounts.session_valid(claims):
+            raise HTTPException(401, "Invalid or expired token")
+    return claims
 
 
 async def require_user(

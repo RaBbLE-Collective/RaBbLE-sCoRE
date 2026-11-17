@@ -331,7 +331,7 @@ def clear_dirty() -> None:
     dirty_since = None
 
 
-EXPORT_TABLES = ("users", "invites", "guest_turns", "guest_turns_by_user", "guest_issue", "r2_usage", "meta")
+EXPORT_TABLES = ("users", "invites", "accounts", "guest_turns", "guest_turns_by_user", "guest_issue", "r2_usage", "meta")
 
 
 def export_json() -> dict:
@@ -371,13 +371,20 @@ def replace_with(snapshot: bytes, merge_local: bool) -> None:
             try:
                 _migrate(c)
                 c.execute("ATTACH ? AS loc", (str(path),))
+                # A local-only account whose username or email the snapshot already uses is dropped whole:
+                # its users row too, or it would be left behind with no account. (Its tokens are not merged.)
+                c.execute("CREATE TEMP TABLE skip_ids AS SELECT l.user_id AS id FROM loc.accounts AS l "
+                          "WHERE l.user_id NOT IN (SELECT user_id FROM main.accounts) AND "
+                          "(l.username_lower IN (SELECT username_lower FROM main.accounts) "
+                          "OR l.email_lower IN (SELECT email_lower FROM main.accounts))")
                 # Rows on both sides: the newer updated_at wins; rows only local are added.
-                for table, key in (("users", "id"), ("invites", "token")):
+                for table, key in (("users", "id"), ("invites", "token"), ("accounts", "user_id")):
                     cols = [r[1] for r in c.execute(f"PRAGMA main.table_info({table})")]
                     lcols = {r[1] for r in c.execute(f"PRAGMA loc.table_info({table})")}
                     use = ", ".join(x for x in cols if x in lcols)
-                    c.execute(f"INSERT INTO main.{table} ({use}) SELECT {use} FROM loc.{table} "
-                              f"WHERE {key} NOT IN (SELECT {key} FROM main.{table})")
+                    skip = f" AND {key} NOT IN (SELECT id FROM skip_ids)" if table in ("users", "accounts") else ""
+                    c.execute(f"INSERT OR IGNORE INTO main.{table} ({use}) SELECT {use} FROM loc.{table} "
+                              f"WHERE {key} NOT IN (SELECT {key} FROM main.{table}){skip}")
                     # consumed state (invites) only moves forward: it is excluded from the newer-wins copy
                     sets = ", ".join(f"{x} = l.{x}" for x in cols
                                      if x in lcols and x != key and not (table == "invites" and x in ("consumed", "consumed_by")))

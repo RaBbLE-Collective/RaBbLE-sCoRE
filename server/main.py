@@ -22,6 +22,7 @@ import workflows as wf_store
 import users as user_store
 import sessions as session_store
 from auth_routes import router as auth_router, member_router
+from accounts_routes import router as accounts_router
 from beam import router as beam_router
 from node import router as node_router
 
@@ -96,12 +97,13 @@ _CORS_ORIGINS = _cors_origins()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_CORS_ORIGINS,
-    allow_credentials="*" not in _CORS_ORIGINS,   # auth is Bearer/X-API-Key, never cookies
+    allow_credentials="*" not in _CORS_ORIGINS,   # chat auth is Bearer/X-API-Key; only the /api/v1/auth refresh cookie is a cookie (same-origin via the Worker proxy)
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 app.include_router(auth_router)
+app.include_router(accounts_router)   # AC2 sign-in (accounts.py)
 app.include_router(member_router)
 app.include_router(beam_router)   # RaBbLE-Pocket's voice link (beam.py)
 app.include_router(node_router)   # laptop node link (node.py)
