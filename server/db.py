@@ -390,6 +390,20 @@ def replace_with(snapshot: bytes, merge_local: bool) -> None:
                                      if x in lcols and x != key and not (table == "invites" and x in ("consumed", "consumed_by")))
                     c.execute(f"UPDATE main.{table} AS m SET {sets} FROM loc.{table} AS l "
                               f"WHERE m.{key} = l.{key} AND l.updated_at > m.updated_at")
+                # Token state only moves forward: a spend or revocation made locally since the snapshot
+                # must survive it (a revoked refresh family or a used reset link must not come back).
+                for table in ("auth_tokens", "refresh_tokens"):
+                    tcols = [r[1] for r in c.execute(f"PRAGMA main.table_info({table})")]
+                    tl = {r[1] for r in c.execute(f"PRAGMA loc.table_info({table})")}
+                    use = ", ".join(x for x in tcols if x in tl)
+                    c.execute(f"INSERT OR IGNORE INTO main.{table} ({use}) SELECT {use} FROM loc.{table} "
+                              "WHERE user_id NOT IN (SELECT id FROM skip_ids)")
+                c.execute("UPDATE main.auth_tokens AS m SET consumed = 1 FROM loc.auth_tokens AS l "
+                          "WHERE m.token_hash = l.token_hash AND l.consumed = 1")
+                c.execute("UPDATE main.refresh_tokens AS m SET revoked = 1 FROM loc.refresh_tokens AS l "
+                          "WHERE m.token_hash = l.token_hash AND l.revoked = 1")
+                c.execute("UPDATE main.refresh_tokens AS m SET used = 1, used_at = l.used_at FROM loc.refresh_tokens AS l "
+                          "WHERE m.token_hash = l.token_hash AND l.used = 1 AND m.used = 0")
                 c.execute("UPDATE main.invites AS m SET consumed = 1, consumed_by = COALESCE(m.consumed_by, l.consumed_by), "
                           "updated_at = MAX(m.updated_at, l.updated_at) FROM loc.invites AS l "
                           "WHERE m.token = l.token AND l.consumed = 1 AND m.consumed = 0")

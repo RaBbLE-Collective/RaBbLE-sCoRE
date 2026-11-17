@@ -35,6 +35,7 @@ CREATE TABLE refresh_tokens (
     created_at TEXT NOT NULL,
     expires_at TEXT NOT NULL,
     used       INTEGER NOT NULL DEFAULT 0,
+    used_at    TEXT NOT NULL DEFAULT '',
     revoked    INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX refresh_tokens_user ON refresh_tokens (user_id);

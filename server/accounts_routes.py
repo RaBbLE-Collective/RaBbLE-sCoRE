@@ -73,18 +73,37 @@ def _limit(key: str, window: int, n: int) -> None:
     rate_limit.apply_limit(key, window, n, key)
 
 
+def _quota(*rules: tuple[str, int, int]) -> bool:
+    """True and counts a hit on every rule if all have room; False (counting nothing) if any is full.
+    For mail that is skipped silently, so the reply never changes."""
+    if not all(rate_limit.peek(k, w, n) for k, w, n in rules):
+        return False
+    for k, w, n in rules:
+        _limit(k, w, n)
+    return True
+
+
+def _mail_ready() -> bool:
+    """False when links are required but no real sender is set: a signup now could never verify."""
+    try:
+        return not (accounts.require_verified() and isinstance(mailer.get_mailer(), mailer.NullMailer))
+    except RuntimeError:
+        return False
+
+
 def _send_link(user_id: str, kind: str) -> None:
     """Runs in the background so the reply (and its timing) is the same whether or not mail goes out."""
     try:
         acct = accounts.by_user_id(user_id)
         if not acct:
             return
+        m = mailer.get_mailer()            # before issue_token: a mail failure must not burn the last good link
         raw = accounts.issue_token(user_id, kind)
         path, subject, what = (("/verify-email", "Verify your RaBbLE email", "confirm your email")
                                if kind == "verify" else
                                ("/reset-password", "Reset your RaBbLE password", "choose a new password"))
         link = f"{accounts.link_base()}{path}?token={raw}"
-        mailer.get_mailer().send(acct["email"], subject,
+        m.send(acct["email"], subject,
                                  f"Hi {acct['username']},\n\nUse this link to {what}:\n{link}\n\n"
                                  "If you did not ask for this, ignore it.")
     except Exception:
@@ -136,14 +155,23 @@ def signup(body: SignupRequest, request: Request, bg: BackgroundTasks):
         raise HTTPException(422, problem)
     if accounts.count_accounts() >= accounts.account_cap():
         return JSONResponse({"detail": WAITLIST, "waitlist": True}, status_code=403)
-    # The reply is identical whether or not the email is already registered (and costs the same Argon2
-    # work), so signup cannot be used to find out who has an account. A taken username is public anyway.
+    if not _mail_ready():
+        raise HTTPException(503, "Sign-up is not open yet: email is not set up.")
+    # A taken username is answered first and the same whatever the email is, so it cannot be used to probe
+    # emails. After that the reply is identical (and costs the same Argon2 work) whether the email is new,
+    # has an unverified signup that this one replaces, or belongs to a verified account (which is told by mail).
+    existing = accounts.by_email(email)
+    own = existing["user_id"] if existing and not existing["email_verified"] else ""
+    if accounts.username_taken(username, except_user_id=own):
+        raise HTTPException(409, "That username is taken.")
     created = {"username": username, "email_verified": False, "verification_sent": True,
                "message": "Account created. Check your email for the verification link."}
-    if accounts.by_email(email):
+    if existing and existing["email_verified"]:
         accounts.hash_pw(body.password)
         bg.add_task(_send_already_registered, email)
         return JSONResponse(created, status_code=201)
+    if existing:
+        accounts.drop_unverified(email)        # never verified, so it proves nothing: the new signup replaces it
     try:
         acct = accounts.create_account(username, email, body.password)
     except ValueError as dup:
@@ -183,6 +211,11 @@ def login(body: LoginRequest, request: Request):
 @router.post("/verify-email")
 def verify_email(body: TokenRequest, request: Request):
     _limit(f"auth:verify:ip:{_ip(request)}", 3600, 30)
+    pending = accounts.peek_token(body.token, "verify")
+    acct = accounts.by_user_id(pending) if pending else None
+    if acct and not acct["email_verified"] and accounts.require_verified() \
+            and accounts.count_accounts() >= accounts.account_cap():
+        return JSONResponse({"detail": WAITLIST, "waitlist": True}, status_code=403)   # the link stays good
     uid = accounts.consume_token(body.token, "verify")
     if not uid:
         raise HTTPException(400, "That verification link is invalid or has expired.")
@@ -195,8 +228,8 @@ def resend_verification(body: EmailRequest, request: Request, bg: BackgroundTask
     _limit(f"auth:resend:ip:{_ip(request)}", 3600, 10)
     email = str(body.email).strip().lower()
     acct = accounts.by_email(email)
-    if acct and not acct["email_verified"] and rate_limit.peek(f"auth:resend:acct:{_h(email)}", 3600, 3):
-        _limit(f"auth:resend:acct:{_h(email)}", 3600, 3)
+    if acct and not acct["email_verified"] and _quota(
+            (f"auth:resend:acct:{_h(email)}:{_h(_ip(request))}", 3600, 3), (f"auth:resend:acct-all:{_h(email)}", 3600, 10)):
         bg.add_task(_send_link, acct["user_id"], "verify")
     return _RESEND_REPLY
 
@@ -207,8 +240,8 @@ def forgot_password(body: EmailRequest, request: Request, bg: BackgroundTasks):
     email = str(body.email).strip().lower()
     acct = accounts.by_email(email)
     # Over the per-account limit the mail is silently skipped: the reply never changes.
-    if acct and rate_limit.peek(f"auth:forgot:acct:{_h(email)}", 3600, 3):
-        _limit(f"auth:forgot:acct:{_h(email)}", 3600, 3)
+    # Per account and IP, so one caller cannot use up the owner's allowance; a looser cap covers all callers.
+    if acct and _quota((f"auth:forgot:acct:{_h(email)}:{_h(_ip(request))}", 3600, 3), (f"auth:forgot:acct-all:{_h(email)}", 3600, 10)):
         bg.add_task(_send_link, acct["user_id"], "reset")
     return _FORGOT_REPLY
 
@@ -236,7 +269,10 @@ def reset_password(body: ResetRequest, request: Request):
 @router.post("/refresh")
 def refresh(request: Request):
     raw = request.cookies.get(COOKIE, "")
-    rotated = accounts.rotate_refresh(raw) if raw else None
+    try:
+        rotated = accounts.rotate_refresh(raw) if raw else None
+    except accounts.RefreshRace:
+        return JSONResponse({"detail": "Refresh already in progress; try again."}, status_code=409)
     acct = accounts.by_user_id(rotated[0]) if rotated else None
     if not (rotated and acct):
         return _clear(JSONResponse({"detail": "Session expired. Sign in again."}, status_code=401))

@@ -6,7 +6,7 @@ An account is a users row (tier "free", handle = lowercase username, an unusable
 plus an accounts row (hash, verified flag, sessions_valid_after). Tokens are stored as sha256 only.
 
 Env (all read per call, so none needs a restart except JWT_SECRET):
-  ACCOUNT_CAP              max non-guest accounts (users.tier != "guest"; with REQUIRE_VERIFIED_EMAIL only
+  ACCOUNT_CAP              (0 closes signup) max non-guest accounts (users.tier != "guest"; with REQUIRE_VERIFIED_EMAIL only
                            verified ones count, and unverified accounts older than 7 days are purged); default 100. Past it, signup
                            answers with the persona waitlist line. Invalid value = 100.
   REQUIRE_VERIFIED_EMAIL   default true. When true, login is refused (403 email_not_verified) until the
@@ -20,6 +20,8 @@ Env (all read per call, so none needs a restart except JWT_SECRET):
                            the LAST entry is used). Unset = the socket peer. Only set it behind a
                            proxy you control: a client can forge it otherwise.
   MAIL_PROVIDER / MAIL_*   see mailer.py. Unset = no mail is sent (NullMailer); "console" prints links, dev only.
+  REFRESH_GRACE_SECONDS    a refresh token used again within this many seconds (two tabs, a retry) is not
+                           treated as theft; default 10.
   SESSION_CACHE_SECONDS    how long an access JWT's revocation check is cached per account, default 5. A logout
                            or reuse on this instance takes effect at once; another instance sees it within this.
   JWT_SECRET               signs the 8 h access JWT (auth.py).
@@ -56,19 +58,25 @@ _dummy_hash: str | None = None
 # ── env ────────────────────────────────────────────────────────────────────────
 
 def _flag(name: str, default: bool) -> bool:
+    """A flag that defaults on fails closed: only an explicit off value turns it off (a typo such as
+    'ture' or a word such as 'enabled' keeps it on). A flag that defaults off needs an explicit on."""
     v = os.getenv(name, "").strip().lower()
-    return default if not v else v in ("1", "true", "yes")
+    if not v:
+        return default
+    if default:
+        return v not in ("0", "false", "no", "off")
+    return v in ("1", "true", "yes", "on")
 
 
-def _int(name: str, default: int) -> int:
+def _int(name: str, default: int, minimum: int = 1) -> int:
     try:
-        return max(1, int(os.getenv(name, "")))
+        return max(minimum, int(os.getenv(name, "")))
     except ValueError:
         return default
 
 
 def account_cap() -> int:
-    return _int("ACCOUNT_CAP", 100)
+    return _int("ACCOUNT_CAP", 100, minimum=0)      # 0 closes signup
 
 
 def require_verified() -> bool:
@@ -224,6 +232,28 @@ def create_account(username: str, email: str, password: str) -> dict:
     return by_user_id(uid)
 
 
+def drop_unverified(email: str) -> bool:
+    """Delete an account whose email was never verified (it proves nothing), with its users row and
+    tokens, so the address and name are free for whoever really owns them. True if one was removed."""
+    acct = by_email(email)
+    if not acct or acct["email_verified"]:
+        return False
+    uid = acct["user_id"]
+    for t in ("auth_tokens", "refresh_tokens"):
+        db.execute(f"DELETE FROM {t} WHERE user_id = ?", (uid,))
+    db.execute("DELETE FROM accounts WHERE user_id = ?", (uid,))
+    db.execute("DELETE FROM users WHERE id = ?", (uid,))
+    _cache_drop(uid)
+    return True
+
+
+def username_taken(username: str, except_user_id: str = "") -> bool:
+    a = by_username(username)
+    if a and a["user_id"] != except_user_id:
+        return True
+    return username.lower() in user_store.list_handles() and not (a and a["user_id"] == except_user_id)
+
+
 def set_password(user_id: str, password: str) -> None:
     db.execute("UPDATE accounts SET password_hash = ?, updated_at = ? WHERE user_id = ?",
                (hash_pw(password), db.now_ts(), user_id))
@@ -292,6 +322,11 @@ def _bump_valid_after(user_id: str) -> None:
     _cache_drop(user_id)
 
 
+class RefreshRace(Exception):
+    """The token was already rotated a moment ago (a second tab or a retry). Not theft: the caller
+    answers 409 and leaves the cookie the first request just set."""
+
+
 def rotate_refresh(raw: str) -> Optional[tuple[str, str]]:
     """(user_id, new refresh token) or None. A token that was already rotated (or lost a race to be)
     revokes its whole family and kills the access JWTs: someone is replaying a stolen copy.
@@ -300,8 +335,14 @@ def rotate_refresh(raw: str) -> Optional[tuple[str, str]]:
     row = db.query_one("SELECT * FROM refresh_tokens WHERE token_hash = ?", (_sha(raw),))
     if not row or row["revoked"]:
         return None
-    if row["used"] or db.execute("UPDATE refresh_tokens SET used = 1 WHERE token_hash = ? AND used = 0 AND revoked = 0",
-                                 (row["token_hash"],)) != 1:
+    claimed = (not row["used"]) and db.execute(
+        "UPDATE refresh_tokens SET used = 1, used_at = ? WHERE token_hash = ? AND used = 0 AND revoked = 0",
+        (db.now_ts(), row["token_hash"])) == 1
+    if not claimed:
+        fresh = db.query_one("SELECT used_at FROM refresh_tokens WHERE token_hash = ?", (row["token_hash"],))
+        grace = _int("REFRESH_GRACE_SECONDS", 10, minimum=0)
+        if fresh and fresh["used_at"] and time.time() - _epoch(fresh["used_at"]) <= grace:
+            raise RefreshRace()
         _revoke_family(row["family_id"])
         _bump_valid_after(row["user_id"])
         logger.warning("refresh token reuse detected user_id=%s", row["user_id"])

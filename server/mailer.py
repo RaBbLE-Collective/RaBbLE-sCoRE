@@ -42,6 +42,7 @@ class ConsoleMailer(Mailer):
 
     def send(self, to: str, subject: str, text: str) -> None:
         self.outbox.append({"to": to, "subject": subject, "text": text})
+        del self.outbox[:-200]
         print(f"[mail:console] to={to} subject={subject}\n{text}", flush=True)
 
 

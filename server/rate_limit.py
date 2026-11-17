@@ -30,8 +30,10 @@ def _prune() -> None:
     if now - _last_prune < 60:
         return
     _last_prune = now
-    for k in [k for k, dq in _windows.items() if not dq or dq[-1] < now - 86400]:
-        _windows.pop(k, None)
+    for k in list(_windows.keys()):        # a snapshot: other threads may add keys meanwhile
+        dq = _windows.get(k)
+        if dq is not None and (not dq or dq[-1] < now - 86400):
+            _windows.pop(k, None)
 
 
 def _evict_and_count(key: str, window_seconds: int) -> int:

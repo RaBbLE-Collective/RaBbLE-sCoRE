@@ -19,6 +19,7 @@ def env(data_dir, monkeypatch):
     for k in ("ACCOUNT_CAP", "REQUIRE_VERIFIED_EMAIL", "AUTH_IP_HEADER", "MAIL_PROVIDER"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("DEMO_MODE", "false")
+    monkeypatch.setenv("REFRESH_GRACE_SECONDS", "0")     # reuse tests replay at once; grace has its own test
     rate_limit._windows.clear()
     box = mailer.ConsoleMailer()
     mailer.set_mailer(box)
@@ -85,7 +86,7 @@ def test_unverified_login_refused_unless_switched_off(env, monkeypatch):
 
 def test_duplicates(env):
     c, box = env
-    assert signup(c).status_code == 201
+    ready(c, box)
     assert signup(c, username="MARK", email="other@example.com").status_code == 409
     # a taken email gets the same 201 as a new one (M6); nothing is created, the owner is told by mail
     r = signup(c, username="other", email="MARK@example.com")
@@ -385,13 +386,24 @@ def test_null_mailer_logs_no_link(caplog):
     assert "SECRET123" not in caplog.text and "a@example.com" not in caplog.text
 
 
-def test_default_deploy_leaks_no_link(env, caplog, capsys):
-    """No MAIL_PROVIDER: signup and forgot send nothing anywhere readable."""
+def test_signup_refused_while_no_mailer_is_set(env, caplog, capsys):
+    """No MAIL_PROVIDER and verification required: signup says so instead of making accounts that can never
+    verify, and nothing readable is printed."""
     c, _ = env
     mailer.set_mailer(None)
     with caplog.at_level("DEBUG"):
-        assert signup(c).status_code == 201
+        assert signup(c).status_code == 503
         c.post("/api/v1/auth/forgot-password", json={"email": "mark@example.com"})
+    assert db.query_one("SELECT COUNT(*) AS n FROM accounts")["n"] == 0
+    assert "token=" not in caplog.text and "token=" not in capsys.readouterr().out
+
+
+def test_no_mailer_but_verification_off_still_leaks_nothing(env, monkeypatch, caplog, capsys):
+    c, _ = env
+    mailer.set_mailer(None)
+    monkeypatch.setenv("REQUIRE_VERIFIED_EMAIL", "false")
+    with caplog.at_level("DEBUG"):
+        assert signup(c).status_code == 201
     assert "token=" not in caplog.text and "token=" not in capsys.readouterr().out
 
 
@@ -511,3 +523,122 @@ def test_rate_limit_windows_are_pruned():
     rate_limit._last_prune = 0.0
     rate_limit.peek("anything", 60, 1)
     assert "old" not in rate_limit._windows and "empty" not in rate_limit._windows
+
+
+# ── second review (S346) ───────────────────────────────────────────────────────
+
+def test_taken_username_gives_no_email_oracle(env):
+    """A taken username answers 409 whether or not the email has an account."""
+    c, box = env
+    ready(c, box)                                                       # mark / mark@example.com, verified
+    a = signup(c, username="mark", email="mark@example.com")            # taken name, known email
+    b = signup(c, username="mark", email="nobody@example.com")         # taken name, unknown email
+    assert a.status_code == b.status_code == 409 and a.json() == b.json()
+
+
+def test_unverified_signup_is_replaced_not_blocking(env):
+    """Squatting: an unverified account on an email does not block, or survive, the real owner's signup."""
+    c, box = env
+    assert signup(c, username="squat", email="victim@example.com", password="attacker password 1").status_code == 201
+    assert signup(c, username="victim", email="victim@example.com", password="owners password 22").status_code == 201
+    assert db.query_one("SELECT COUNT(*) AS n FROM accounts")["n"] == 1
+    assert accounts.by_username("squat") is None and accounts.by_username("victim")
+    verify(c, box)
+    assert login(c, "victim", "attacker password 1").status_code == 401
+    assert login(c, "victim", "owners password 22").status_code == 200
+
+
+def test_retyping_your_own_unverified_signup_works(env):
+    c, box = env
+    assert signup(c).status_code == 201
+    assert signup(c).status_code == 201                                  # same name and email, lost the mail
+    assert db.query_one("SELECT COUNT(*) AS n FROM accounts")["n"] == 1
+    verify(c, box)
+
+
+def test_concurrent_refresh_is_not_theft(env, monkeypatch):
+    c, box = env
+    ready(c, box)
+    monkeypatch.setenv("REFRESH_GRACE_SECONDS", "10")
+    c1 = rt(login(c))
+    first = c.post("/api/v1/auth/refresh", headers=c1)
+    second = c.post("/api/v1/auth/refresh", headers=c1)                  # the other tab, same moment
+    assert first.status_code == 200 and second.status_code == 409
+    assert "set-cookie" not in second.headers                            # the cookie the first tab got survives
+    assert c.post("/api/v1/auth/refresh", headers=rt(first)).status_code == 200
+
+
+def test_forgot_limit_cannot_be_burned_by_another_caller(env):
+    c, box = env
+    ready(c, box)
+    n = len(box.outbox)
+    import os
+    os.environ["AUTH_IP_HEADER"] = "x-forwarded-for"
+    try:
+        for _ in range(4):
+            c.post("/api/v1/auth/forgot-password", json={"email": "mark@example.com"}, headers={"x-forwarded-for": "6.6.6.6"})
+        c.post("/api/v1/auth/forgot-password", json={"email": "mark@example.com"}, headers={"x-forwarded-for": "1.1.1.1"})
+    finally:
+        os.environ.pop("AUTH_IP_HEADER", None)
+    assert len(box.outbox) - n == 4                                      # 3 for the attacker's IP, then the owner's
+
+
+def test_verify_respects_the_cap(env, monkeypatch):
+    c, box = env
+    monkeypatch.setenv("ACCOUNT_CAP", "1")
+    assert signup(c, username="aaa", email="a@example.com").status_code == 201
+    tok_a = token_from(box)
+    assert signup(c, username="bbb", email="b@example.com").status_code == 201
+    tok_b = token_from(box)
+    assert c.post("/api/v1/auth/verify-email", json={"token": tok_a}).status_code == 200
+    r = c.post("/api/v1/auth/verify-email", json={"token": tok_b})
+    assert r.status_code == 403 and r.json()["waitlist"] is True
+    monkeypatch.setenv("ACCOUNT_CAP", "2")
+    assert c.post("/api/v1/auth/verify-email", json={"token": tok_b}).status_code == 200   # link was not spent
+
+
+@pytest.mark.parametrize("val,expect", [("on", True), ("enabled", True), ("ture", True), ("false", False), ("0", False), ("off", False)])
+def test_verification_flag_fails_closed(monkeypatch, val, expect):
+    monkeypatch.setenv("REQUIRE_VERIFIED_EMAIL", val)
+    assert accounts.require_verified() is expect
+
+
+def test_cap_zero_closes_signup(env, monkeypatch):
+    c, box = env
+    monkeypatch.setenv("ACCOUNT_CAP", "0")
+    r = signup(c)
+    assert r.status_code == 403 and r.json()["waitlist"] is True
+
+
+def test_failed_mail_does_not_burn_the_last_link(env):
+    c, box = env
+    assert signup(c).status_code == 201
+    old = token_from(box)
+    mailer.set_mailer(None)
+    import os
+    os.environ["MAIL_FROM"] = "x@example.com"                           # half-configured: get_mailer raises
+    try:
+        c.post("/api/v1/auth/resend-verification", json={"email": "mark@example.com"})
+    finally:
+        os.environ.pop("MAIL_FROM", None)
+    mailer.set_mailer(box)
+    assert c.post("/api/v1/auth/verify-email", json={"token": old}).status_code == 200
+
+
+def test_prune_survives_concurrent_inserts():
+    import threading
+    rate_limit._windows.clear()
+    stop = threading.Event()
+
+    def spam():
+        i = 0
+        while not stop.is_set():
+            rate_limit._windows[f"k{i}"]
+            i += 1
+    t = threading.Thread(target=spam); t.start()
+    try:
+        for _ in range(200):
+            rate_limit._last_prune = 0.0
+            rate_limit.peek("x", 60, 1)
+    finally:
+        stop.set(); t.join()

@@ -54,3 +54,20 @@ def test_cap_count_and_purge_on_both_backends(backend, data_dir, monkeypatch):
     accounts.purge_expired()
     assert [r["username"] for r in db.query("SELECT username FROM accounts")] == ["verified1"]
     assert db.query_one("SELECT COUNT(*) AS n FROM users")["n"] == 1
+
+
+def test_restore_merge_keeps_local_revocations(data_dir):
+    """A refresh family revoked and a reset token spent locally stay so after a late restore of an older snapshot."""
+    db.conn()
+    a = accounts.create_account("mark", "m@example.com", "correct horse battery")
+    reset = accounts.issue_token(a["user_id"], "reset")
+    refresh = accounts.issue_refresh(a["user_id"])
+    snap = data_dir / "snap.db"
+    db.backup(snap)                                      # tokens live, family unrevoked
+    accounts.consume_token(reset, "reset")
+    accounts.revoke_presented(refresh)
+    db.replace_with(snap.read_bytes(), merge_local=True)
+    db.close()
+    db.conn()
+    assert accounts.peek_token(reset, "reset") is None
+    assert accounts.rotate_refresh(refresh) is None
