@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+httpx
+python-dotenv
+python-jose[cryptography]
+cryptography
+bcrypt
+pydantic[email]
+tzdata
+psycopg[binary]>=3.2
+argon2-cffi>=23.1

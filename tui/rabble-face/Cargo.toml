@@ -1,0 +1,12 @@
+[package]
+name = "rabble-face"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+rabble-theme = { path = "../rabble-theme" }
+
+[dev-dependencies]
+serde_json.workspace = true

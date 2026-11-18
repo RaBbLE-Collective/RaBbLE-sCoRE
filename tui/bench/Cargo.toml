@@ -1,0 +1,10 @@
+[package]
+name = "bench"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[dependencies]
+rabble-tui = { path = "../rabble-tui" }
+ratatui.workspace = true
