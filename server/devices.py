@@ -87,6 +87,14 @@ def note_firmware(device_id: str, fw: str) -> None:
     db.execute("UPDATE devices SET fw = ?, fw_seen = ? WHERE id = ? AND revoked = 0", (fw, _now(), device_id))
 
 
+def rename(user_id: str, device_id: str, label: str) -> bool:
+    """Give a Pocket a new name. False if it is not this member's (or is gone)."""
+    label = " ".join(str(label).split())[:40]
+    if not label:
+        return False
+    return db.execute("UPDATE devices SET label = ? WHERE id = ? AND user_id = ? AND revoked = 0", (label, device_id, user_id)) > 0
+
+
 def report(user_id: str, device_id: str, fw: str) -> bool:
     """The member's computer reports a Pocket it can reach over USB (its firmware version): the same bookkeeping a beam hello does,
     for a Pocket that cannot reach sCoRE itself. False if the device is not this member's (or is gone)."""

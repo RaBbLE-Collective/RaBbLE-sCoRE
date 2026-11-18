@@ -338,3 +338,14 @@ def test_report_from_the_members_computer(env):
     assert row["fw"] == "0.1.2" and row["last_seen"]
     assert env.post("/api/v1/devices/nope/report", json={"fw": "1"}, headers=h).status_code == 404
     assert env.post(f"/api/v1/devices/{d['id']}/report", json={"fw": "1"}).status_code == 401   # no session
+
+
+def test_rename(env):
+    h = member(env)
+    d = mint(env, h, "Desk Pocket").json()
+    r = env.patch(f"/api/v1/devices/{d['id']}", json={"label": "  Mark's   Pocket  "}, headers=h)
+    assert r.status_code == 200 and r.json()["label"] == "Mark's Pocket"
+    assert env.get("/api/v1/devices", headers=h).json()["devices"][0]["label"] == "Mark's Pocket"
+    assert env.patch("/api/v1/devices/nope", json={"label": "x"}, headers=h).status_code == 404
+    assert env.patch(f"/api/v1/devices/{d['id']}", json={"label": ""}, headers=h).status_code == 422
+    assert env.patch(f"/api/v1/devices/{d['id']}", json={"label": "x"}).status_code == 401

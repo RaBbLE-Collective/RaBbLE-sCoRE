@@ -46,6 +46,15 @@ async def list_devices(user: dict = Depends(_owner)):
             "limit": None if devices.is_exempt(user["sub"]) else devices.limit()}   # null = no limit (admin)
 
 
+@router.patch("/{device_id}")
+async def rename_device(device_id: str, body: DeviceRequest, user: dict = Depends(_owner)):
+    _require_durable()
+    if not devices.rename(user["sub"], device_id, body.label):
+        raise HTTPException(404, "No such device")
+    audit.log(user["sub"], "device.rename", 200, tier=user.get("tier"), resource_id=device_id)
+    return {"id": device_id, "label": " ".join(body.label.split())[:40]}
+
+
 class ReportRequest(BaseModel):
     fw: str = Field(default="", max_length=40)
 
