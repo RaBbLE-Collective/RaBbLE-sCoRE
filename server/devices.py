@@ -4,7 +4,7 @@ here; the HTTP surface is devices_routes.py. Design: Grimoire log/plans/Accounts
 
 A key is "rbdv_" + 32 url-safe bytes, shown once; only its sha256 is stored. Using it resolves to the OWNER
 (id, name, handle and tier read live from users, so a tier change applies) plus a device_id, so usage counts
-against the owner. A revoked device, a missing owner or a guest owner is refused. Device keys are long-lived:
+against the owner. A revoked (deleted) device, a missing owner or a guest owner is refused. Device keys are long-lived:
 password reset and logout (accounts.revoke_all) do not end them, only the owner revoking the device does.
 A device never reaches /admin (its tier is capped below admin and _require_admin refuses a device_id) and
 cannot mint devices.
@@ -45,7 +45,8 @@ def _now() -> str:
 
 def _public(row: dict) -> dict:
     return {"id": row["id"], "label": row["label"], "created_at": row["created_at"],
-            "last_seen": row["last_seen"], "revoked": bool(row["revoked"])}
+            "last_seen": row["last_seen"], "revoked": bool(row["revoked"]),
+            "fw": row.get("fw", "") if hasattr(row, "get") else "", "fw_seen": row.get("fw_seen", "") if hasattr(row, "get") else ""}
 
 
 def is_exempt(user_id: str) -> bool:
@@ -71,15 +72,27 @@ def create(user_id: str, label: str) -> dict | None:
 
 
 def list_for(user_id: str) -> list[dict]:
-    return [_public(r) for r in db.query("SELECT * FROM devices WHERE user_id = ? ORDER BY created_at, id", (user_id,))]
+    return [_public(r) for r in db.query("SELECT * FROM devices WHERE user_id = ? AND revoked = 0 ORDER BY created_at, id", (user_id,))]
+
+
+def note_firmware(device_id: str, fw: str) -> None:
+    """Keep the firmware version a device reported (the beam hello's `fw`). Printable ASCII only, at most 40 characters:
+    it is shown in the portal, so nothing else is stored."""
+    fw = "".join(ch for ch in str(fw) if 32 < ord(ch) < 127)[:40]
+    if not fw:
+        return
+    db.execute("UPDATE devices SET fw = ?, fw_seen = ? WHERE id = ? AND revoked = 0", (fw, _now(), device_id))
 
 
 def revoke(user_id: str, device_id: str) -> bool:
-    """True if the caller owns the device (revoking twice is fine); False if it is not theirs or does not exist."""
+    """Revoking deletes the device: its key hash goes with the row, so the key is refused from then on and the
+    Pocket no longer appears in any list. True if the caller owned it; False if it is not theirs or does not exist
+    (so revoking twice answers 404 the second time). Pocket captures and conversations are kept; they name the
+    device only as text."""
     row = db.query_one("SELECT id FROM devices WHERE id = ? AND user_id = ?", (device_id, user_id))
     if not row:
         return False
-    db.execute("UPDATE devices SET revoked = 1 WHERE id = ?", (device_id,))
+    db.execute("DELETE FROM devices WHERE id = ?", (device_id,))
     _touched.pop(device_id, None)
     return True
 

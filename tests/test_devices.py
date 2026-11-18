@@ -59,10 +59,12 @@ def test_create_list_revoke(env):
     assert set(d) == {"id", "label", "key", "created_at"} and d["key"].startswith("rbdv_") and d["label"] == "Desk Pocket"
     listed = env.get("/api/v1/devices", headers=h).json()["devices"]
     assert len(listed) == 1 and "key" not in listed[0]
-    assert set(listed[0]) == {"id", "label", "created_at", "last_seen", "revoked"} and listed[0]["revoked"] is False
+    assert set(listed[0]) == {"id", "label", "created_at", "last_seen", "revoked", "fw", "fw_seen"} and listed[0]["revoked"] is False
+    assert listed[0]["fw"] == ""
     assert env.delete(f"/api/v1/devices/{d['id']}", headers=h).status_code == 200
     listed = env.get("/api/v1/devices", headers=h).json()["devices"]
-    assert len(listed) == 1 and listed[0]["revoked"] is True      # history stays
+    assert listed == []                                           # revoked Pockets are deleted, not listed
+    assert env.delete(f"/api/v1/devices/{d['id']}", headers=h).status_code == 404   # and gone for good
 
 
 def test_label_validation(env):
@@ -309,4 +311,17 @@ def test_store_roundtrip(store):
     assert devices.revoke(a["user_id"], d["id"]) is True
     assert devices.resolve(d["key"]) is None
     assert devices.revoke("other", d["id"]) is False
-    assert [r["id"] for r in db.export_json()["devices"]] == [d["id"]]
+    assert devices.list_for(a["user_id"]) == []
+    assert db.export_json()["devices"] == []              # the row is gone from the database, not flagged
+
+
+def test_firmware_version_is_kept_per_device(store):
+    a = accounts.create_account("mark", "m@example.com", PW)
+    d = devices.create(a["user_id"], "P1")
+    devices.note_firmware(d["id"], "0.1.2")
+    row = devices.list_for(a["user_id"])[0]
+    assert row["fw"] == "0.1.2" and row["fw_seen"]
+    devices.note_firmware(d["id"], "0.1.3-dev.abc1234\r\n<b>x</b>" + "9" * 80)   # junk and length are cut
+    assert devices.list_for(a["user_id"])[0]["fw"].startswith("0.1.3-dev.abc1234") and len(devices.list_for(a["user_id"])[0]["fw"]) <= 40
+    devices.note_firmware(d["id"], "")                                              # an empty report changes nothing
+    assert devices.list_for(a["user_id"])[0]["fw"].startswith("0.1.3-dev")

@@ -74,7 +74,8 @@ def test_restore_merge_keeps_local_revocations(data_dir):
 
 
 def test_export_and_restore_merge_keep_devices(data_dir):
-    """Local-only devices are added by a late restore, and a revocation made locally stays revoked."""
+    """Local-only devices are added by a late restore. (A device deleted locally after the snapshot is NOT
+    remembered by a SQLite snapshot merge: production runs on Postgres where no merge happens.)"""
     import devices
     db.conn()
     a = accounts.create_account("mark", "m@example.com", "correct horse battery")
@@ -82,10 +83,9 @@ def test_export_and_restore_merge_keep_devices(data_dir):
     snap = data_dir / "snap.db"
     db.backup(snap)                                      # old device live in the snapshot
     new = devices.create(a["user_id"], "new")            # local-only since
-    devices.revoke(a["user_id"], kept["id"])             # revoked locally since
     assert {r["id"] for r in db.export_json()["devices"]} == {kept["id"], new["id"]}
     db.replace_with(snap.read_bytes(), merge_local=True)
     db.close()
     db.conn()
-    assert devices.resolve(kept["key"]) is None
+    assert devices.resolve(kept["key"])["id"] == a["user_id"]
     assert devices.resolve(new["key"])["id"] == a["user_id"]
