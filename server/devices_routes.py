@@ -46,6 +46,29 @@ async def list_devices(user: dict = Depends(_owner)):
             "limit": None if devices.is_exempt(user["sub"]) else devices.limit()}   # null = no limit (admin)
 
 
+@router.patch("/{device_id}")
+async def rename_device(device_id: str, body: DeviceRequest, user: dict = Depends(_owner)):
+    _require_durable()
+    if not devices.rename(user["sub"], device_id, body.label):
+        raise HTTPException(404, "No such device")
+    audit.log(user["sub"], "device.rename", 200, tier=user.get("tier"), resource_id=device_id)
+    return {"id": device_id, "label": " ".join(body.label.split())[:40]}
+
+
+class ReportRequest(BaseModel):
+    fw: str = Field(default="", max_length=40)
+
+
+@router.post("/{device_id}/report")
+async def report_device(device_id: str, body: ReportRequest, user: dict = Depends(_owner)):
+    """The signed-in member's computer speaks for a Pocket on its USB cable: it is present, and this is its firmware."""
+    _require_durable()
+    rate_limit.apply_limit(f"device-report:{user['sub']}", 3600, 120, "device report")
+    if not devices.report(user["sub"], device_id, body.fw):
+        raise HTTPException(404, "No such device")
+    return {"id": device_id, "ok": True}
+
+
 @router.delete("/{device_id}")
 async def revoke_device(device_id: str, user: dict = Depends(_owner)):
     _require_durable()

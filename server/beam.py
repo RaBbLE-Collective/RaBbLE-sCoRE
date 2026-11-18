@@ -59,6 +59,7 @@ import groqmeter
 import guests
 import llm
 import node
+import devices
 import pocket_store
 import translate
 import usage
@@ -397,6 +398,11 @@ class BeamSession:
             self.device = str(msg.get("device", "unknown"))[:40]
             logger.info("beam hello device=%s fw=%s proto=%s user=%s",
                         self.device, msg.get("fw"), msg.get("proto"), self.user["sub"])
+            if self.user.get("device_id") and msg.get("fw"):   # a paired Pocket: remember which firmware it runs
+                try:
+                    devices.note_firmware(self.user["device_id"], msg.get("fw"))
+                except Exception as exc:
+                    logger.warning("could not record firmware version: %s", exc)
             # time: UTC seconds (tools.server_time), so the device sets its clock on every
             # connect; it adds half the round trip.
             await self.send({"type": "ready", "name": "sCoRE", "time": server_time()["time"]})
