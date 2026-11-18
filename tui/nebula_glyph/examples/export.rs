@@ -1,9 +1,9 @@
-//! `cargo run --release --offline -p rabble-face --example export -- micro|mini|COLSxROWS [safe] [aspect=H/W] [label=TEXT]`: the mark as truecolor
+//! `cargo run --release --offline -p nebula_glyph --example export -- micro|mini|COLSxROWS [safe] [aspect=H/W] [label=TEXT]`: the mark as truecolor
 //! ANSI on stdout with the terminal's own background, for surfaces outside the TUI (the fastfetch logo reads this;
 //! RaBbLE-OS spells/fastfetch-face.sh). Gaze centred, eyes open. `safe` = quadrant glyphs for fonts without octants.
 //! `aspect=` is the terminal cell's height over width (default 2.0; Mark's kitty is about 2.3), which makes the full face's sphere round.
 //! `label=TEXT` adds a blank row and TEXT centred beneath the mark, coloured cyan, violet, pink, magenta along its length.
-use rabble_face::{ansi, micro, Detail, Expr, Face, FacePalette};
+use nebula_glyph::{ansi, micro, Detail, Expr, Face, FacePalette};
 use rabble_theme::Palette;
 
 fn main() {

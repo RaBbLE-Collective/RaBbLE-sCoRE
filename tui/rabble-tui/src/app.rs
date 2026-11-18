@@ -15,7 +15,7 @@ use std::{
 
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use rabble_proto::{Decision, Down, Frame, LimitStatus, OrganStatus, SessionInfo, Snapshot, TurnOrigin, Up};
-use rabble_face::{provider_of, FacePalette, Mood};
+use nebula_glyph::{provider_of, FacePalette, Beat};
 use ratatui::{layout::Rect, Frame as TermFrame};
 
 use crate::{
@@ -172,7 +172,7 @@ pub struct App {
     pub face: Option<FaceHub>,
     streaming: bool,
     busy: HashSet<String>,
-    flash: Option<(Mood, Instant)>,
+    flash: Option<(Beat, Instant)>,
     local: bool,
     gz: gaze::Steer,
 }
@@ -346,26 +346,26 @@ impl App {
     }
 
     // ---- the face -----------------------------------------------------------------------------
-    fn flash(&mut self, m: Mood) {
+    fn flash(&mut self, m: Beat) {
         self.flash = Some((m, Instant::now() + FLASH));
         self.gz.glance = Some(Instant::now() + gaze::GLANCE_HOLD);
     }
 
     /// Python `_mood()`: a flash, else streaming, else something running, else typing, else idle.
-    fn derive_mood(&self, now: Instant) -> Mood {
+    fn derive_mood(&self, now: Instant) -> Beat {
         if let Some((m, until)) = self.flash {
             if now < until {
                 return m;
             }
         }
         if self.streaming {
-            Mood::Streaming
+            Beat::SPEAKING
         } else if !self.busy.is_empty() {
-            Mood::Working
+            Beat::THINKING
         } else if !self.composer.is_empty() {
-            Mood::Typing
+            Beat::LISTENING
         } else {
-            Mood::Idle
+            Beat::IDLE
         }
     }
 
@@ -381,7 +381,7 @@ impl App {
         let mood = self.derive_mood(now);
         if let Some(f) = &mut self.face {
             f.set_provider(provider);
-            f.set_mood(mood, now);
+            f.set_beat(mood, now);
         }
     }
 
@@ -618,7 +618,7 @@ impl App {
             (Down::Error { .. }, Some(s)) if self.session.as_deref() != Some(s.as_str()) => return, // another session's trouble
             (Down::Error { text }, _) => {
                 self.streaming = false;
-                self.flash(Mood::Error);
+                self.flash(Beat::ERROR);
                 self.t.end_turn();
                 self.notice(text, true);
                 return;
@@ -901,7 +901,7 @@ impl App {
         let (id, decision) = (p.ask.id.clone(), r.decision.clone());
         self.to_session("answer", |s| Up::Answer { session: s, ask_id: id, decision: r.decision, reason: r.reason, answers: r.answers });
         if decision == Decision::Deny {
-            self.flash(Mood::Denied);
+            self.flash(Beat::DENIED);
             self.notice(&format!("denied {}", p.ask.tool), true);
         }
         self.next_ask();
@@ -2467,8 +2467,8 @@ mod tests {
         say(a, "/face");
         a.face.as_mut().unwrap().full.as_mut().unwrap().set_cell_aspect(2.0);
     }
-    fn mood(a: &App) -> Mood {
-        a.face.as_ref().unwrap().mood()
+    fn mood(a: &App) -> Beat {
+        a.face.as_ref().unwrap().beat()
     }
     fn paint_face(a: &mut App, w: u16, h: u16) -> ratatui::buffer::Buffer {
         let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
@@ -2542,10 +2542,10 @@ mod tests {
         let (mut a, _rx) = face_app();
         ev(&mut a, r#"{"type":"TextDelta","organ":"rabble","text":"hi"}"#);
         ev(&mut a, r#"{"type":"ToolCall","organ":"rabble","id":"t1","name":"Bash","input":{"command":"ls"}}"#);
-        assert_eq!(mood(&a), Mood::Working);
+        assert_eq!(mood(&a), Beat::THINKING);
         say(&mut a, "/clear");
         assert!(!a.streaming && a.busy.is_empty());
-        assert_eq!(mood(&a), Mood::Idle, "a fresh session does not inherit the old one's work");
+        assert_eq!(mood(&a), Beat::IDLE, "a fresh session does not inherit the old one's work");
     }
 
     #[test]
@@ -2649,26 +2649,26 @@ mod tests {
     #[test]
     fn mood_follows_the_events_the_python_widget_reacts_to() {
         let (mut a, _rx) = face_app();
-        assert_eq!(mood(&a), Mood::Idle);
+        assert_eq!(mood(&a), Beat::IDLE);
         ev(&mut a, r#"{"type":"TextDelta","organ":"rabble","text":"hi"}"#);
-        assert_eq!(mood(&a), Mood::Streaming);
+        assert_eq!(mood(&a), Beat::SPEAKING);
         ev(&mut a, r#"{"type":"ToolCall","organ":"rabble","id":"t1","name":"Bash","input":{"command":"ls"}}"#);
-        assert_eq!(mood(&a), Mood::Working);
+        assert_eq!(mood(&a), Beat::THINKING);
         ev(&mut a, r#"{"type":"ToolResult","organ":"rabble","id":"t1","ok":true,"summary":"ok"}"#);
-        assert_eq!(mood(&a), Mood::Idle);
+        assert_eq!(mood(&a), Beat::IDLE);
         type_in(&mut a, "hel");
-        assert_eq!(mood(&a), Mood::Typing);
+        assert_eq!(mood(&a), Beat::LISTENING);
         ev(&mut a, r#"{"type":"Error","text":"boom"}"#);
-        assert_eq!(mood(&a), Mood::Error, "an error flashes");
-        a.flash = Some((Mood::Error, Instant::now() - Duration::from_millis(1)));
+        assert_eq!(mood(&a), Beat::ERROR, "an error flashes");
+        a.flash = Some((Beat::ERROR, Instant::now() - Duration::from_millis(1)));
         a.sync_face();
-        assert_eq!(mood(&a), Mood::Typing, "and the flash ends");
+        assert_eq!(mood(&a), Beat::LISTENING, "and the flash ends");
         ev(&mut a, r#"{"type":"OrganStarted","organ":"gobble","tool_use_id":"u","task_id":"k","brief":"x"}"#);
         a.composer.set_text("");
         a.sync_face();
-        assert_eq!(mood(&a), Mood::Working);
+        assert_eq!(mood(&a), Beat::THINKING);
         ev(&mut a, r#"{"type":"TurnDone","stop_reason":"end_turn","origin":"observer"}"#);
-        assert_eq!(mood(&a), Mood::Idle, "an observer turn ending clears what was running");
+        assert_eq!(mood(&a), Beat::IDLE, "an observer turn ending clears what was running");
     }
 
     #[test]
@@ -2676,16 +2676,16 @@ mod tests {
         let (mut a, _rx) = face_app();
         ev(&mut a, &ask("a1"));
         a.on_input(key(KeyCode::Esc));
-        assert_eq!(mood(&a), Mood::Denied);
+        assert_eq!(mood(&a), Beat::DENIED);
     }
 
     #[test]
     fn the_providers_tint_follows_the_model_and_the_entropy_signal_reaches_the_face() {
         let (mut a, _rx) = face_app();
         let tint = |a: &App| a.face.as_ref().unwrap().mini_provider_for_test();
-        assert_eq!(tint(&a), Some(rabble_face::Provider::Anthropic), "no model named = Claude Code's own default");
+        assert_eq!(tint(&a), Some(nebula_glyph::Provider::Anthropic), "no model named = Claude Code's own default");
         ev(&mut a, r#"{"type":"ModelUsed","model":"gemini-3-pro"}"#);
-        assert_eq!(tint(&a), Some(rabble_face::Provider::Google));
+        assert_eq!(tint(&a), Some(nebula_glyph::Provider::Google));
         ev(&mut a, r#"{"type":"EntropyChanged","score":0.4,"band":"NOMINAL","trust":"standard","base":35,"stability":40,"local":true}"#);
         assert_eq!(tint(&a), None, "a local model has no provider");
         assert!(a.face.as_ref().unwrap().mini_noise_for_test() > 0.3, "capability 35 is grainy");
@@ -2953,7 +2953,7 @@ mod tests {
         let (mut b, _rx) = face_app();
         screen(&mut b, 100, 40);
         b.gz.typed_at = None;
-        b.flash(Mood::Error);
+        b.flash(Beat::ERROR);
         b.tick_face(Instant::now() + Duration::from_millis(50));
         assert_eq!(b.gz.aimed[0], Some((0.0, -1.0)), "a signal turns the eyes up");
     }

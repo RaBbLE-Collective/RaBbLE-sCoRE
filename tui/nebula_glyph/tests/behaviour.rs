@@ -1,8 +1,8 @@
 //! Python `tests/test_ui_face.py` equivalents that are not golden dumps, plus the frame-rate gates.
 
-use rabble_face::face::{Expr, FacePalette, Provider};
-use rabble_face::face::{EYE_RX, EYE_RY};
-use rabble_face::{Detail, Face, Grid, Life};
+use nebula_glyph::face::{Expr, FacePalette, Provider};
+use nebula_glyph::face::{EYE_RX, EYE_RY};
+use nebula_glyph::{Detail, Face, Grid, Life};
 use rabble_theme::{Palette, Rgb};
 use std::time::Instant;
 

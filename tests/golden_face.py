@@ -1,4 +1,4 @@
-"""Dump the face's golden fixtures for the Rust port (tui/rabble-face/tests/golden.rs).
+"""Dump the face's golden fixtures for the Rust port (tui/nebula_glyph/tests/golden.rs).
 
     python tests/golden_face.py            # writes tests/fixtures/face/golden.json
 

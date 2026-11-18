@@ -3,6 +3,8 @@
 
 use crate::degrade::{break_level, eye_block, noise_level, DegradeState};
 use crate::face::{blend_pose, Expr, Pose};
+use crate::moves::{self, Move};
+use crate::vocab::{Beat, Mood, INSIGHT_SECONDS, PONDER_SECONDS};
 use crate::prng::SplitMix64;
 
 pub const FPS: f64 = 20.0; // mini mark
@@ -80,47 +82,6 @@ impl Life {
     }
 }
 
-/// Engine state -> (expression, saccade speed).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Mood {
-    Idle,
-    Typing,
-    Streaming,
-    Working,
-    Error,
-    Denied,
-}
-
-impl Mood {
-    pub const ALL: [Mood; 6] = [Mood::Idle, Mood::Typing, Mood::Streaming, Mood::Working, Mood::Error, Mood::Denied];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Mood::Idle => "idle",
-            Mood::Typing => "typing",
-            Mood::Streaming => "streaming",
-            Mood::Working => "working",
-            Mood::Error => "error",
-            Mood::Denied => "denied",
-        }
-    }
-
-    pub fn from_name(n: &str) -> Mood {
-        Mood::ALL.into_iter().find(|m| m.name() == n).unwrap_or(Mood::Idle)
-    }
-
-    pub fn info(self) -> (Expr, f64) {
-        match self {
-            Mood::Idle => (Expr::Calm, 1.0),
-            Mood::Typing => (Expr::Listening, 1.0),
-            Mood::Streaming => (Expr::Speaking, 1.0),
-            Mood::Working => (Expr::Calm, 2.5),
-            Mood::Error => (Expr::Sad, 1.0),
-            Mood::Denied => (Expr::Angry, 1.0),
-        }
-    }
-}
-
 /// What the widget keeps between ticks: life, the eased pose, the signal (noise/breaking) and the glitch state.
 pub struct Driver {
     pub life: Life,
@@ -134,6 +95,17 @@ pub struct Driver {
     pub rng: SplitMix64,
     pub glitch: DegradeState,
     last: Option<f64>,
+    /// The state or cue in force, and when it began (drives `thinking`'s ponder -> process).
+    beat: Beat,
+    beat_at: f64,
+    /// An `insight` peak in progress, until this time.
+    insight_until: Option<f64>,
+    /// Portals exchanged (form `swap`, 1010): a swap move toggles it.
+    swapped: bool,
+    /// The move in progress and when it began.
+    run: Option<(Move, f64)>,
+    /// The move's frame (move, progress) as of the last tick.
+    frame: Option<(Move, f64)>,
 }
 
 impl Default for Driver {
@@ -156,6 +128,12 @@ impl Driver {
             rng: SplitMix64::new(11),
             glitch: DegradeState::default(),
             last: None,
+            beat: Beat::IDLE,
+            beat_at: 0.0,
+            insight_until: None,
+            swapped: false,
+            run: None,
+            frame: None,
         }
     }
 
@@ -177,19 +155,61 @@ impl Driver {
         self.life.set_gaze(target, ttl.map_or(f64::INFINITY, |s| t + s));
     }
 
-    pub fn set_mood(&mut self, mood: Mood, now: f64) {
-        let (expr, speed) = mood.info();
-        self.life.speed = speed;
+    /// Take a state or a cue (canonical names; private names go through `Beat::parse`).
+    pub fn set_beat(&mut self, beat: Beat, now: f64) {
+        let (expr, _) = beat.info();
+        if beat != self.beat {
+            self.beat = beat;
+            self.beat_at = now;
+        }
         self.revert_at = None;
-        if mood == Mood::Denied {
+        if beat == Beat::DENIED {
             self.revert_at = Some(now + DENIED_SECONDS);
         }
+        self.life.speed = self.mood_at(now).speed();
         if expr != self.to_expr {
-            self.from_pose = self.pose();
+            self.from_pose = blend_pose(&self.from_pose, &self.to_expr.pose(), self.blend);
             self.from_expr = self.expr();
             self.to_expr = expr;
             self.blend = 0.0;
         }
+    }
+
+    /// The mood in force: an `insight` peak, else `thinking`'s ponder then process, else process only while
+    /// thinking, else the idle rate (reported as `ponder`, speed 1.0).
+    pub fn mood_at(&self, now: f64) -> Mood {
+        if self.insight_until.is_some_and(|u| now < u) {
+            Mood::Insight
+        } else if self.beat == Beat::THINKING && now - self.beat_at >= PONDER_SECONDS {
+            Mood::Process
+        } else {
+            Mood::Ponder
+        }
+    }
+
+    /// A brief peak of insight: quicker saccades for `INSIGHT_SECONDS`, then the state's own mood.
+    pub fn insight(&mut self, now: f64) {
+        self.insight_until = Some(now + INSIGHT_SECONDS);
+        self.life.speed = Mood::Insight.speed();
+    }
+
+    pub fn beat(&self) -> Beat {
+        self.beat
+    }
+
+    /// Start a reduced move (portal swap, turn or boot). A swap toggles the form when it ends.
+    pub fn play(&mut self, mv: Move, now: f64) {
+        self.run = Some((mv, now));
+        self.frame = Some((mv, 0.0));
+    }
+
+    pub fn swapped(&self) -> bool {
+        self.swapped
+    }
+
+    /// The move on screen and its (8 Hz stepped) progress, if one is playing.
+    pub fn move_frame(&self) -> Option<(Move, f64)> {
+        self.frame
     }
 
     pub fn target_expr(&self) -> Expr {
@@ -200,8 +220,19 @@ impl Driver {
         self.blend
     }
 
+    /// The eased expression pose with the form (`swapped`) but no move on top.
+    fn base_pose(&self) -> Pose {
+        let p = blend_pose(&self.from_pose, &self.to_expr.pose(), self.blend);
+        if self.swapped { moves::mirror(&p) } else { p }
+    }
+
+    /// The pose to draw: the expression, the form, and the move's frame on top.
     pub fn pose(&self) -> Pose {
-        blend_pose(&self.from_pose, &self.to_expr.pose(), self.blend)
+        let p = self.base_pose();
+        match self.frame {
+            Some((mv, pr)) => moves::pose_at(mv, &p, pr),
+            None => p,
+        }
     }
 
     /// The expression whose lid the frame uses: the target once the blend passes half way.
@@ -209,14 +240,35 @@ impl Driver {
         if self.blend > 0.5 { self.to_expr } else { self.from_expr }
     }
 
+    fn advance_move(&mut self, now: f64) {
+        let Some((mv, t0)) = self.run else { return };
+        let el = now - t0;
+        if el >= mv.seconds() {
+            // done: a swap leaves the portals exchanged
+            if mv == Move::PortalSwap {
+                // the base pose must not jump: re-anchor the eased pose on the mirror, then flip the form
+                self.swapped = !self.swapped;
+            }
+            self.run = None;
+            self.frame = None;
+        } else {
+            self.frame = Some((mv, mv.progress(el)));
+        }
+    }
+
     /// Advance to `now` (seconds on the caller's clock; `t` is seconds since the face started).
     /// -> (t, blink, gaze).
     pub fn tick(&mut self, now: f64, t: f64) -> (f64, (f64, f64)) {
         if let Some(at) = self.revert_at {
             if now >= at {
-                self.set_mood(Mood::Idle, now);
+                self.set_beat(Beat::IDLE, now);
             }
         }
+        if self.insight_until.is_some_and(|u| now >= u) {
+            self.insight_until = None;
+        }
+        self.life.speed = self.mood_at(now).speed();
+        self.advance_move(now);
         let dt = now - self.last.unwrap_or(now);
         self.last = Some(now);
         self.blend += (1.0 - self.blend) * (dt * SPRING).min(1.0);

@@ -1,5 +1,5 @@
-//! `cargo run --release --offline -p rabble-face --example bench`: per-layer cost at several sizes.
-use rabble_face::{Detail, Face, FacePalette};
+//! `cargo run --release --offline -p nebula_glyph --example bench`: per-layer cost at several sizes.
+use nebula_glyph::{Detail, Face, FacePalette};
 use rabble_theme::Palette;
 use std::time::Instant;
 

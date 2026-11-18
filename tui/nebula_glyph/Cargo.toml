@@ -1,5 +1,5 @@
 [package]
-name = "rabble-face"
+name = "nebula_glyph"
 version.workspace = true
 edition.workspace = true
 license-file.workspace = true

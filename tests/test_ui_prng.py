@@ -1,4 +1,4 @@
-"""Known answers for ui/prng.py. The same numbers are asserted by tui/rabble-face/src/prng.rs."""
+"""Known answers for ui/prng.py. The same numbers are asserted by tui/nebula_glyph/src/prng.rs."""
 
 from ui.prng import SplitMix64
 

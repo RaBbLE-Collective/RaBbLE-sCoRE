@@ -1,16 +1,16 @@
 //! The face in the shell: a 24x6 mini mark in the header and, on `/face`, a full face in the transcript.
-//! `rabble-face` does the drawing (pure functions); this file owns the clock, the mood and the paint
+//! `nebula_glyph` does the drawing (pure functions); this file owns the clock, the mood and the paint
 //! into the terminal buffer.
 //!
 //! Cadence: the run loop asks `due()` for the next frame time and calls `tick` only on an iteration that
 //! carried no input, so a key or a wheel notch never waits behind a face frame. A frame is computed
 //! inline (the mark about 0.2 ms, the full face about 1.3 ms at 260x70, see `examples/bench.rs` in
-//! rabble-face) and a paint is requested only when the cells changed.
+//! nebula_glyph) and a paint is requested only when the cells changed.
 
 use std::{sync::Arc, time::{Duration, Instant}};
 
-use rabble_face::{
-    degrade, driver::{BG_FPS, FPS, FULL_FPS}, Detail, Driver, Face, FacePalette, Grid, Layer, Mood, Provider,
+use nebula_glyph::{
+    degrade, driver::{BG_FPS, FPS, FULL_FPS}, Detail, Driver, Face, FacePalette, Grid, Layer, Beat, Move, Provider,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -61,7 +61,7 @@ fn query_cell_aspect() -> f64 {
 /// One face (mini or full) with its clock, eased pose, caches and the latest cells.
 pub struct FaceView {
     detail: Detail,
-    /// The two-row header tier: `rabble_face::micro` draws two eye pills instead of a downscaled face.
+    /// The two-row header tier: `nebula_glyph::micro` draws two eye pills instead of a downscaled face.
     micro: bool,
     pal: FacePalette,
     safe: bool,
@@ -132,8 +132,13 @@ impl FaceView {
         changed
     }
 
-    pub fn set_mood(&mut self, mood: Mood, now: Instant) {
-        self.driver.set_mood(mood, now.saturating_duration_since(self.t0).as_secs_f64());
+    /// Play a reduced glyph move (portal swap, turn or boot) on this face.
+    pub fn play(&mut self, mv: Move, now: Instant) {
+        self.driver.play(mv, now.saturating_duration_since(self.t0).as_secs_f64());
+    }
+
+    pub fn set_beat(&mut self, beat: Beat, now: Instant) {
+        self.driver.set_beat(beat, now.saturating_duration_since(self.t0).as_secs_f64());
     }
 
     /// Look at a normalized target (x, y in -1..1) for `ttl`, or until cleared with `None`; the seeded
@@ -172,7 +177,7 @@ impl FaceView {
         if self.micro {
             let t = now.saturating_duration_since(self.t0).as_secs_f64();
             let (blink, gaze) = self.driver.tick(t, t);
-            let raw = rabble_face::micro::micro(&self.pal, blink, gaze, self.safe);
+            let raw = nebula_glyph::micro::micro(&self.pal, blink, gaze, self.safe);
             let cells = degrade(&raw, self.driver.breaking, &self.pal, &mut self.driver.rng, &mut self.driver.glitch, self.driver.noise);
             self.frames += 1;
             let changed = cells != self.cells;
@@ -248,7 +253,7 @@ pub struct FaceHub {
     pub full: Option<FaceView>,
     pub mini_visible: bool,
     pub full_visible: bool,
-    mood: Mood,
+    beat: Beat,
     provider: Option<Provider>,
     signal: Option<(f64, f64)>,
 }
@@ -257,11 +262,11 @@ impl FaceHub {
     pub fn new(pal: FacePalette, safe: bool, now: Instant) -> FaceHub {
         let mut mini = FaceView::new(pal, Detail::Mini, safe, now);
         mini.fit(24, 6);
-        FaceHub { pal, safe, mini, full: None, mini_visible: false, full_visible: false, mood: Mood::Idle, provider: None, signal: None }
+        FaceHub { pal, safe, mini, full: None, mini_visible: false, full_visible: false, beat: Beat::IDLE, provider: None, signal: None }
     }
 
-    pub fn mood(&self) -> Mood {
-        self.mood
+    pub fn beat(&self) -> Beat {
+        self.beat
     }
 
     pub fn provider(&self) -> Option<Provider> {
@@ -278,12 +283,12 @@ impl FaceHub {
         self.mini.driver.noise
     }
 
-    pub fn set_mood(&mut self, mood: Mood, now: Instant) {
-        if mood != self.mood {
-            self.mood = mood;
-            self.mini.set_mood(mood, now);
+    pub fn set_beat(&mut self, beat: Beat, now: Instant) {
+        if beat != self.beat {
+            self.beat = beat;
+            self.mini.set_beat(beat, now);
             if let Some(f) = &mut self.full {
-                f.set_mood(mood, now);
+                f.set_beat(beat, now);
             }
         }
     }
@@ -325,15 +330,24 @@ impl FaceHub {
         self.signal.is_none() && self.mini.driver.noise == 0.0 && self.mini.driver.breaking == 0.0
     }
 
-    /// `/face`: a full face carrying the current mood, provider and signal.
+    /// `/face`: a full face carrying the current beat, provider and signal.
     pub fn show_full(&mut self, now: Instant) {
         let mut f = FaceView::new(self.pal, Detail::Full, self.safe, now);
         f.set_provider(self.provider);
         if let Some((c, s)) = self.signal {
             f.set_signal(c, s);
         }
-        f.set_mood(self.mood, now);
+        f.set_beat(self.beat, now);
+        f.play(Move::Boot, now); // reduced boot: portals first, then eyes
         self.full = Some(f);
+    }
+
+    /// Play a glyph move on every face on screen (the micro mark has no portals to move and ignores it).
+    pub fn play(&mut self, mv: Move, now: Instant) {
+        self.mini.play(mv, now);
+        if let Some(f) = &mut self.full {
+            f.play(mv, now);
+        }
     }
 
     pub fn hide_full(&mut self) {
@@ -416,10 +430,10 @@ mod tests {
         let t0 = Instant::now();
         let mut h = hub(t0);
         h.show_full(t0);
-        h.set_mood(Mood::Error, t0);
+        h.set_beat(Beat::ERROR, t0);
         h.set_provider(Some(Provider::Google));
         h.set_signal(40.0, 95.0);
-        assert_eq!(h.mood(), Mood::Error);
+        assert_eq!(h.beat(), Beat::ERROR);
         assert_eq!(h.mini.driver.target_expr().name(), "sad");
         assert_eq!(h.full.as_ref().unwrap().driver.target_expr().name(), "sad");
         assert_eq!(h.full.as_ref().unwrap().provider, Some(Provider::Google));

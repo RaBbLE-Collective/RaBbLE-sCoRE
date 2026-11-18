@@ -30,7 +30,7 @@ def test_constants_match_rust():
     for name, val in (("FACE_COMPACT_SLOT_WIDTH", hdr.FACE_COMPACT_SLOT_WIDTH), ("FACE_COMPACT_ROWS", hdr.FACE_COMPACT_ROWS),
                       ("FACE_SLOT_WIDTH", hdr.FACE_SLOT_WIDTH), ("FACE_ROWS", hdr.FACE_ROWS)):
         assert f"pub const {name}: u16 = {val};" in src or (name == "FACE_COMPACT_SLOT_WIDTH" and val == MICRO_COLS
-                                                          and f"pub const {name}: u16 = rabble_face::micro::MICRO_COLS as u16;" in src)
+                                                          and f"pub const {name}: u16 = nebula_glyph::micro::MICRO_COLS as u16;" in src)
     assert f"FACE_COMPACT_MIN_AREA: (u16, u16) = {hdr.FACE_COMPACT_MIN_AREA};" in src
     assert f"FACE_MIN_AREA: (u16, u16) = {hdr.FACE_MIN_AREA};" in src
 
@@ -114,7 +114,7 @@ async def test_compact_reflow_narrower_than_full_and_flow_follows_divider(tmp_pa
         assert app.header.phase != before   # moved on the divider's tick
 
 
-# ── the micro mark (tui/rabble-face/src/micro.rs tests) ──
+# ── the micro mark (tui/nebula_glyph/src/micro.rs tests) ──
 
 from ui.face import micro_cells, micro_pixels  # noqa: E402
 

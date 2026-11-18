@@ -1,6 +1,6 @@
-//! `cargo run --release --offline -p rabble-face --example show -- [mini|COLSxROWS] [expr] [t]`: one frame as
+//! `cargo run --release --offline -p nebula_glyph --example show -- [mini|COLSxROWS] [expr] [t]`: one frame as
 //! truecolor ANSI on stdout (add `plain` as a last argument for glyphs only).
-use rabble_face::{ansi, Detail, Expr, Face, FacePalette};
+use nebula_glyph::{ansi, Detail, Expr, Face, FacePalette};
 use rabble_theme::Palette;
 
 fn main() {

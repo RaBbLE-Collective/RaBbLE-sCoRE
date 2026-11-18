@@ -968,7 +968,7 @@ _MICRO_PILL = {6: (1, 3, 3, 3, 3, 1), 4: (1, 3, 3, 1), 2: (3, 3)}
 
 
 def micro_pixels(blink, gaze):
-    """The micro mark's eye pixels, [y][x] (tui/rabble-face/src/micro.rs `pixels`). blink 0..1 (1 = shut) squashes
+    """The micro mark's eye pixels, [y][x] (tui/nebula_glyph/src/micro.rs `pixels`). blink 0..1 (1 = shut) squashes
     each pill about its middle; gaze x, y in -1..1 slides it inside its slot."""
     gx, gy = max(-1.0, min(1.0, gaze[0])), max(-1.0, min(1.0, gaze[1]))
     dx = int(max(0, min(3, _round_half_away(1.4 + gx * 1.6))))

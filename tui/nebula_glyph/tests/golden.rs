@@ -2,8 +2,8 @@
 //! (written by `tests/golden_face.py`). Glyphs must match exactly; colours within COLOUR_TOL per channel
 //! (float-order differences only), and almost every cell must be exact.
 
-use rabble_face::face::{Expr, Face, FacePalette, Provider, EYE_RX};
-use rabble_face::{blend_pose, break_level, degrade, eye_block, noise_level, provider_of, Cell, DegradeState, Detail, Driver, Grid, Life, Mood, SplitMix64};
+use nebula_glyph::face::{Expr, Face, FacePalette, Provider, EYE_RX};
+use nebula_glyph::{blend_pose, break_level, degrade, eye_block, noise_level, provider_of, Cell, DegradeState, Detail, Beat, Driver, Grid, Life, SplitMix64};
 use rabble_theme::{Palette, Rgb};
 use serde_json::Value;
 use std::sync::OnceLock;
@@ -104,7 +104,7 @@ fn octant_table_matches_unicode() {
     let want: Vec<char> = golden()["octant"].as_str().unwrap().chars().collect();
     assert_eq!(want.len(), 256);
     for (i, w) in want.iter().enumerate() {
-        assert_eq!(rabble_face::canvas::octant_table()[i], *w, "pattern {i:#010b}");
+        assert_eq!(nebula_glyph::canvas::octant_table()[i], *w, "pattern {i:#010b}");
     }
 }
 
@@ -131,7 +131,7 @@ fn provider_of_matches() {
 #[test]
 fn moods_curves_and_blend_match() {
     for (k, v) in golden()["moods"].as_object().unwrap() {
-        let (e, s) = Mood::from_name(k).info();
+        let (e, s) = Beat::from_name(k).info();
         assert_eq!((e.name(), s), (v[0].as_str().unwrap(), v[1].as_f64().unwrap()), "{k}");
     }
     for row in golden()["curves"].as_array().unwrap() {
@@ -266,7 +266,7 @@ fn degrade_matches_python() {
 #[test]
 fn driver_eases_and_denied_reverts() {
     let mut d = Driver::new();
-    d.set_mood(Mood::Error, 0.0);
+    d.set_beat(Beat::ERROR, 0.0);
     assert_eq!(d.target_expr(), Expr::Sad);
     let mut now = 0.0;
     for _ in 0..30 {
@@ -274,7 +274,7 @@ fn driver_eases_and_denied_reverts() {
         d.tick(now, now);
     }
     assert!(d.blend() > 0.5 && d.expr() == Expr::Sad);
-    d.set_mood(Mood::Denied, now);
+    d.set_beat(Beat::DENIED, now);
     assert_eq!(d.target_expr(), Expr::Angry);
     for _ in 0..90 {
         now += 1.0 / 30.0;

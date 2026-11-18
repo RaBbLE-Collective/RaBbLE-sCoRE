@@ -21,6 +21,12 @@ pub const AURA_POLES: f64 = 0.08;
 pub const AURA_RING: f64 = 0.16;
 pub const ORB_R: f64 = 440.0;
 pub const PROVIDER_MUTE: f64 = 0.35;
+// reduced infinity mark (registry effect `infinity`, terminal reduced: one stream, no under-glow, static).
+// Stream 1 of the registry: rho_1 1.06, dash 16 / gap 10 face units, alpha_1 1. The half-width is rho_1 times the
+// span from the middle to a portal's far edge (EYE_X + POR_RX), a seed: the registry gives no unit for rho.
+pub const INF_RHO: f64 = 1.06;
+pub const INF_DASH: f64 = 16.0;
+pub const INF_GAP: f64 = 10.0;
 
 /// One part's transform in an expression.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -288,6 +294,8 @@ pub struct Face {
     aura_k: f64,
     lids: bool,
     pub rim_w: f64,
+    /// Draw the reduced infinity mark behind the eyes (full face only; off by default).
+    pub infinity: bool,
     halo: f64,
     edge: f64,
     /// Eye resolution step: 1 fine, 2 coarse, 3 chunky.
@@ -336,6 +344,7 @@ impl Face {
             aura_k: if full { 1.0 } else { 0.0 },
             lids: !full,
             rim_w: 1.0,
+            infinity: false,
             halo: if full { 0.6 } else { 0.45 },
             edge: if full { 0.8 } else { 0.55 },
             block: 1,
@@ -528,6 +537,7 @@ impl Face {
             self.mesh_draw(&mut cv, t);
         }
         self.orb(&mut cv, t);
+        self.infinity_mark(&mut cv);
         cv.cells()
     }
 
@@ -620,6 +630,7 @@ impl Face {
             self.mesh_draw(&mut cv, t);
         }
         self.orb(&mut cv, t);
+        self.infinity_mark(&mut cv);
         let cells = eyes::paint(&cv.bg, &rig, &self.pal.eyes(), &self.paint_opts(true, if self.octant { 1.0 } else { 2.0 }, lid));
         cv.over.extend(cells);
         cv.cells()
@@ -663,6 +674,31 @@ impl Face {
             let side_col = if self.nodes[i].2 < 0 { p.cyan } else { p.magenta };
             let twinkle = 0.5 + 0.5 * (t * 2.3 + i as f64 * 1.7).sin();
             cv.px(x, y, mix(side_col, p.text, 0.25 + 0.5 * twinkle));
+        }
+    }
+
+    /// The reduced infinity mark: one dashed lemniscate through the middle, static. The mini and micro marks
+    /// have no room for it (a 6-row face has about 12 pixel rows for a 272-unit eye), so `infinity` is
+    /// ignored there.
+    fn infinity_mark(&self, cv: &mut Canvas) {
+        if !self.infinity || self.detail != Detail::Full {
+            return;
+        }
+        let a = INF_RHO * (EYE_X + POR_RX) * self.k;
+        let period = (INF_DASH + INF_GAP) * self.k;
+        let steps = (a * 8.0).max(64.0) as usize;
+        let (mut prev, mut run) = (None::<(f64, f64)>, 0.0);
+        for i in 0..=steps {
+            let th = TAU * i as f64 / steps as f64;
+            let d = 1.0 + th.sin().powi(2);
+            let (x, y) = (self.cx + a * th.cos() / d, self.cy + a * th.sin() * th.cos() / d / self.ay);
+            if let Some((px, py)) = prev {
+                run += (x - px).hypot((y - py) * self.ay);
+                if run % period < INF_DASH * self.k {
+                    cv.dot(x, y, mix(self.side(x), self.pal.text, 0.15), 0.5);
+                }
+            }
+            prev = Some((x, y));
         }
     }
 

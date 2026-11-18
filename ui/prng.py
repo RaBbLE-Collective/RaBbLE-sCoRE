@@ -2,7 +2,7 @@
 
 Python's `random.Random` (Mersenne Twister) cannot be reproduced in Rust without re-implementing its
 `random()/uniform/choice/sample`, so the face's decorative randomness (mesh layout, orb dust, glitch, blink
-and gaze) uses this instead, in both bodies: `tui/rabble-face/src/prng.rs` is the same algorithm and the
+and gaze) uses this instead, in both bodies: `tui/nebula_glyph/src/prng.rs` is the same algorithm and the
 same helper definitions, pinned by one known-answer test on each side (tests/test_ui_face.py and the Rust
 `prng::tests`). Keep the two in step; every helper is defined here in terms of `next_u64()` only.
 """

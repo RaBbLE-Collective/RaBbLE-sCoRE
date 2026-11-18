@@ -261,6 +261,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nebula_glyph"
+version = "0.0.0"
+dependencies = [
+ "rabble-theme",
+ "serde_json",
+]
+
+[[package]]
 name = "parking_lot"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -306,14 +314,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rabble-face"
-version = "0.0.0"
-dependencies = [
- "rabble-theme",
- "serde_json",
-]
-
-[[package]]
 name = "rabble-proto"
 version = "0.0.0"
 dependencies = [
@@ -330,7 +330,7 @@ name = "rabble-tui"
 version = "0.0.0"
 dependencies = [
  "crossterm",
- "rabble-face",
+ "nebula_glyph",
  "rabble-proto",
  "rabble-theme",
  "ratatui",
