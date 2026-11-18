@@ -59,8 +59,10 @@ def test_create_list_revoke(env):
     assert set(d) == {"id", "label", "key", "created_at"} and d["key"].startswith("rbdv_") and d["label"] == "Desk Pocket"
     listed = env.get("/api/v1/devices", headers=h).json()["devices"]
     assert len(listed) == 1 and "key" not in listed[0]
-    assert set(listed[0]) == {"id", "label", "created_at", "last_seen", "revoked", "fw", "fw_seen"} and listed[0]["revoked"] is False
+    assert set(listed[0]) == {"id", "label", "created_at", "last_seen", "revoked", "fw", "fw_seen", "fp"} and listed[0]["revoked"] is False
     assert listed[0]["fw"] == ""
+    import hashlib
+    assert listed[0]["fp"] == hashlib.sha256(d["key"].encode()).hexdigest()[:12]   # what the Pocket's status key_fp shows
     assert env.delete(f"/api/v1/devices/{d['id']}", headers=h).status_code == 200
     listed = env.get("/api/v1/devices", headers=h).json()["devices"]
     assert listed == []                                           # revoked Pockets are deleted, not listed
@@ -325,3 +327,14 @@ def test_firmware_version_is_kept_per_device(store):
     assert devices.list_for(a["user_id"])[0]["fw"].startswith("0.1.3-dev.abc1234") and len(devices.list_for(a["user_id"])[0]["fw"]) <= 40
     devices.note_firmware(d["id"], "")                                              # an empty report changes nothing
     assert devices.list_for(a["user_id"])[0]["fw"].startswith("0.1.3-dev")
+
+
+def test_report_from_the_members_computer(env):
+    h = member(env)
+    d = mint(env, h, "Desk Pocket").json()
+    r = env.post(f"/api/v1/devices/{d['id']}/report", json={"fw": "0.1.2"}, headers=h)
+    assert r.status_code == 200
+    row = env.get("/api/v1/devices", headers=h).json()["devices"][0]
+    assert row["fw"] == "0.1.2" and row["last_seen"]
+    assert env.post("/api/v1/devices/nope/report", json={"fw": "1"}, headers=h).status_code == 404
+    assert env.post(f"/api/v1/devices/{d['id']}/report", json={"fw": "1"}).status_code == 401   # no session

@@ -46,7 +46,10 @@ def _now() -> str:
 def _public(row: dict) -> dict:
     return {"id": row["id"], "label": row["label"], "created_at": row["created_at"],
             "last_seen": row["last_seen"], "revoked": bool(row["revoked"]),
-            "fw": row.get("fw", "") if hasattr(row, "get") else "", "fw_seen": row.get("fw_seen", "") if hasattr(row, "get") else ""}
+            "fw": row.get("fw", "") if hasattr(row, "get") else "", "fw_seen": row.get("fw_seen", "") if hasattr(row, "get") else "",
+            # the first 12 hex characters of sha256(key), which the Pocket reports in `status` as key_fp: the companion matches the
+            # two to confirm the key a Pocket holds is a live key of this account, with no Wi-Fi and without seeing the key
+            "fp": str(row["key_hash"])[:12]}
 
 
 def is_exempt(user_id: str) -> bool:
@@ -82,6 +85,17 @@ def note_firmware(device_id: str, fw: str) -> None:
     if not fw:
         return
     db.execute("UPDATE devices SET fw = ?, fw_seen = ? WHERE id = ? AND revoked = 0", (fw, _now(), device_id))
+
+
+def report(user_id: str, device_id: str, fw: str) -> bool:
+    """The member's computer reports a Pocket it can reach over USB (its firmware version): the same bookkeeping a beam hello does,
+    for a Pocket that cannot reach sCoRE itself. False if the device is not this member's (or is gone)."""
+    row = db.query_one("SELECT id FROM devices WHERE id = ? AND user_id = ? AND revoked = 0", (device_id, user_id))
+    if not row:
+        return False
+    note_firmware(device_id, fw)
+    db.execute("UPDATE devices SET last_seen = ? WHERE id = ?", (_now(), device_id))
+    return True
 
 
 def revoke(user_id: str, device_id: str) -> bool:
