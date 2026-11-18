@@ -90,10 +90,45 @@ def test_member_note_and_conversation_persist(env):
     full = env.get(f"/api/v1/pocket/notes/{n['id']}", headers=h).json()
     assert set(full) == {"id", "title", "source", "created", "device", "ts", "md"} and full["md"].startswith("---\n")
     convos = env.get("/api/v1/pocket/conversations", headers=h).json()["conversations"]
-    assert len(convos) == 1 and set(convos[0]) == {"id", "device", "started_at", "ended_at", "turns", "preview"}
+    assert len(convos) == 1 and set(convos[0]) == {"id", "device", "started_at", "ended_at", "origin", "turns", "preview"}
     assert convos[0]["turns"] == 2 and convos[0]["preview"] == "what time is it" and convos[0]["ended_at"] is None
     one = env.get(f"/api/v1/pocket/conversations/{convos[0]['id']}", headers=h).json()
     assert [(t["role"], t["text"]) for t in one["turns"]] == [("user", "what time is it"), ("assistant", "Hello there.")]
+
+
+def test_web_and_pocket_share_one_conversation(env, monkeypatch):
+    h = member(env)
+    cid = env.post("/api/v1/pocket/conversations", headers=h).json()["id"]
+    r = env.post("/api/v1/chat", headers=h, json={"messages": [{"role": "user", "content": "from the web"}],
+                                                   "model_tier": "fast", "conversation_id": cid})
+    assert r.status_code == 200
+    one = env.get(f"/api/v1/pocket/conversations/{cid}", headers=h).json()
+    assert one["origin"] == "web" and [t["surface"] for t in one["turns"]] == ["web", "web"]
+    say(env, h, "from the pocket")                      # the Pocket picks up the open conversation
+    one = env.get(f"/api/v1/pocket/conversations/{cid}", headers=h).json()
+    assert one["origin"] == "blended" and len(one["turns"]) == 4
+    assert [c["origin"] for c in env.get("/api/v1/pocket/conversations", headers=h).json()["conversations"]] == ["blended"]
+    # a new web conversation ends the old; resuming the old makes the Pocket carry on from it again
+    cid2 = env.post("/api/v1/pocket/conversations", headers=h).json()["id"]
+    assert cid2 != cid
+    assert env.post(f"/api/v1/pocket/conversations/{cid}/resume", headers=h).json() == {"ok": True, "id": cid}
+    say(env, h, "back on the pocket", turn=2)
+    assert len(env.get(f"/api/v1/pocket/conversations/{cid}", headers=h).json()["turns"]) == 6
+    # explicit append, and refusals
+    assert env.post(f"/api/v1/pocket/conversations/{cid}/turns", headers=h,
+                    json={"turns": [{"role": "user", "text": "hi"}], "surface": "tui"}).status_code == 200
+    assert env.post(f"/api/v1/pocket/conversations/{cid}/turns", headers=h,
+                    json={"turns": [{"role": "user", "text": "hi"}], "surface": "pocket"}).status_code == 422
+    assert env.post("/api/v1/pocket/conversations/nope/resume", headers=h).status_code == 404
+
+
+def test_chat_conversation_id_is_scoped_and_member_only(env):
+    a, b = member(env, "alice"), member(env, "bob")
+    cid = env.post("/api/v1/pocket/conversations", headers=a).json()["id"]
+    body = {"messages": [{"role": "user", "content": "x"}], "model_tier": "fast", "conversation_id": cid}
+    assert env.post("/api/v1/chat", headers=b, json=body).status_code == 404       # bob cannot write into alice's
+    assert env.get(f"/api/v1/pocket/conversations/{cid}", headers=b).status_code == 404
+    assert env.post("/api/v1/chat", headers={}, json=body).status_code in (401, 403)
 
 
 def test_note_upsert_by_id(env):

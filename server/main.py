@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 import auth
 import llm
@@ -25,6 +25,7 @@ import sessions as session_store
 from auth_routes import router as auth_router, member_router
 from accounts_routes import router as accounts_router
 from devices_routes import router as devices_router
+import pocket_store
 from pocket_routes import router as pocket_router
 from usage_routes import router as usage_router
 from beam import router as beam_router
@@ -122,6 +123,8 @@ class ChatRequest(BaseModel):
     messages:      list[dict]
     model_tier:    str = "auto"
     workflow_type: str = "default"
+    # Members only: keep both sides of this turn in that saved conversation (see pocket_routes.py). Optional.
+    conversation_id: str | None = Field(default=None, max_length=64)
 
     @field_validator("model_tier")
     @classmethod
@@ -287,6 +290,16 @@ async def status(request: Request, user: dict = Depends(auth.require_user)):
 
 # ── Chat — streaming ───────────────────────────────────────────────────────────
 
+def _keep_web_turn(user_id: str, cid: str, messages: list[dict], reply: str) -> None:
+    """Save the member's last message and RaBbLE's reply to the conversation. A store failure never breaks the stream."""
+    try:
+        last = next((m for m in reversed(messages) if m.get("role") == "user" and isinstance(m.get("content"), str)), None)
+        if last and last["content"].strip():
+            pocket_store.add_turns(user_id, cid, "web", [("user", last["content"]), ("assistant", reply)])
+    except Exception as exc:
+        logger.warning("chat could not keep the turn: %s", type(exc).__name__)
+
+
 @app.post("/api/v1/chat")
 async def chat(
     req:     ChatRequest,
@@ -307,6 +320,14 @@ async def chat(
     guests.require_turn(user)   # after the per-user limiter: a throttled request spends no guest turn
     usage.check(user, "turn")   # the account's own allowance, before any model is called
 
+    keep_to = None   # the saved conversation this turn is added to, when the caller named one and may keep it
+    if req.conversation_id:
+        if not pocket_store.persists(user):
+            raise HTTPException(403, "Only members keep conversations.")
+        if not pocket_store.owns(user_id, req.conversation_id):
+            raise HTTPException(404, "No such conversation")
+        keep_to = req.conversation_id
+
     user_profile = _load_user_profile(user)
     system_prompt = agents.rabble_system_prompt(wf_type, routed_tier)
     logger.info("chat user=%s tier=%s wf=%s", user_id, routed_tier, wf_type)
@@ -326,6 +347,8 @@ async def chat(
             status = 200
             yield "data: [DONE]\n\n"
             audit.log(user_id=user_id, action="chat", tier=routed_tier, workflow_type=wf_type, status=200)
+            if keep_to and full_response.strip():
+                _keep_web_turn(user_id, keep_to, req.messages, full_response)
             await transcripts.record(
                 messages=chat_messages + [{"role": "assistant", "content": full_response}],
                 tier=routed_tier,
